@@ -989,4 +989,213 @@ class EpubCleanPipelineUnitTest {
         assertEquals(6, mergedBm.paragraphIndex)
         assertEquals(1, afterMerge.first { it.id == "c2" }.chapterIndex)
     }
+
+    @Test
+    fun draftManager_roundTripsPerFileEditStateSnapshotInEditStatesDir() {
+        val tempRoot = java.nio.file.Files.createTempDirectory("epubclean_edit_state_test_").toFile()
+        try {
+            val fileId = "book-sync-01"
+            val target = File(File(tempRoot, "edit_states"), com.example.data.DraftManager.editStateFileName(fileId))
+
+            val snapshot = com.example.data.FileEditStateSnapshot(
+                fileId = fileId,
+                sourceFile = com.example.pipeline.SourceFileInfo(
+                    displayName = "tam_ly_hoc.epub",
+                    sourceUriString = "content://com.android.externalstorage.documents/document/primary%3ADownload%2Ftam_ly_hoc.epub",
+                    resolvedFilePath = "/storage/emulated/0/Download/tam_ly_hoc.epub",
+                    resolvedParentDir = "/storage/emulated/0/Download",
+                    fileType = InputFileType.EPUB,
+                    fileSizeBytes = 123_456L
+                ),
+                metadata = EpubMetadata(
+                    title = "Tâm Lý Học",
+                    creator = "Tác giả A",
+                    identifier = "urn:uuid:sync-1",
+                    language = "vi"
+                ),
+                bookTitle = "Tâm Lý Học",
+                bookAuthor = "Tác giả A",
+                mode = com.example.pipeline.ManualEditorMode.KEEP_CLEANED,
+                chapters = listOf(
+                    com.example.pipeline.ManualChapterContent(
+                        chapterIndex = 0,
+                        fileName = "chapter_0001.xhtml",
+                        title = "Chương 1",
+                        filePath = "",
+                        originalParagraphs = listOf("Cóm ột đoạn văn gốc.", "Đoạn thứ hai nguyên bản."),
+                        currentParagraphs = listOf("Có một đoạn văn đã sửa.", "Đoạn thứ hai đã hiệu đính.")
+                    ),
+                    com.example.pipeline.ManualChapterContent(
+                        chapterIndex = 1,
+                        fileName = "chapter_0002.xhtml",
+                        title = "Chương 2",
+                        filePath = "",
+                        originalParagraphs = listOf("Nội dung chương hai gốc.", "Đoạn đang đọc dở."),
+                        currentParagraphs = listOf("Nội dung chương hai sạch.", "Đoạn đang đọc dở đã sửa.")
+                    )
+                ),
+                tocList = listOf(
+                    com.example.pipeline.EditableTocItem(
+                        id = "toc_1",
+                        title = "Chương 1",
+                        href = "Text/chapter_0001.xhtml",
+                        chapterIndex = 0,
+                        chapterFileName = "chapter_0001.xhtml",
+                        paragraphIndex = 0,
+                        anchorId = null,
+                        isManualBookmark = false
+                    ),
+                    com.example.pipeline.EditableTocItem(
+                        id = "toc_2",
+                        title = "Chương 2",
+                        href = "Text/chapter_0002.xhtml",
+                        chapterIndex = 1,
+                        chapterFileName = "chapter_0002.xhtml",
+                        paragraphIndex = 0,
+                        anchorId = null,
+                        isManualBookmark = false
+                    )
+                ),
+                manualTocEntries = listOf(
+                    com.example.pipeline.ManualTocEntry(
+                        id = "bm_9",
+                        title = "Đánh dấu quan trọng",
+                        chapterIndex = 1,
+                        chapterFileName = "chapter_0002.xhtml",
+                        paragraphIndex = 1,
+                        anchorId = "manual_toc_9"
+                    )
+                ),
+                lastChapterIndex = 1,
+                lastParagraphIndex = 1,
+                savedFileUri = "content://com.android.externalstorage.documents/document/primary%3ADownload%2Ftam_ly_hoc_clean.epub",
+                savedAbsolutePath = "/storage/emulated/0/Download/tam_ly_hoc_clean.epub",
+                regenerateToc = true,
+                manualEditCount = 5,
+                savedAtMillis = 1_700_000_000_000L
+            )
+
+            com.example.data.DraftManager.writeEditStateFile(target, snapshot)
+            assertTrue("Expected edit_states/{fileId}.json to exist", target.exists())
+
+            val loaded = com.example.data.DraftManager.readEditStateFile(target)
+            assertNotNull("Expected snapshot to parse cleanly", loaded)
+            assertEquals(fileId, loaded!!.fileId)
+            assertEquals(1, loaded.lastChapterIndex)
+            assertEquals(1, loaded.lastParagraphIndex)
+            assertEquals(snapshot.savedFileUri, loaded.savedFileUri)
+            assertEquals(snapshot.savedAbsolutePath, loaded.savedAbsolutePath)
+            assertEquals(2, loaded.chapters.size)
+            assertEquals(
+                listOf("Cóm ột đoạn văn gốc.", "Đoạn thứ hai nguyên bản."),
+                loaded.chapters[0].originalParagraphs
+            )
+            assertEquals(
+                listOf("Có một đoạn văn đã sửa.", "Đoạn thứ hai đã hiệu đính."),
+                loaded.chapters[0].currentParagraphs
+            )
+            assertEquals(2, loaded.tocList.size)
+            assertEquals("Chương 2", loaded.tocList[1].title)
+            assertEquals(1, loaded.manualTocEntries.size)
+            assertEquals("manual_toc_9", loaded.manualTocEntries[0].anchorId)
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun historyManager_promotesDraftToSavedAtTopWithoutDuplicates() {
+        val olderSaved = com.example.data.CleanedFileHistory(
+            id = "book-old",
+            fileName = "sach_cu_clean.epub",
+            filePath = "/Download/sach_cu_clean.epub",
+            sourceType = "EPUB",
+            totalFixes = 12,
+            timestampMillis = 2_000L,
+            status = com.example.data.FileRecordStatus.SAVED
+        )
+
+        // 1. Save book-1 as DRAFT at timestamp 1_500L
+        val draftV1 = com.example.data.CleanedFileHistory(
+            id = "book-1",
+            fileName = "truyen_hay.epub",
+            filePath = "",
+            sourceType = "EPUB",
+            totalFixes = 3,
+            timestampMillis = 1_500L,
+            status = com.example.data.FileRecordStatus.DRAFT,
+            lastChapterIndex = 2,
+            totalChapters = 10,
+            lastParagraphIndex = 7,
+            editStateFile = "book-1.json"
+        )
+        val (afterDraft1, _) = com.example.data.HistoryManager.mergeHistoryEntry(
+            current = listOf(olderSaved),
+            incoming = draftV1
+        )
+        assertEquals(2, afterDraft1.size)
+
+        // 2. Update same DRAFT at timestamp 3_000L -> moves to top, still 2 items (no duplicate)
+        val draftV2 = draftV1.copy(
+            timestampMillis = 3_000L,
+            lastChapterIndex = 4,
+            lastParagraphIndex = 12
+        )
+        val (afterDraft2, _) = com.example.data.HistoryManager.mergeHistoryEntry(
+            current = afterDraft1,
+            incoming = draftV2
+        )
+        assertEquals(2, afterDraft2.size)
+        assertEquals("book-1", afterDraft2[0].id)
+        assertEquals(com.example.data.FileRecordStatus.DRAFT, afterDraft2[0].status)
+        assertEquals(4, afterDraft2[0].lastChapterIndex)
+
+        // 3. Export via "Lưu" -> promote same id "book-1" from DRAFT to SAVED at timestamp 5_000L
+        val promotedSaved = draftV2.copy(
+            fileName = "truyen_hay_clean.epub",
+            filePath = "/Download/truyen_hay_clean.epub",
+            uriString = "content://downloads/truyen_hay_clean.epub",
+            totalFixes = 25,
+            timestampMillis = 5_000L,
+            status = com.example.data.FileRecordStatus.SAVED
+        )
+        val (afterSave, removed) = com.example.data.HistoryManager.mergeHistoryEntry(
+            current = afterDraft2,
+            incoming = promotedSaved
+        )
+        assertEquals(2, afterSave.size)
+        assertEquals(1, removed.size)
+        assertEquals("book-1", afterSave[0].id)
+        assertEquals(com.example.data.FileRecordStatus.SAVED, afterSave[0].status)
+        assertEquals(5_000L, afterSave[0].timestampMillis)
+        assertEquals("truyen_hay_clean.epub", afterSave[0].fileName)
+        assertEquals("book-old", afterSave[1].id)
+    }
+
+    @Test
+    fun customReplaceManager_filtersRulesCaseInsensitivelyAcrossBothColumns() {
+        val rules = listOf(
+            com.example.data.CustomReplaceRule(id = "1", findText = "Iàm", replaceText = "làm"),
+            com.example.data.CustomReplaceRule(id = "2", findText = "rnột", replaceText = "một"),
+            com.example.data.CustomReplaceRule(id = "3", findText = "Lý Tiêu", replaceText = "Lý Tiêu Dao")
+        )
+
+        // Blank query returns full list
+        assertEquals(3, com.example.data.CustomReplaceManager.filterRules(rules, "   ").size)
+
+        // Match against "Từ lỗi" column (case-insensitive)
+        val byFind = com.example.data.CustomReplaceManager.filterRules(rules, "RNỘT")
+        assertEquals(listOf("2"), byFind.map { it.id })
+
+        // Match against "Từ đúng" column (case-insensitive)
+        val byReplace = com.example.data.CustomReplaceManager.filterRules(rules, "tiêu dao")
+        assertEquals(listOf("3"), byReplace.map { it.id })
+
+        // Match hitting both columns or multiple rows
+        val byVietnamese = com.example.data.CustomReplaceManager.filterRules(rules, "LÀM")
+        assertEquals(listOf("1"), byVietnamese.map { it.id })
+
+        // No match
+        assertTrue(com.example.data.CustomReplaceManager.filterRules(rules, "không tồn tại").isEmpty())
+    }
 }

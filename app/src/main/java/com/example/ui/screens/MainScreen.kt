@@ -32,7 +32,6 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.FormatColorText
@@ -77,8 +76,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.data.CleanedFileHistory
+import com.example.data.FileRecordStatus
 import com.example.data.HistoryManager
-import com.example.data.SavedDraftSummary
 import com.example.pipeline.CleaningOptions
 import com.example.ui.components.IosFloatingDialog
 import com.example.ui.components.IosPrimaryButton
@@ -98,18 +97,16 @@ import com.example.ui.theme.LocalIsDarkTheme
 @Composable
 fun MainScreen(
     recentFiles: List<CleanedFileHistory>,
-    activeDraft: SavedDraftSummary?,
-    isResumingDraft: Boolean,
+    isOpeningEditor: Boolean,
     hasAllFilesAccess: Boolean,
     cleaningOptions: CleaningOptions,
     isLoadingMetadata: Boolean,
     errorBanner: String?,
     onSelectFileClick: () -> Unit,
-    onResumeDraftClick: () -> Unit,
-    onDiscardDraftClick: () -> Unit,
     onRequestStoragePermission: () -> Unit,
     onOpenSettingsClick: () -> Unit,
     onUpdateCleaningOptions: (CleaningOptions) -> Unit,
+    onContinueEditHistoryFile: (CleanedFileHistory) -> Unit,
     onOpenHistoryFile: (CleanedFileHistory) -> Unit,
     onReprocessHistoryFile: (CleanedFileHistory) -> Unit,
     onLearnErrorsFromHistory: (CleanedFileHistory) -> Unit,
@@ -330,17 +327,6 @@ fun MainScreen(
                 }
             )
 
-            // 2B (Upgrade 1.2): "Tiếp tục sửa dở" Pill Card when an un-exported manual draft exists
-            if (activeDraft != null) {
-                Spacer(modifier = Modifier.height(10.dp))
-                ResumeDraftPillCard(
-                    draft = activeDraft,
-                    isResuming = isResumingDraft,
-                    onResumeClick = onResumeDraftClick,
-                    onDiscardClick = onDiscardDraftClick
-                )
-            }
-
             Spacer(modifier = Modifier.height(12.dp))
 
             // 3. Compact 2-Column 3D Pill Feature Grid (3 rows, 8.dp spacing, 42.dp pill height)
@@ -437,7 +423,7 @@ fun MainScreen(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // 4. "File vừa sửa" Area occupying all remaining screen height with LazyColumn
+            // 4. "Tất cả các file" (Unified Draft + Saved books) occupying remaining height
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -450,14 +436,26 @@ fun MainScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "File vừa sửa",
-                        fontSize = 13.sp,
-                        lineHeight = 17.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Tất cả các file",
+                            fontSize = 13.sp,
+                            lineHeight = 17.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1
+                        )
+                        if (isOpeningEditor) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(13.dp),
+                                strokeWidth = 1.8.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
                     if (recentFiles.isNotEmpty()) {
                         Text(
                             text = "Xóa tất cả",
@@ -530,7 +528,9 @@ fun MainScreen(
                         ) { item ->
                             HistoryFileCard(
                                 item = item,
+                                isBusy = isOpeningEditor,
                                 onClick = { selectedHistoryItem = item },
+                                onContinueEditClick = { onContinueEditHistoryFile(item) },
                                 onLearnErrorsClick = { onLearnErrorsFromHistory(item) },
                                 onOpenClick = { onOpenHistoryFile(item) },
                                 onReprocessClick = { onReprocessHistoryFile(item) },
@@ -543,11 +543,15 @@ fun MainScreen(
         }
     }
 
-    // Quick Action Floating Dialog when tapping a recently cleaned file
+    // Quick Action Floating Dialog when tapping a file card in "Tất cả các file"
     val activeItem = selectedHistoryItem
     if (activeItem != null) {
         HistoryQuickActionDialog(
             item = activeItem,
+            onContinueEditClick = {
+                selectedHistoryItem = null
+                onContinueEditHistoryFile(activeItem)
+            },
             onOpenClick = {
                 selectedHistoryItem = null
                 onOpenHistoryFile(activeItem)
@@ -566,127 +570,6 @@ fun MainScreen(
             },
             onDismiss = { selectedHistoryItem = null }
         )
-    }
-}
-
-/**
- * Compact prominent 3D Pill Card on MainScreen (Upgrade 1.2):
- * "Tiếp tục sửa dở: [Tên sách]" with chapter position, relative time, and X discard button.
- */
-@Composable
-private fun ResumeDraftPillCard(
-    draft: SavedDraftSummary,
-    isResuming: Boolean,
-    onResumeClick: () -> Unit,
-    onDiscardClick: () -> Unit
-) {
-    val isDark = LocalIsDarkTheme.current
-    val pillShape = RoundedCornerShape(50)
-    val timeLabel = remember(draft.savedAtMillis) {
-        HistoryManager.formatRelativeTime(draft.savedAtMillis)
-    }
-
-    val bgBrush = Brush.verticalGradient(
-        colors = if (isDark) {
-            listOf(Color(0xFF3A3123), Color(0xFF2B241A))
-        } else {
-            listOf(Color(0xFFFFF8EC), Color(0xFFF6E8CF))
-        }
-    )
-    val borderBrush = Brush.verticalGradient(
-        colors = if (isDark) {
-            listOf(IosOrange.copy(alpha = 0.48f), IosOrange.copy(alpha = 0.16f))
-        } else {
-            listOf(Color.White.copy(alpha = 0.96f), IosOrange.copy(alpha = 0.36f))
-        }
-    )
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .shadow(
-                elevation = 5.dp,
-                shape = pillShape,
-                ambientColor = Color.Black.copy(alpha = 0.08f),
-                spotColor = Color.Black.copy(alpha = 0.14f)
-            )
-            .clip(pillShape)
-            .background(brush = bgBrush)
-            .border(width = 1.dp, brush = borderBrush, shape = pillShape)
-            .clickable(enabled = !isResuming, onClick = onResumeClick)
-            .testTag("resume_draft_pill_card")
-            .padding(start = 10.dp, end = 8.dp, top = 7.dp, bottom = 7.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(28.dp)
-                    .clip(CircleShape)
-                    .background(IosOrange.copy(alpha = if (isDark) 0.24f else 0.16f)),
-                contentAlignment = Alignment.Center
-            ) {
-                if (isResuming) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(14.dp),
-                        strokeWidth = 1.8.dp,
-                        color = IosOrange
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Rounded.EditNote,
-                        contentDescription = null,
-                        tint = IosOrange,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.width(8.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Tiếp tục sửa dở: ${draft.bookTitle}",
-                    fontSize = 12.sp,
-                    lineHeight = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = "Chương ${draft.chapterIndex + 1}/${draft.totalChapters} • Lưu lúc $timeLabel",
-                    fontSize = 10.sp,
-                    lineHeight = 13.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Spacer(modifier = Modifier.width(6.dp))
-
-            Box(
-                modifier = Modifier
-                    .size(26.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-                    .clickable(enabled = !isResuming, onClick = onDiscardClick)
-                    .testTag("discard_draft_button"),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Close,
-                    contentDescription = "Xóa bản nháp",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(14.dp)
-                )
-            }
-        }
     }
 }
 
@@ -821,15 +704,17 @@ private fun CompactFeature3DPill(
 }
 
 /**
- * Compact history card (`RoundedCornerShape(16.dp)`, `elevation = 3.dp`, `padding = 10.dp`):
- * - Left: EPUB (soft green) / PDF (soft orange) 10.sp Bold badge (`RoundedCornerShape(8.dp)`)
- * - Center: file name (`13.sp` SemiBold, 1 line) + `"Đã sửa N lỗi • HH:mm Hôm nay"` (`11.sp` gray)
- * - Right: `ChevronRight` (`18.dp`)
+ * Unified file card in "Tất cả các file" (`RoundedCornerShape(16.dp)`, `elevation = 3.dp`, `padding = 10.dp`):
+ * - Left: EPUB / PDF 10.sp Bold format badge
+ * - Center: file name (`13.sp` SemiBold, 1 line) + status badge (`Bản nháp` orange / `Đã lưu` green) + subtitle
+ * - Right: 3-dot (`⋮`) menu with unified `Sửa tiếp` as the primary option for both Draft and Saved items.
  */
 @Composable
 private fun HistoryFileCard(
     item: CleanedFileHistory,
+    isBusy: Boolean,
     onClick: () -> Unit,
+    onContinueEditClick: () -> Unit,
     onLearnErrorsClick: () -> Unit,
     onOpenClick: () -> Unit,
     onReprocessClick: () -> Unit,
@@ -838,21 +723,41 @@ private fun HistoryFileCard(
     var menuExpanded by remember { mutableStateOf(false) }
     val isDark = LocalIsDarkTheme.current
     val isPdf = item.sourceType.equals("PDF", ignoreCase = true)
-    val badgeBg = when {
+    val isDraft = item.status == FileRecordStatus.DRAFT
+
+    val formatBadgeBg = when {
         isPdf && isDark -> MaterialTheme.colorScheme.tertiaryContainer
         isPdf -> IosOrangeSoft
         isDark -> MaterialTheme.colorScheme.secondaryContainer
         else -> IosGreenSoft
     }
-    val badgeFg = when {
+    val formatBadgeFg = when {
         isPdf && isDark -> MaterialTheme.colorScheme.tertiary
         isPdf -> IosOrange
         isDark -> MaterialTheme.colorScheme.secondary
         else -> Color(0xFF1A7F37)
     }
 
+    val statusBadgeBg = when {
+        isDraft && isDark -> MaterialTheme.colorScheme.tertiaryContainer
+        isDraft -> IosOrangeSoft
+        isDark -> MaterialTheme.colorScheme.secondaryContainer
+        else -> IosGreenSoft
+    }
+    val statusBadgeFg = when {
+        isDraft && isDark -> MaterialTheme.colorScheme.tertiary
+        isDraft -> IosOrange
+        isDark -> MaterialTheme.colorScheme.secondary
+        else -> Color(0xFF1A7F37)
+    }
+
     val timeLabel = remember(item.timestampMillis) {
         HistoryManager.formatRelativeTime(item.timestampMillis)
+    }
+    val subtitleText = if (isDraft) {
+        "Chương ${item.lastChapterIndex + 1}/${item.totalChapters.coerceAtLeast(1)} • $timeLabel"
+    } else {
+        "Đã sửa ${item.totalFixes} lỗi • $timeLabel"
     }
 
     val cardShape = RoundedCornerShape(16.dp)
@@ -870,15 +775,18 @@ private fun HistoryFileCard(
             .background(MaterialTheme.colorScheme.surface)
             .border(
                 width = 0.8.dp,
-                color = if (isDark) {
+                color = if (isDraft) {
+                    statusBadgeFg.copy(alpha = if (isDark) 0.35f else 0.28f)
+                } else if (isDark) {
                     Color.White.copy(alpha = 0.08f)
                 } else {
                     Color.White.copy(alpha = 0.9f)
                 },
                 shape = cardShape
             )
-            .clickable(onClick = onClick)
+            .clickable(enabled = !isBusy, onClick = onClick)
             .padding(10.dp)
+            .testTag("history_file_card_${item.id}")
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -888,7 +796,7 @@ private fun HistoryFileCard(
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
-                    .background(badgeBg)
+                    .background(formatBadgeBg)
                     .padding(horizontal = 7.dp, vertical = 5.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -897,7 +805,7 @@ private fun HistoryFileCard(
                     fontSize = 10.sp,
                     lineHeight = 12.sp,
                     fontWeight = FontWeight.Bold,
-                    color = badgeFg,
+                    color = formatBadgeFg,
                     maxLines = 1,
                     softWrap = false
                 )
@@ -906,18 +814,43 @@ private fun HistoryFileCard(
             Spacer(modifier = Modifier.width(10.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = item.fileName,
-                    fontSize = 13.sp,
-                    lineHeight = 17.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = item.fileName,
+                        fontSize = 13.sp,
+                        lineHeight = 17.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    // Crisp status pill badge: "Bản nháp" (orange) or "Đã lưu" (green)
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(statusBadgeBg)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                            .testTag("history_status_badge_${item.id}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (isDraft) "Bản nháp" else "Đã lưu",
+                            fontSize = 9.sp,
+                            lineHeight = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = statusBadgeFg,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = "Đã sửa ${item.totalFixes} lỗi • $timeLabel",
+                    text = subtitleText,
                     fontSize = 11.sp,
                     lineHeight = 14.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -928,12 +861,12 @@ private fun HistoryFileCard(
 
             Spacer(modifier = Modifier.width(2.dp))
 
-            // 3-dot overflow menu with "Ghi nhớ lỗi (Lưu vào thư viện)"
+            // 3-dot overflow menu with unified "Sửa tiếp" for BOTH Draft and Saved files
             Box {
                 IconButton(
-                    onClick = { menuExpanded = true },
+                    onClick = { if (!isBusy) menuExpanded = true },
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(36.dp)
                         .testTag("history_item_menu_${item.id}")
                 ) {
                     Icon(
@@ -952,10 +885,33 @@ private fun HistoryFileCard(
                     DropdownMenuItem(
                         text = {
                             Text(
-                                text = "Ghi nhớ lỗi (Lưu vào thư viện)",
+                                text = "Sửa tiếp",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.primary
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.EditNote,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            onContinueEditClick()
+                        },
+                        modifier = Modifier.testTag("history_continue_edit_${item.id}")
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = "Ghi nhớ lỗi (Lưu vào thư viện)",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurface
                             )
                         },
                         leadingIcon = {
@@ -972,48 +928,50 @@ private fun HistoryFileCard(
                         },
                         modifier = Modifier.testTag("history_learn_errors_${item.id}")
                     )
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = "Mở đọc sách",
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Rounded.MenuBook,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(17.dp)
-                            )
-                        },
-                        onClick = {
-                            menuExpanded = false
-                            onOpenClick()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = "Xử lý lại file này",
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Rounded.Refresh,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(17.dp)
-                            )
-                        },
-                        onClick = {
-                            menuExpanded = false
-                            onReprocessClick()
-                        }
-                    )
+                    if (!isDraft) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "Mở đọc sách",
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.MenuBook,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onOpenClick()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "Xử lý lại file này",
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Refresh,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onReprocessClick()
+                            }
+                        )
+                    }
                     DropdownMenuItem(
                         text = {
                             Text(
@@ -1042,20 +1000,35 @@ private fun HistoryFileCard(
 }
 
 /**
- * Floating iOS quick-action dialog opened when tapping a recently cleaned file:
- * shows saved storage path, fix breakdown, and lets user open, learn errors, re-process, or delete.
+ * Floating iOS quick-action dialog opened when tapping a file in "Tất cả các file":
+ * offers unified "Sửa tiếp" for both Draft and Saved items, plus Read/Learn/Reprocess/Delete.
  */
 @Composable
 private fun HistoryQuickActionDialog(
     item: CleanedFileHistory,
+    onContinueEditClick: () -> Unit,
     onOpenClick: () -> Unit,
     onLearnErrorsClick: () -> Unit,
     onReprocessClick: () -> Unit,
     onDeleteClick: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val isDark = LocalIsDarkTheme.current
+    val isDraft = item.status == FileRecordStatus.DRAFT
     val timeLabel = remember(item.timestampMillis) {
         HistoryManager.formatRelativeTime(item.timestampMillis)
+    }
+    val statusBadgeBg = when {
+        isDraft && isDark -> MaterialTheme.colorScheme.tertiaryContainer
+        isDraft -> IosOrangeSoft
+        isDark -> MaterialTheme.colorScheme.secondaryContainer
+        else -> IosGreenSoft
+    }
+    val statusBadgeFg = when {
+        isDraft && isDark -> MaterialTheme.colorScheme.tertiary
+        isDraft -> IosOrange
+        isDark -> MaterialTheme.colorScheme.secondary
+        else -> Color(0xFF1A7F37)
     }
 
     IosFloatingDialog(onDismissRequest = onDismiss) {
@@ -1070,16 +1043,37 @@ private fun HistoryQuickActionDialog(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Chi tiết file đã sửa",
-                    fontSize = 16.sp,
-                    lineHeight = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = if (isDraft) "Bản nháp đang sửa" else "Chi tiết file đã lưu",
+                        fontSize = 16.sp,
+                        lineHeight = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(statusBadgeBg)
+                            .padding(horizontal = 7.dp, vertical = 2.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (isDraft) "Bản nháp" else "Đã lưu",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = statusBadgeFg,
+                            maxLines = 1
+                        )
+                    }
+                }
                 Box(
                     modifier = Modifier
                         .size(30.dp)
@@ -1112,52 +1106,89 @@ private fun HistoryQuickActionDialog(
             Spacer(modifier = Modifier.height(3.dp))
 
             Text(
-                text = "Đã sửa ${item.totalFixes} lỗi • $timeLabel",
+                text = if (isDraft) {
+                    "Đang ở Chương ${item.lastChapterIndex + 1}/${item.totalChapters.coerceAtLeast(1)} • $timeLabel"
+                } else {
+                    "Đã sửa ${item.totalFixes} lỗi • Chương ${item.lastChapterIndex + 1}/${item.totalChapters.coerceAtLeast(1)} • $timeLabel"
+                },
                 fontSize = 11.sp,
                 lineHeight = 15.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            Spacer(modifier = Modifier.height(10.dp))
+            if (!isDraft && item.filePath.isNotBlank()) {
+                Spacer(modifier = Modifier.height(10.dp))
 
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(10.dp)) {
-                    Text(
-                        text = "Đường dẫn lưu",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Text(
-                        text = item.filePath.ifBlank { "Không rõ đường dẫn" },
-                        fontSize = 11.sp,
-                        lineHeight = 15.sp,
-                        fontFamily = JetBrainsMonoFamily,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = "Đường dẫn lưu",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Text(
+                            text = item.filePath,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            fontFamily = JetBrainsMonoFamily,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                 }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
 
+            // Primary unified action: "Sửa tiếp"
             IosPrimaryButton(
-                text = "Mở đọc sách",
+                text = "Sửa tiếp",
                 height = 44.dp,
-                onClick = onOpenClick,
+                onClick = onContinueEditClick,
+                modifier = Modifier.testTag("history_dialog_continue_edit_button"),
                 leadingIcon = {
                     Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.MenuBook,
+                        imageVector = Icons.Rounded.EditNote,
                         contentDescription = null,
                         tint = Color.White,
-                        modifier = Modifier.size(17.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             )
+
+            if (!isDraft) {
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedButton(
+                    onClick = onOpenClick,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(42.dp)
+                        .testTag("history_dialog_open_book_button"),
+                    shape = RoundedCornerShape(50),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.MenuBook,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Mở đọc sách",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1
+                    )
+                }
+            }
 
             Spacer(modifier = Modifier.height(8.dp))
 
@@ -1168,7 +1199,7 @@ private fun HistoryQuickActionDialog(
                     .height(42.dp)
                     .testTag("history_dialog_learn_errors_button"),
                 shape = RoundedCornerShape(50),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Psychology,
@@ -1187,30 +1218,32 @@ private fun HistoryQuickActionDialog(
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            if (!isDraft) {
+                Spacer(modifier = Modifier.height(8.dp))
 
-            OutlinedButton(
-                onClick = onReprocessClick,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(42.dp),
-                shape = RoundedCornerShape(50),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Refresh,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = "Xử lý lại file này",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary,
-                    maxLines = 1
-                )
+                OutlinedButton(
+                    onClick = onReprocessClick,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(42.dp),
+                    shape = RoundedCornerShape(50),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Refresh,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Xử lý lại file này",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(4.dp))

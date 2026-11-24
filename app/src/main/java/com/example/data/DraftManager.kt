@@ -9,72 +9,73 @@ import com.example.pipeline.ManualEditorMode
 import com.example.pipeline.ManualTocEntry
 import com.example.pipeline.PreparedWorkspace
 import com.example.pipeline.SourceFileInfo
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
 
-data class SavedDraftSummary(
-    val bookTitle: String,
-    val fileName: String,
-    val chapterIndex: Int,
-    val totalChapters: Int,
-    val paragraphIndex: Int,
-    val savedAtMillis: Long
-)
-
-data class SavedDraftData(
+/**
+ * Full per-file editing snapshot stored offline in `filesDir/edit_states/{fileId}.json`.
+ * Saved on BOTH "Lưu nháp" and "Lưu" (complete EPUB export) so "Sửa tiếp" can reopen
+ * any Draft or Saved file at the exact chapter & paragraph with original comparison intact.
+ */
+data class FileEditStateSnapshot(
+    val fileId: String,
     val sourceFile: SourceFileInfo,
     val metadata: EpubMetadata?,
     val bookTitle: String,
     val bookAuthor: String,
     val mode: ManualEditorMode,
     val chapters: List<ManualChapterContent>,
-    val editableTocItems: List<EditableTocItem>,
+    val tocList: List<EditableTocItem>,
     val manualTocEntries: List<ManualTocEntry>,
-    val currentChapterIndex: Int,
-    val activeParagraphIndex: Int,
-    val regenerateToc: Boolean,
-    val manualEditCount: Int,
-    val savedAtMillis: Long,
-    val savedImagesDirPath: String?
+    val lastChapterIndex: Int,
+    val lastParagraphIndex: Int,
+    val savedFileUri: String? = null,
+    val savedAbsolutePath: String? = null,
+    val regenerateToc: Boolean = false,
+    val manualEditCount: Int = 0,
+    val savedAtMillis: Long = System.currentTimeMillis(),
+    val savedImagesDirPath: String? = null
 )
 
 /**
- * 100% Offline Draft Persistence Manager (Upgrade 1.2):
- * Stores the active manual editing session (chapters, original snapshot for compare,
- * edited TOC, manual bookmarks, exact reading position, metadata, cover & staged images)
- * inside `context.filesDir/drafts/active_draft/` so the user can close the app and resume
- * editing or export a complete valid EPUB anytime later.
+ * 100% Offline Per-File Edit State & Draft Persistence Manager:
+ * - Stores each book's editing snapshot at `context.filesDir/edit_states/{fileId}.json`
+ *   containing `currentParagraphs`, `originalParagraphs`, `tocList`, `lastChapterIndex`,
+ *   `lastParagraphIndex`, `savedFileUri`, metadata, and source info.
+ * - Preserves staged book illustrations & cover under `filesDir/edit_states/assets_{fileId}/`
+ *   so resuming & re-exporting always produces a complete valid EPUB.
+ * - Uses pure-Kotlin RFC-8259 JSON serialization/deserialization (works identically on Android
+ *   runtime and JVM unit tests with zero external dependencies).
  */
 class DraftManager(context: Context) {
 
     private val appContext = context.applicationContext
-    private val draftDir: File
-        get() = File(appContext.filesDir, "drafts/active_draft")
-    private val metaFile: File
-        get() = File(draftDir, "draft_session.json")
-    private val summaryFile: File
-        get() = File(draftDir, "draft_summary.json")
-    private val imagesDir: File
-        get() = File(draftDir, "images")
-    private val coverFile: File
-        get() = File(draftDir, "cover.jpg")
+    private val editStatesDir: File
+        get() = File(appContext.filesDir, EDIT_STATES_DIR_NAME)
+
+    private fun stateFileFor(fileId: String): File =
+        File(editStatesDir, editStateFileName(fileId))
+
+    private fun assetsDirFor(fileId: String): File =
+        File(editStatesDir, "assets_${sanitizeFileId(fileId)}")
 
     @Synchronized
-    fun saveDraft(
+    fun saveEditState(
+        fileId: String,
         sourceFile: SourceFileInfo,
         workspace: PreparedWorkspace,
         metadata: EpubMetadata?,
         mode: ManualEditorMode,
         chapters: List<ManualChapterContent>,
-        editableTocItems: List<EditableTocItem>,
+        tocList: List<EditableTocItem>,
         manualTocEntries: List<ManualTocEntry>,
-        currentChapterIndex: Int,
-        activeParagraphIndex: Int,
-        regenerateToc: Boolean,
-        manualEditCount: Int
-    ): SavedDraftSummary? {
-        if (chapters.isEmpty()) return null
+        lastChapterIndex: Int,
+        lastParagraphIndex: Int,
+        savedFileUri: String? = null,
+        savedAbsolutePath: String? = null,
+        regenerateToc: Boolean = false,
+        manualEditCount: Int = 0
+    ): File? {
+        if (chapters.isEmpty() || fileId.isBlank()) return null
         val now = System.currentTimeMillis()
         val effectiveTitle = metadata?.title?.trim()?.ifBlank { null }
             ?: workspace.bookTitle.ifBlank { sourceFile.baseNameWithoutExt }
@@ -82,15 +83,18 @@ class DraftManager(context: Context) {
             ?: workspace.bookAuthor
 
         return runCatching {
-            if (!draftDir.exists()) draftDir.mkdirs()
+            if (!editStatesDir.exists()) editStatesDir.mkdirs()
 
-            // Preserve staged book illustrations into persistent filesDir so cache pruning won't break EPUB export
+            val assetRoot = assetsDirFor(fileId)
+            val imagesDir = File(assetRoot, "images")
+            val coverFile = File(assetRoot, "cover.jpg")
+
+            // Preserve staged book illustrations into persistent filesDir
             val stagedImagesDir = File(workspace.stageDirPath, "OEBPS/Images")
             if (stagedImagesDir.exists() && stagedImagesDir.isDirectory) {
                 val stagedFiles = stagedImagesDir.listFiles()?.filter { it.isFile }.orEmpty()
                 if (stagedFiles.isNotEmpty()) {
                     if (!imagesDir.exists()) imagesDir.mkdirs()
-                    // Copy any image not yet persisted in draftDir/images
                     val stagedNames = stagedFiles.map { it.name }.toSet()
                     imagesDir.listFiles()?.forEach { old ->
                         if (old.name !in stagedNames) old.delete()
@@ -104,11 +108,12 @@ class DraftManager(context: Context) {
                 }
             }
 
-            // Preserve custom/existing cover bytes safely
+            // Preserve custom or existing cover image safely
             var persistedCoverPath: String? = null
             val newCoverSource = metadata?.newCoverImagePath?.let { File(it) }
             when {
                 newCoverSource != null && newCoverSource.exists() -> {
+                    if (!assetRoot.exists()) assetRoot.mkdirs()
                     if (newCoverSource.canonicalPath != coverFile.canonicalPath) {
                         newCoverSource.copyTo(coverFile, overwrite = true)
                     }
@@ -116,6 +121,7 @@ class DraftManager(context: Context) {
                 }
 
                 metadata?.existingCoverBytes != null && metadata.existingCoverBytes.isNotEmpty() -> {
+                    if (!assetRoot.exists()) assetRoot.mkdirs()
                     coverFile.writeBytes(metadata.existingCoverBytes)
                     persistedCoverPath = coverFile.absolutePath
                 }
@@ -125,266 +131,502 @@ class DraftManager(context: Context) {
                 }
             }
 
-            val clampedChap = currentChapterIndex.coerceIn(0, chapters.lastIndex)
-            val clampedPara = activeParagraphIndex.coerceAtLeast(0)
+            val persistedMetadata = metadata?.copy(
+                newCoverImagePath = persistedCoverPath,
+                existingCoverBytes = null
+            )
 
-            // 1. Write lightweight summary JSON for instant MainScreen display
-            val summaryJson = JSONObject().apply {
-                put("bookTitle", effectiveTitle)
-                put("fileName", sourceFile.displayName)
-                put("chapterIndex", clampedChap)
-                put("totalChapters", chapters.size)
-                put("paragraphIndex", clampedPara)
-                put("savedAtMillis", now)
-            }
-            writeAtomically(summaryFile, summaryJson.toString())
+            val clampedChap = lastChapterIndex.coerceIn(0, chapters.lastIndex)
+            val clampedPara = lastParagraphIndex.coerceIn(
+                0,
+                (chapters[clampedChap].currentParagraphs.lastIndex).coerceAtLeast(0)
+            )
 
-            // 2. Write full session JSON
-            val fullJson = JSONObject().apply {
-                put("bookTitle", effectiveTitle)
-                put("bookAuthor", effectiveAuthor)
-                put("mode", mode.name)
-                put("currentChapterIndex", clampedChap)
-                put("activeParagraphIndex", clampedPara)
-                put("regenerateToc", regenerateToc)
-                put("manualEditCount", manualEditCount)
-                put("savedAtMillis", now)
-
-                put(
-                    "sourceFile",
-                    JSONObject().apply {
-                        put("displayName", sourceFile.displayName)
-                        put("sourceUriString", sourceFile.sourceUriString)
-                        put("resolvedFilePath", sourceFile.resolvedFilePath.orEmpty())
-                        put("resolvedParentDir", sourceFile.resolvedParentDir.orEmpty())
-                        put("fileType", sourceFile.fileType.name)
-                        put("fileSizeBytes", sourceFile.fileSizeBytes)
-                    }
-                )
-
-                if (metadata != null) {
-                    put(
-                        "metadata",
-                        JSONObject().apply {
-                            put("title", metadata.title)
-                            put("creator", metadata.creator)
-                            put("identifier", metadata.identifier)
-                            put("language", metadata.language)
-                            put("coverPath", persistedCoverPath.orEmpty())
-                        }
-                    )
-                }
-
-                val chaptersArr = JSONArray()
-                for (chap in chapters) {
-                    chaptersArr.put(
-                        JSONObject().apply {
-                            put("chapterIndex", chap.chapterIndex)
-                            put("fileName", chap.fileName)
-                            put("title", chap.title)
-                            put("originalParagraphs", JSONArray(chap.originalParagraphs))
-                            put("currentParagraphs", JSONArray(chap.currentParagraphs))
-                        }
-                    )
-                }
-                put("chapters", chaptersArr)
-
-                val tocArr = JSONArray()
-                for (item in editableTocItems) {
-                    tocArr.put(
-                        JSONObject().apply {
-                            put("id", item.id)
-                            put("title", item.title)
-                            put("href", item.href)
-                            put("chapterIndex", item.chapterIndex)
-                            put("chapterFileName", item.chapterFileName)
-                            put("paragraphIndex", item.paragraphIndex)
-                            put("anchorId", item.anchorId.orEmpty())
-                            put("isManualBookmark", item.isManualBookmark)
-                        }
-                    )
-                }
-                put("editableTocItems", tocArr)
-
-                val manualArr = JSONArray()
-                for (bm in manualTocEntries) {
-                    manualArr.put(
-                        JSONObject().apply {
-                            put("id", bm.id)
-                            put("title", bm.title)
-                            put("chapterIndex", bm.chapterIndex)
-                            put("chapterFileName", bm.chapterFileName)
-                            put("paragraphIndex", bm.paragraphIndex)
-                            put("anchorId", bm.anchorId)
-                        }
-                    )
-                }
-                put("manualTocEntries", manualArr)
-            }
-            writeAtomically(metaFile, fullJson.toString())
-
-            SavedDraftSummary(
+            val snapshot = FileEditStateSnapshot(
+                fileId = fileId,
+                sourceFile = sourceFile,
+                metadata = persistedMetadata,
                 bookTitle = effectiveTitle,
-                fileName = sourceFile.displayName,
-                chapterIndex = clampedChap,
-                totalChapters = chapters.size,
-                paragraphIndex = clampedPara,
-                savedAtMillis = now
+                bookAuthor = effectiveAuthor,
+                mode = mode,
+                chapters = chapters,
+                tocList = tocList,
+                manualTocEntries = manualTocEntries,
+                lastChapterIndex = clampedChap,
+                lastParagraphIndex = clampedPara,
+                savedFileUri = savedFileUri?.takeIf { it.isNotBlank() },
+                savedAbsolutePath = savedAbsolutePath?.takeIf { it.isNotBlank() },
+                regenerateToc = regenerateToc,
+                manualEditCount = manualEditCount,
+                savedAtMillis = now,
+                savedImagesDirPath = imagesDir.takeIf { it.exists() && it.isDirectory }?.absolutePath
             )
+
+            val targetFile = stateFileFor(fileId)
+            writeEditStateFile(targetFile, snapshot)
+            targetFile
         }.getOrNull()
     }
 
     @Synchronized
-    fun loadDraftSummary(): SavedDraftSummary? {
-        if (!summaryFile.exists() || !metaFile.exists()) return null
-        return runCatching {
-            val obj = JSONObject(summaryFile.readText(Charsets.UTF_8))
-            val title = obj.optString("bookTitle").trim()
-            val fileName = obj.optString("fileName").trim()
-            if (title.isEmpty() && fileName.isEmpty()) return null
-            SavedDraftSummary(
-                bookTitle = title.ifBlank { fileName },
-                fileName = fileName.ifBlank { title },
-                chapterIndex = obj.optInt("chapterIndex", 0).coerceAtLeast(0),
-                totalChapters = obj.optInt("totalChapters", 1).coerceAtLeast(1),
-                paragraphIndex = obj.optInt("paragraphIndex", 0).coerceAtLeast(0),
-                savedAtMillis = obj.optLong("savedAtMillis", summaryFile.lastModified())
-            )
-        }.getOrNull()
+    fun loadEditState(fileId: String): FileEditStateSnapshot? {
+        if (fileId.isBlank()) return null
+        val targetFile = stateFileFor(fileId)
+        if (!targetFile.exists()) return null
+        val loaded = readEditStateFile(targetFile) ?: return null
+        val imagesDir = File(assetsDirFor(fileId), "images")
+        return loaded.copy(
+            savedImagesDirPath = imagesDir.takeIf { it.exists() && it.isDirectory }?.absolutePath
+        )
     }
 
     @Synchronized
-    fun loadFullDraft(): SavedDraftData? {
-        if (!metaFile.exists()) return null
-        return runCatching {
-            val root = JSONObject(metaFile.readText(Charsets.UTF_8))
-            val srcObj = root.getJSONObject("sourceFile")
+    fun hasEditState(fileId: String): Boolean {
+        return fileId.isNotBlank() && stateFileFor(fileId).exists()
+    }
+
+    @Synchronized
+    fun deleteEditState(fileId: String) {
+        if (fileId.isBlank()) return
+        runCatching {
+            val f = stateFileFor(fileId)
+            if (f.exists()) f.delete()
+            val assets = assetsDirFor(fileId)
+            if (assets.exists()) assets.deleteRecursively()
+        }
+    }
+
+    @Synchronized
+    fun clearAllEditStates() {
+        runCatching {
+            if (editStatesDir.exists()) editStatesDir.deleteRecursively()
+            val legacyDraftsDir = File(appContext.filesDir, "drafts")
+            if (legacyDraftsDir.exists()) legacyDraftsDir.deleteRecursively()
+        }
+    }
+
+    companion object {
+        const val EDIT_STATES_DIR_NAME = "edit_states"
+
+        fun sanitizeFileId(fileId: String): String {
+            val cleaned = fileId.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            return cleaned.ifBlank { "default_state" }
+        }
+
+        fun editStateFileName(fileId: String): String = "${sanitizeFileId(fileId)}.json"
+
+        /**
+         * Pure Kotlin atomic writer for `filesDir/edit_states/{fileId}.json`.
+         */
+        fun writeEditStateFile(target: File, snapshot: FileEditStateSnapshot) {
+            target.parentFile?.mkdirs()
+            val json = serializeEditStateToJson(snapshot)
+            val temp = File(target.parentFile, "${target.name}.tmp")
+            temp.writeText(json, Charsets.UTF_8)
+            if (target.exists()) target.delete()
+            if (!temp.renameTo(target)) {
+                target.writeText(json, Charsets.UTF_8)
+                temp.delete()
+            }
+        }
+
+        /**
+         * Pure Kotlin reader for `filesDir/edit_states/{fileId}.json`.
+         */
+        fun readEditStateFile(target: File): FileEditStateSnapshot? {
+            if (!target.exists()) return null
+            return runCatching {
+                parseEditStateFromJson(target.readText(Charsets.UTF_8))
+            }.getOrNull()
+        }
+
+        fun serializeEditStateToJson(snapshot: FileEditStateSnapshot): String {
+            val sb = StringBuilder(4096)
+            sb.append('{')
+            appendField(sb, "fileId", snapshot.fileId, first = true)
+            appendField(sb, "bookTitle", snapshot.bookTitle)
+            appendField(sb, "bookAuthor", snapshot.bookAuthor)
+            appendField(sb, "mode", snapshot.mode.name)
+            appendNumberField(sb, "lastChapterIndex", snapshot.lastChapterIndex.toLong())
+            appendNumberField(sb, "lastParagraphIndex", snapshot.lastParagraphIndex.toLong())
+            appendField(sb, "savedFileUri", snapshot.savedFileUri.orEmpty())
+            appendField(sb, "savedAbsolutePath", snapshot.savedAbsolutePath.orEmpty())
+            appendBoolField(sb, "regenerateToc", snapshot.regenerateToc)
+            appendNumberField(sb, "manualEditCount", snapshot.manualEditCount.toLong())
+            appendNumberField(sb, "savedAtMillis", snapshot.savedAtMillis)
+
+            // sourceFile object
+            sb.append(",\"sourceFile\":{")
+            appendField(sb, "displayName", snapshot.sourceFile.displayName, first = true)
+            appendField(sb, "sourceUriString", snapshot.sourceFile.sourceUriString)
+            appendField(sb, "resolvedFilePath", snapshot.sourceFile.resolvedFilePath.orEmpty())
+            appendField(sb, "resolvedParentDir", snapshot.sourceFile.resolvedParentDir.orEmpty())
+            appendField(sb, "fileType", snapshot.sourceFile.fileType.name)
+            appendNumberField(sb, "fileSizeBytes", snapshot.sourceFile.fileSizeBytes)
+            sb.append('}')
+
+            // metadata object (optional)
+            val meta = snapshot.metadata
+            if (meta != null) {
+                sb.append(",\"metadata\":{")
+                appendField(sb, "title", meta.title, first = true)
+                appendField(sb, "creator", meta.creator)
+                appendField(sb, "identifier", meta.identifier)
+                appendField(sb, "language", meta.language)
+                appendField(sb, "coverPath", meta.newCoverImagePath.orEmpty())
+                sb.append('}')
+            }
+
+            // chapters array (with currentParagraphs & originalParagraphs)
+            sb.append(",\"chapters\":[")
+            snapshot.chapters.forEachIndexed { idx, chap ->
+                if (idx > 0) sb.append(',')
+                sb.append('{')
+                appendNumberField(sb, "chapterIndex", chap.chapterIndex.toLong(), first = true)
+                appendField(sb, "fileName", chap.fileName)
+                appendField(sb, "title", chap.title)
+                sb.append(",\"originalParagraphs\":")
+                appendStringArray(sb, chap.originalParagraphs)
+                sb.append(",\"currentParagraphs\":")
+                appendStringArray(sb, chap.currentParagraphs)
+                sb.append('}')
+            }
+            sb.append(']')
+
+            // tocList array
+            sb.append(",\"tocList\":[")
+            snapshot.tocList.forEachIndexed { idx, item ->
+                if (idx > 0) sb.append(',')
+                sb.append('{')
+                appendField(sb, "id", item.id, first = true)
+                appendField(sb, "title", item.title)
+                appendField(sb, "href", item.href)
+                appendNumberField(sb, "chapterIndex", item.chapterIndex.toLong())
+                appendField(sb, "chapterFileName", item.chapterFileName)
+                appendNumberField(sb, "paragraphIndex", item.paragraphIndex.toLong())
+                appendField(sb, "anchorId", item.anchorId.orEmpty())
+                appendBoolField(sb, "isManualBookmark", item.isManualBookmark)
+                sb.append('}')
+            }
+            sb.append(']')
+
+            // manualTocEntries array
+            sb.append(",\"manualTocEntries\":[")
+            snapshot.manualTocEntries.forEachIndexed { idx, bm ->
+                if (idx > 0) sb.append(',')
+                sb.append('{')
+                appendField(sb, "id", bm.id, first = true)
+                appendField(sb, "title", bm.title)
+                appendNumberField(sb, "chapterIndex", bm.chapterIndex.toLong())
+                appendField(sb, "chapterFileName", bm.chapterFileName)
+                appendNumberField(sb, "paragraphIndex", bm.paragraphIndex.toLong())
+                appendField(sb, "anchorId", bm.anchorId)
+                sb.append('}')
+            }
+            sb.append(']')
+
+            sb.append('}')
+            return sb.toString()
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        fun parseEditStateFromJson(rawJson: String): FileEditStateSnapshot? {
+            val root = MiniJsonParser(rawJson).parseValue() as? Map<String, Any?> ?: return null
+
+            val chaptersRaw = root["chapters"] as? List<*> ?: return null
+            val chapters = ArrayList<ManualChapterContent>(chaptersRaw.size)
+            for (i in chaptersRaw.indices) {
+                val cMap = chaptersRaw[i] as? Map<String, Any?> ?: continue
+                val origParas = (cMap["originalParagraphs"] as? List<*>)?.map { it?.toString().orEmpty() }.orEmpty()
+                val currParas = (cMap["currentParagraphs"] as? List<*>)?.map { it?.toString().orEmpty() }.orEmpty()
+                chapters.add(
+                    ManualChapterContent(
+                        chapterIndex = cMap.intVal("chapterIndex", i),
+                        fileName = cMap.strVal("fileName").ifBlank { "chapter_%04d.xhtml".format(i + 1) },
+                        title = cMap.strVal("title").ifBlank { "Chương ${i + 1}" },
+                        filePath = "",
+                        originalParagraphs = origParas,
+                        currentParagraphs = currParas
+                    )
+                )
+            }
+            if (chapters.isEmpty()) return null
+
+            val srcMap = root["sourceFile"] as? Map<String, Any?> ?: emptyMap()
             val sourceFile = SourceFileInfo(
-                displayName = srcObj.optString("displayName").ifBlank { "ebook_draft.epub" },
-                sourceUriString = srcObj.optString("sourceUriString"),
-                resolvedFilePath = srcObj.optString("resolvedFilePath").takeIf { it.isNotBlank() },
-                resolvedParentDir = srcObj.optString("resolvedParentDir").takeIf { it.isNotBlank() },
+                displayName = srcMap.strVal("displayName").ifBlank { "ebook.epub" },
+                sourceUriString = srcMap.strVal("sourceUriString"),
+                resolvedFilePath = srcMap.strVal("resolvedFilePath").takeIf { it.isNotBlank() },
+                resolvedParentDir = srcMap.strVal("resolvedParentDir").takeIf { it.isNotBlank() },
                 fileType = runCatching {
-                    InputFileType.valueOf(srcObj.optString("fileType", InputFileType.EPUB.name))
+                    InputFileType.valueOf(srcMap.strVal("fileType").ifBlank { InputFileType.EPUB.name })
                 }.getOrDefault(InputFileType.EPUB),
-                fileSizeBytes = srcObj.optLong("fileSizeBytes", 0L)
+                fileSizeBytes = srcMap.longVal("fileSizeBytes", 0L)
             )
 
-            val metaObj = root.optJSONObject("metadata")
-            val metadata = if (metaObj != null) {
-                val cPath = metaObj.optString("coverPath").takeIf { it.isNotBlank() && File(it).exists() }
+            val metaMap = root["metadata"] as? Map<String, Any?>
+            val metadata = if (metaMap != null) {
+                val cPath = metaMap.strVal("coverPath").takeIf { it.isNotBlank() && File(it).exists() }
                 EpubMetadata(
-                    title = metaObj.optString("title"),
-                    creator = metaObj.optString("creator"),
-                    identifier = metaObj.optString("identifier"),
-                    language = metaObj.optString("language").ifBlank { "vi" },
+                    title = metaMap.strVal("title"),
+                    creator = metaMap.strVal("creator"),
+                    identifier = metaMap.strVal("identifier"),
+                    language = metaMap.strVal("language").ifBlank { "vi" },
                     newCoverImagePath = cPath
                 )
             } else {
                 null
             }
 
-            val chaptersArr = root.getJSONArray("chapters")
-            val chapters = ArrayList<ManualChapterContent>(chaptersArr.length())
-            for (i in 0 until chaptersArr.length()) {
-                val cObj = chaptersArr.getJSONObject(i)
-                chapters.add(
-                    ManualChapterContent(
-                        chapterIndex = cObj.optInt("chapterIndex", i),
-                        fileName = cObj.optString("fileName").ifBlank { "chapter_%04d.xhtml".format(i + 1) },
-                        title = cObj.optString("title").ifBlank { "Chương ${i + 1}" },
-                        filePath = "",
-                        originalParagraphs = jsonArrayToStringList(cObj.optJSONArray("originalParagraphs")),
-                        currentParagraphs = jsonArrayToStringList(cObj.optJSONArray("currentParagraphs"))
-                    )
-                )
-            }
-            if (chapters.isEmpty()) return null
-
-            val tocArr = root.optJSONArray("editableTocItems")
-            val editableToc = ArrayList<EditableTocItem>()
-            if (tocArr != null) {
-                for (i in 0 until tocArr.length()) {
-                    val tObj = tocArr.getJSONObject(i)
-                    editableToc.add(
+            val tocRaw = (root["tocList"] ?: root["editableTocItems"]) as? List<*>
+            val tocList = ArrayList<EditableTocItem>()
+            if (tocRaw != null) {
+                for (item in tocRaw) {
+                    val tMap = item as? Map<String, Any?> ?: continue
+                    tocList.add(
                         EditableTocItem(
-                            id = tObj.optString("id"),
-                            title = tObj.optString("title"),
-                            href = tObj.optString("href"),
-                            chapterIndex = tObj.optInt("chapterIndex", 0),
-                            chapterFileName = tObj.optString("chapterFileName"),
-                            paragraphIndex = tObj.optInt("paragraphIndex", 0),
-                            anchorId = tObj.optString("anchorId").takeIf { it.isNotBlank() },
-                            isManualBookmark = tObj.optBoolean("isManualBookmark", false)
+                            id = tMap.strVal("id"),
+                            title = tMap.strVal("title"),
+                            href = tMap.strVal("href"),
+                            chapterIndex = tMap.intVal("chapterIndex", 0),
+                            chapterFileName = tMap.strVal("chapterFileName"),
+                            paragraphIndex = tMap.intVal("paragraphIndex", 0),
+                            anchorId = tMap.strVal("anchorId").takeIf { it.isNotBlank() },
+                            isManualBookmark = tMap.boolVal("isManualBookmark", false)
                         )
                     )
                 }
             }
 
-            val manualArr = root.optJSONArray("manualTocEntries")
+            val manualRaw = root["manualTocEntries"] as? List<*>
             val manualEntries = ArrayList<ManualTocEntry>()
-            if (manualArr != null) {
-                for (i in 0 until manualArr.length()) {
-                    val mObj = manualArr.getJSONObject(i)
+            if (manualRaw != null) {
+                for (item in manualRaw) {
+                    val mMap = item as? Map<String, Any?> ?: continue
                     manualEntries.add(
                         ManualTocEntry(
-                            id = mObj.optString("id"),
-                            title = mObj.optString("title"),
-                            chapterIndex = mObj.optInt("chapterIndex", 0),
-                            chapterFileName = mObj.optString("chapterFileName"),
-                            paragraphIndex = mObj.optInt("paragraphIndex", 0),
-                            anchorId = mObj.optString("anchorId")
+                            id = mMap.strVal("id"),
+                            title = mMap.strVal("title"),
+                            chapterIndex = mMap.intVal("chapterIndex", 0),
+                            chapterFileName = mMap.strVal("chapterFileName"),
+                            paragraphIndex = mMap.intVal("paragraphIndex", 0),
+                            anchorId = mMap.strVal("anchorId")
                         )
                     )
                 }
             }
 
-            SavedDraftData(
+            val chapIdx = root.intVal("lastChapterIndex", root.intVal("currentChapterIndex", 0))
+                .coerceIn(0, chapters.lastIndex)
+            val paraIdx = root.intVal("lastParagraphIndex", root.intVal("activeParagraphIndex", 0))
+                .coerceIn(0, (chapters[chapIdx].currentParagraphs.lastIndex).coerceAtLeast(0))
+
+            return FileEditStateSnapshot(
+                fileId = root.strVal("fileId"),
                 sourceFile = sourceFile,
                 metadata = metadata,
-                bookTitle = root.optString("bookTitle").ifBlank { sourceFile.baseNameWithoutExt },
-                bookAuthor = root.optString("bookAuthor").ifBlank { "Không rõ tác giả" },
+                bookTitle = root.strVal("bookTitle").ifBlank { sourceFile.baseNameWithoutExt },
+                bookAuthor = root.strVal("bookAuthor").ifBlank { "Không rõ tác giả" },
                 mode = runCatching {
-                    ManualEditorMode.valueOf(root.optString("mode", ManualEditorMode.KEEP_CLEANED.name))
+                    ManualEditorMode.valueOf(root.strVal("mode").ifBlank { ManualEditorMode.KEEP_CLEANED.name })
                 }.getOrDefault(ManualEditorMode.KEEP_CLEANED),
                 chapters = chapters,
-                editableTocItems = editableToc,
+                tocList = tocList,
                 manualTocEntries = manualEntries,
-                currentChapterIndex = root.optInt("currentChapterIndex", 0).coerceIn(0, chapters.lastIndex),
-                activeParagraphIndex = root.optInt("activeParagraphIndex", 0).coerceAtLeast(0),
-                regenerateToc = root.optBoolean("regenerateToc", false),
-                manualEditCount = root.optInt("manualEditCount", 0),
-                savedAtMillis = root.optLong("savedAtMillis", System.currentTimeMillis()),
-                savedImagesDirPath = imagesDir.takeIf { it.exists() && it.isDirectory }?.absolutePath
+                lastChapterIndex = chapIdx,
+                lastParagraphIndex = paraIdx,
+                savedFileUri = root.strVal("savedFileUri").takeIf { it.isNotBlank() },
+                savedAbsolutePath = root.strVal("savedAbsolutePath").takeIf { it.isNotBlank() },
+                regenerateToc = root.boolVal("regenerateToc", false),
+                manualEditCount = root.intVal("manualEditCount", 0),
+                savedAtMillis = root.longVal("savedAtMillis", System.currentTimeMillis())
             )
-        }.getOrNull()
-    }
+        }
 
-    @Synchronized
-    fun clearDraft() {
-        runCatching {
-            if (draftDir.exists()) {
-                draftDir.deleteRecursively()
+        private fun appendField(sb: StringBuilder, key: String, value: String, first: Boolean = false) {
+            if (!first) sb.append(',')
+            sb.append('"').append(key).append("\":\"")
+            appendEscaped(sb, value)
+            sb.append('"')
+        }
+
+        private fun appendNumberField(sb: StringBuilder, key: String, value: Long, first: Boolean = false) {
+            if (!first) sb.append(',')
+            sb.append('"').append(key).append("\":").append(value)
+        }
+
+        private fun appendBoolField(sb: StringBuilder, key: String, value: Boolean, first: Boolean = false) {
+            if (!first) sb.append(',')
+            sb.append('"').append(key).append("\":").append(value)
+        }
+
+        private fun appendStringArray(sb: StringBuilder, list: List<String>) {
+            sb.append('[')
+            list.forEachIndexed { idx, s ->
+                if (idx > 0) sb.append(',')
+                sb.append('"')
+                appendEscaped(sb, s)
+                sb.append('"')
+            }
+            sb.append(']')
+        }
+
+        private fun appendEscaped(sb: StringBuilder, input: String) {
+            for (ch in input) {
+                when (ch) {
+                    '"' -> sb.append("\\\"")
+                    '\\' -> sb.append("\\\\")
+                    '\b' -> sb.append("\\b")
+                    '\u000C' -> sb.append("\\f")
+                    '\n' -> sb.append("\\n")
+                    '\r' -> sb.append("\\r")
+                    '\t' -> sb.append("\\t")
+                    else -> if (ch.code < 0x20) sb.append("\\u%04x".format(ch.code)) else sb.append(ch)
+                }
             }
         }
-    }
 
-    private fun writeAtomically(target: File, content: String) {
-        val temp = File(target.parentFile, "${target.name}.tmp")
-        temp.writeText(content, Charsets.UTF_8)
-        if (target.exists()) target.delete()
-        if (!temp.renameTo(target)) {
-            target.writeText(content, Charsets.UTF_8)
-            temp.delete()
-        }
-    }
+        private fun Map<String, Any?>.strVal(key: String): String = this[key]?.toString().orEmpty()
+        private fun Map<String, Any?>.intVal(key: String, default: Int): Int =
+            (this[key] as? Number)?.toInt() ?: this[key]?.toString()?.toIntOrNull() ?: default
+        private fun Map<String, Any?>.longVal(key: String, default: Long): Long =
+            (this[key] as? Number)?.toLong() ?: this[key]?.toString()?.toLongOrNull() ?: default
+        private fun Map<String, Any?>.boolVal(key: String, default: Boolean): Boolean =
+            (this[key] as? Boolean) ?: this[key]?.toString()?.toBooleanStrictOrNull() ?: default
 
-    private fun jsonArrayToStringList(array: JSONArray?): List<String> {
-        if (array == null) return emptyList()
-        val list = ArrayList<String>(array.length())
-        for (i in 0 until array.length()) {
-            list.add(array.optString(i).orEmpty())
+        /**
+         * Compact recursive-descent pure-Kotlin JSON parser (RFC-8259 compliant) so edit-state
+         * serialization works identically on Android runtime and JVM unit tests.
+         */
+        private class MiniJsonParser(private val src: String) {
+            private var pos = 0
+            private val len = src.length
+
+            private fun skipWs() {
+                while (pos < len && src[pos].isWhitespace()) pos++
+            }
+
+            fun parseValue(): Any? {
+                skipWs()
+                if (pos >= len) return null
+                return when (src[pos]) {
+                    '{' -> parseObject()
+                    '[' -> parseArray()
+                    '"' -> parseString()
+                    't', 'f' -> parseBoolean()
+                    'n' -> parseNull()
+                    else -> parseNumber()
+                }
+            }
+
+            private fun parseObject(): Map<String, Any?> {
+                pos++ // '{'
+                val map = LinkedHashMap<String, Any?>()
+                skipWs()
+                if (pos < len && src[pos] == '}') {
+                    pos++
+                    return map
+                }
+                while (pos < len) {
+                    skipWs()
+                    if (pos >= len || src[pos] != '"') break
+                    val key = parseString()
+                    skipWs()
+                    if (pos >= len || src[pos] != ':') break
+                    pos++ // ':'
+                    val value = parseValue()
+                    map[key] = value
+                    skipWs()
+                    if (pos < len && src[pos] == ',') {
+                        pos++
+                        continue
+                    }
+                    if (pos < len && src[pos] == '}') {
+                        pos++
+                        break
+                    }
+                    break
+                }
+                return map
+            }
+
+            private fun parseArray(): List<Any?> {
+                pos++ // '['
+                val list = ArrayList<Any?>()
+                skipWs()
+                if (pos < len && src[pos] == ']') {
+                    pos++
+                    return list
+                }
+                while (pos < len) {
+                    val value = parseValue()
+                    list.add(value)
+                    skipWs()
+                    if (pos < len && src[pos] == ',') {
+                        pos++
+                        continue
+                    }
+                    if (pos < len && src[pos] == ']') {
+                        pos++
+                        break
+                    }
+                    break
+                }
+                return list
+            }
+
+            private fun parseString(): String {
+                pos++ // '"'
+                val sb = StringBuilder()
+                while (pos < len) {
+                    val ch = src[pos++]
+                    if (ch == '"') return sb.toString()
+                    if (ch == '\\' && pos < len) {
+                        when (val esc = src[pos++]) {
+                            '"' -> sb.append('"')
+                            '\\' -> sb.append('\\')
+                            '/' -> sb.append('/')
+                            'b' -> sb.append('\b')
+                            'f' -> sb.append('\u000C')
+                            'n' -> sb.append('\n')
+                            'r' -> sb.append('\r')
+                            't' -> sb.append('\t')
+                            'u' -> {
+                                if (pos + 4 <= len) {
+                                    src.substring(pos, pos + 4).toIntOrNull(16)?.let { sb.append(it.toChar()) }
+                                    pos += 4
+                                }
+                            }
+                            else -> sb.append(esc)
+                        }
+                    } else {
+                        sb.append(ch)
+                    }
+                }
+                return sb.toString()
+            }
+
+            private fun parseBoolean(): Boolean {
+                return if (src.startsWith("true", pos)) {
+                    pos += 4
+                    true
+                } else {
+                    pos += 5
+                    false
+                }
+            }
+
+            private fun parseNull(): Any? {
+                pos += 4
+                return null
+            }
+
+            private fun parseNumber(): Number {
+                val start = pos
+                while (pos < len && src[pos] in "-+0123456789.eE") pos++
+                val token = src.substring(start, pos)
+                return token.toLongOrNull() ?: token.toDoubleOrNull() ?: 0L
+            }
         }
-        return list
     }
 }

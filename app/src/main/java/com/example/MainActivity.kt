@@ -34,7 +34,6 @@ import com.example.data.ErrorMemoryManager
 import com.example.pipeline.FilePathResolver
 import com.example.pipeline.ProcessingPhase
 import com.example.ui.MainViewModel
-import com.example.ui.components.CustomReplaceDialog
 import com.example.ui.components.EpubMetadataEditorDialog
 import com.example.ui.components.SettingsDialog
 import com.example.ui.screens.MainScreen
@@ -115,7 +114,6 @@ private fun EpubCleanNavHost(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     val recentFiles by viewModel.recentFiles.collectAsStateWithLifecycle()
-    val activeDraft by viewModel.activeDraftSummary.collectAsStateWithLifecycle()
     val isResumingDraft by viewModel.isResumingDraft.collectAsStateWithLifecycle()
     val autoSaveDraft by viewModel.autoSaveDraft.collectAsStateWithLifecycle()
     val customReplaceRules by viewModel.customReplaceRules.collectAsStateWithLifecycle()
@@ -147,7 +145,6 @@ private fun EpubCleanNavHost(
     }
 
     var showSettingsDialog by remember { mutableStateOf(false) }
-    var showSettingsCustomReplaceDialog by remember { mutableStateOf(false) }
     var showReviewMetadataDialog by remember { mutableStateOf(false) }
     var coverPickerForReview by remember { mutableStateOf(false) }
 
@@ -277,8 +274,7 @@ private fun EpubCleanNavHost(
         composable(ROUTE_HOME) {
             MainScreen(
                 recentFiles = recentFiles,
-                activeDraft = activeDraft,
-                isResumingDraft = isResumingDraft,
+                isOpeningEditor = isResumingDraft,
                 hasAllFilesAccess = hasAllFilesAccess,
                 cleaningOptions = cleaningOptions,
                 isLoadingMetadata = isLoadingMetadata,
@@ -293,17 +289,16 @@ private fun EpubCleanNavHost(
                         )
                     )
                 },
-                onResumeDraftClick = {
-                    viewModel.resumeSavedDraft {
+                onRequestStoragePermission = ::requestStorageAccess,
+                onOpenSettingsClick = { showSettingsDialog = true },
+                onUpdateCleaningOptions = { viewModel.updateCleaningOptions(it) },
+                onContinueEditHistoryFile = { entry ->
+                    viewModel.continueEditingHistoryItem(entry) {
                         navController.navigate(ROUTE_MANUAL_EDITOR) {
                             launchSingleTop = true
                         }
                     }
                 },
-                onDiscardDraftClick = { viewModel.discardSavedDraft() },
-                onRequestStoragePermission = ::requestStorageAccess,
-                onOpenSettingsClick = { showSettingsDialog = true },
-                onUpdateCleaningOptions = { viewModel.updateCleaningOptions(it) },
                 onOpenHistoryFile = { entry ->
                     openEpubExternally(entry.filePath, entry.uriString)
                 },
@@ -415,20 +410,18 @@ private fun EpubCleanNavHost(
         }
     }
 
-    // Floating iOS Settings Dialog (Light/Dark Mode + Auto-Save Draft + Custom Replace + Error Memory + v1.3 Info)
+    // Ultra-Compact Floating Settings Dialog (Light/Dark + Auto-Save + Error Memory + Embedded Custom Replace Table + App Info)
     SettingsDialog(
         visible = showSettingsDialog,
         isDarkMode = isDarkMode,
         autoSaveDraft = autoSaveDraft,
-        customReplaceCount = customReplaceRules.size,
+        customReplaceRules = customReplaceRules,
         errorMemoryAutoApply = errorMemoryAutoApply,
         errorMemoryRuleCount = errorMemoryRuleCount,
         onToggleDarkMode = { enabled -> viewModel.setDarkMode(enabled) },
         onToggleAutoSaveDraft = { enabled -> viewModel.setAutoSaveDraft(enabled) },
-        onOpenCustomReplaceClick = {
-            showSettingsDialog = false
-            showSettingsCustomReplaceDialog = true
-        },
+        onAddCustomReplaceRule = { find, repl -> viewModel.addCustomReplaceRule(find, repl) },
+        onDeleteCustomReplaceRule = { id -> viewModel.deleteCustomReplaceRule(id) },
         onToggleErrorMemoryAutoApply = { enabled -> viewModel.setErrorMemoryAutoApply(enabled) },
         onExportErrorMemoryClick = {
             exportErrorLibLauncher.launch(ErrorMemoryManager.DEFAULT_EXPORT_FILENAME)
@@ -437,16 +430,6 @@ private fun EpubCleanNavHost(
             importErrorLibLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
         },
         onDismiss = { showSettingsDialog = false }
-    )
-
-    // Personal Quick-Replace Dictionary Dialog opened from Settings
-    CustomReplaceDialog(
-        visible = showSettingsCustomReplaceDialog,
-        rules = customReplaceRules,
-        canApplyToBook = false,
-        onAddRule = { find, repl -> viewModel.addCustomReplaceRule(find, repl) },
-        onDeleteRule = { id -> viewModel.deleteCustomReplaceRule(id) },
-        onDismiss = { showSettingsCustomReplaceDialog = false }
     )
 
     // Floating iOS Metadata & Cover Editor Dialog immediately on file import

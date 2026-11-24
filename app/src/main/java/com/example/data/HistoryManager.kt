@@ -12,9 +12,20 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * Lightweight record of a cleaned ebook stored offline in SharedPreferences (JSON),
- * optionally linked to a local diff snapshot file (`filesDir/history_diffs/<id>.json`)
- * so the user can tap `⋮ -> Ghi nhớ lỗi (Lưu vào thư viện)` anytime later.
+ * Unified lifecycle status for every book in "Tất cả các file":
+ * - DRAFT ("Bản nháp"): Saved in progress via "Lưu nháp" or auto-save draft.
+ * - SAVED ("Đã lưu"): Exported to a complete .epub via "Lưu" (SaveDialog).
+ */
+enum class FileRecordStatus {
+    DRAFT,
+    SAVED
+}
+
+/**
+ * Unified record for every Draft or Saved ebook in "Tất cả các file", stored offline in
+ * SharedPreferences (JSON) and linked to:
+ * - `filesDir/edit_states/{id}.json` (full editing snapshot for "Sửa tiếp" & "So sánh")
+ * - `filesDir/history_diffs/diff_{id}.json` (diff pairs for "Ghi nhớ lỗi")
  */
 data class CleanedFileHistory(
     val id: String = UUID.randomUUID().toString(),
@@ -27,12 +38,18 @@ data class CleanedFileHistory(
     val whitespaceFixed: Int = 0,
     val spellingFixed: Int = 0,
     val timestampMillis: Long = System.currentTimeMillis(),
-    val diffSnapshotFile: String? = null
+    val diffSnapshotFile: String? = null,
+    val status: FileRecordStatus = FileRecordStatus.SAVED,
+    val lastChapterIndex: Int = 0,
+    val totalChapters: Int = 0,
+    val lastParagraphIndex: Int = 0,
+    val editStateFile: String? = null
 )
 
 /**
- * 100% Offline History Manager backed by SharedPreferences (lightweight JSON, max 20 recent files)
- * plus per-book `(original, edited)` diff snapshots stored in `filesDir/history_diffs/`.
+ * 100% Offline Unified File Manager ("Tất cả các file") backed by SharedPreferences
+ * (max 30 recent Draft + Saved files) plus per-book `(original, edited)` diff snapshots
+ * stored in `filesDir/history_diffs/`.
  */
 class HistoryManager(context: Context) {
 
@@ -56,6 +73,10 @@ class HistoryManager(context: Context) {
                 val fileName = obj.optString("fileName").orEmpty()
                 val filePath = obj.optString("filePath").orEmpty()
                 if (fileName.isBlank()) continue
+                val status = runCatching {
+                    FileRecordStatus.valueOf(obj.optString("status", FileRecordStatus.SAVED.name))
+                }.getOrDefault(FileRecordStatus.SAVED)
+
                 result.add(
                     CleanedFileHistory(
                         id = obj.optString("id").ifBlank { UUID.randomUUID().toString() },
@@ -68,7 +89,12 @@ class HistoryManager(context: Context) {
                         whitespaceFixed = obj.optInt("whitespaceFixed", 0),
                         spellingFixed = obj.optInt("spellingFixed", 0),
                         timestampMillis = obj.optLong("timestampMillis", System.currentTimeMillis()),
-                        diffSnapshotFile = obj.optString("diffSnapshotFile").takeIf { it.isNotBlank() }
+                        diffSnapshotFile = obj.optString("diffSnapshotFile").takeIf { it.isNotBlank() },
+                        status = status,
+                        lastChapterIndex = obj.optInt("lastChapterIndex", 0).coerceAtLeast(0),
+                        totalChapters = obj.optInt("totalChapters", 0).coerceAtLeast(0),
+                        lastParagraphIndex = obj.optInt("lastParagraphIndex", 0).coerceAtLeast(0),
+                        editStateFile = obj.optString("editStateFile").takeIf { it.isNotBlank() }
                     )
                 )
             }
@@ -77,42 +103,44 @@ class HistoryManager(context: Context) {
     }
 
     /**
-     * Adds a history entry and persists its associated `(before, after)` diff pairs offline
-     * so `ErrorMemoryManager` can analyze & learn from this book later.
+     * Upserts a Draft or Saved entry cleanly at the top of "Tất cả các file":
+     * - If an entry with the same `id` exists (for instance, promoting a `DRAFT` entry to `SAVED`
+     *   when the user clicks "Lưu"), updates it in-place and moves it to the top with the latest
+     *   timestamp — never creating duplicate rows!
+     * - Also persists associated `(before, after)` diff pairs offline for "Ghi nhớ lỗi".
      */
     fun addEntry(
         entry: CleanedFileHistory,
         diffPairs: List<ParagraphDiffPair> = emptyList()
     ): List<CleanedFileHistory> {
+        val current = getHistory()
+        val existingSameId = current.firstOrNull { it.id == entry.id }
+
         val snapshotName = if (diffPairs.isNotEmpty()) {
             saveDiffPairsFile(entry.id, diffPairs)
         } else {
-            entry.diffSnapshotFile
+            entry.diffSnapshotFile ?: existingSameId?.diffSnapshotFile
         }
-        val finalEntry = entry.copy(diffSnapshotFile = snapshotName)
+        val finalEntry = entry.copy(
+            diffSnapshotFile = snapshotName,
+            editStateFile = entry.editStateFile ?: existingSameId?.editStateFile
+        )
 
-        val current = getHistory().toMutableList()
-        val removed = current.filter { existing ->
-            existing.id == finalEntry.id ||
-                (finalEntry.filePath.isNotBlank() && existing.filePath == finalEntry.filePath)
-        }
-        for (old in removed) {
-            if (old.diffSnapshotFile != null && old.diffSnapshotFile != snapshotName) {
+        val (updated, removedOrPruned) = mergeHistoryEntry(
+            current = current,
+            incoming = finalEntry,
+            maxItems = MAX_ITEMS
+        )
+        for (old in removedOrPruned) {
+            if (old.id != finalEntry.id &&
+                old.diffSnapshotFile != null &&
+                old.diffSnapshotFile != snapshotName
+            ) {
                 deleteDiffFile(old.diffSnapshotFile)
             }
         }
-        current.removeAll { existing ->
-            existing.id == finalEntry.id ||
-                (finalEntry.filePath.isNotBlank() && existing.filePath == finalEntry.filePath)
-        }
-        current.add(0, finalEntry)
-        val trimmed = current.take(MAX_ITEMS)
-        val pruned = current.drop(MAX_ITEMS)
-        for (old in pruned) {
-            old.diffSnapshotFile?.let { deleteDiffFile(it) }
-        }
-        saveList(trimmed)
-        return trimmed
+        saveList(updated)
+        return updated
     }
 
     fun loadDiffPairsForEntry(entry: CleanedFileHistory): List<ParagraphDiffPair> {
@@ -157,7 +185,6 @@ class HistoryManager(context: Context) {
             if (!diffsDir.exists()) diffsDir.mkdirs()
             val safeName = "diff_${historyId.replace(Regex("[^a-zA-Z0-9_-]"), "")}.json"
             val arr = JSONArray()
-            // Cap at 1500 changed pairs per book for crisp disk/memory efficiency
             for (pair in pairs.take(MAX_DIFF_PAIRS_PER_BOOK)) {
                 if (pair.beforeText.isNotBlank() && pair.beforeText != pair.afterText) {
                     arr.put(
@@ -196,6 +223,11 @@ class HistoryManager(context: Context) {
                 put("spellingFixed", item.spellingFixed)
                 put("timestampMillis", item.timestampMillis)
                 put("diffSnapshotFile", item.diffSnapshotFile.orEmpty())
+                put("status", item.status.name)
+                put("lastChapterIndex", item.lastChapterIndex)
+                put("totalChapters", item.totalChapters)
+                put("lastParagraphIndex", item.lastParagraphIndex)
+                put("editStateFile", item.editStateFile.orEmpty())
             }
             array.put(obj)
         }
@@ -205,8 +237,45 @@ class HistoryManager(context: Context) {
     companion object {
         private const val PREFS_NAME = "epubclean_history_prefs"
         private const val KEY_HISTORY_JSON = "cleaned_files_history_v1"
-        const val MAX_ITEMS = 20
+        const val MAX_ITEMS = 30
         private const val MAX_DIFF_PAIRS_PER_BOOK = 1500
+
+        /**
+         * Pure Kotlin deduplication & Draft->Saved promotion engine:
+         * - Removes any existing row with the same `id` (promoting Draft -> Saved without duplicates)
+         *   OR matching saved output `filePath` (when saving over an existing exported file path).
+         * - Inserts `incoming` at index 0 sorted by latest timestamp.
+         * Returns `(updatedList, removedOrPrunedEntries)`.
+         */
+        fun mergeHistoryEntry(
+            current: List<CleanedFileHistory>,
+            incoming: CleanedFileHistory,
+            maxItems: Int = MAX_ITEMS
+        ): Pair<List<CleanedFileHistory>, List<CleanedFileHistory>> {
+            val mutable = current.toMutableList()
+            val removed = mutableListOf<CleanedFileHistory>()
+
+            val iterator = mutable.iterator()
+            while (iterator.hasNext()) {
+                val existing = iterator.next()
+                val sameId = existing.id == incoming.id
+                val sameSavedPath = incoming.status == FileRecordStatus.SAVED &&
+                    incoming.filePath.isNotBlank() &&
+                    existing.filePath == incoming.filePath
+                if (sameId || sameSavedPath) {
+                    removed.add(existing)
+                    iterator.remove()
+                }
+            }
+
+            mutable.add(0, incoming)
+            val sorted = mutable.sortedByDescending { it.timestampMillis }
+            val trimmed = sorted.take(maxItems)
+            if (sorted.size > maxItems) {
+                removed.addAll(sorted.drop(maxItems))
+            }
+            return trimmed to removed
+        }
 
         /**
          * Formats timestamp concisely in Vietnamese:

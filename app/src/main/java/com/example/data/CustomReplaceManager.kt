@@ -94,6 +94,22 @@ class CustomReplaceManager(context: Context) {
         private const val KEY_RULES_JSON = "custom_replace_rules_v1"
 
         /**
+         * Real-time case-insensitive filter across BOTH `findText` ("Từ lỗi")
+         * and `replaceText` ("Từ đúng") columns for the compact Settings table.
+         */
+        fun filterRules(
+            rules: List<CustomReplaceRule>,
+            query: String
+        ): List<CustomReplaceRule> {
+            val trimmed = query.trim()
+            if (trimmed.isEmpty()) return rules
+            return rules.filter { rule ->
+                rule.findText.contains(trimmed, ignoreCase = true) ||
+                    rule.replaceText.contains(trimmed, ignoreCase = true)
+            }
+        }
+
+        /**
          * Pure Kotlin helper: applies all saved rules sequentially to a single paragraph
          * and returns `(updatedText, totalReplacementsCount)`.
          */

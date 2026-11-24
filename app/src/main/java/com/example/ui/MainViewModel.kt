@@ -10,9 +10,10 @@ import com.example.data.CustomReplaceManager
 import com.example.data.CustomReplaceRule
 import com.example.data.DraftManager
 import com.example.data.ErrorMemoryManager
+import com.example.data.FileEditStateSnapshot
+import com.example.data.FileRecordStatus
 import com.example.data.HistoryManager
 import com.example.data.ManualEditorPreferences
-import com.example.data.SavedDraftSummary
 import com.example.data.ThemePreferences
 import com.example.pipeline.ChapterDescriptor
 import com.example.pipeline.CleaningOptions
@@ -44,6 +45,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.UUID
 
 private const val TAG = "MainViewModel"
 
@@ -107,9 +109,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _autoSaveDraft = MutableStateFlow(manualEditorPreferences.isAutoSaveDraft())
     val autoSaveDraft: StateFlow<Boolean> = _autoSaveDraft.asStateFlow()
 
-    private val _activeDraftSummary = MutableStateFlow(draftManager.loadDraftSummary())
-    val activeDraftSummary: StateFlow<SavedDraftSummary?> = _activeDraftSummary.asStateFlow()
-
     private val _isResumingDraft = MutableStateFlow(false)
     val isResumingDraft: StateFlow<Boolean> = _isResumingDraft.asStateFlow()
 
@@ -160,6 +159,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastUndoParaIdx: Int = -1
     private var lastUndoTimestampMs: Long = 0L
     private var manualTocCounter: Int = 0
+    private var activeSessionFileId: String? = null
+
+    private fun getOrCreateActiveFileId(): String {
+        val current = activeSessionFileId
+        if (!current.isNullOrBlank()) return current
+        val generated = UUID.randomUUID().toString()
+        activeSessionFileId = generated
+        return generated
+    }
 
     fun setDarkMode(enabled: Boolean) {
         themePreferences.setDarkMode(enabled)
@@ -196,7 +204,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun learnErrorsFromHistory(entry: CleanedFileHistory) {
         viewModelScope.launch {
             val outcome = withContext(Dispatchers.IO) {
-                val pairs = historyManager.loadDiffPairsForEntry(entry)
+                var pairs = historyManager.loadDiffPairsForEntry(entry)
+                if (pairs.isEmpty()) {
+                    val savedState = draftManager.loadEditState(entry.id)
+                    if (savedState != null) {
+                        pairs = EpubCleanPipeline(appContext).extractDiffPairsFromManualChapters(savedState.chapters)
+                    }
+                }
                 if (pairs.isEmpty()) {
                     null
                 } else {
@@ -205,7 +219,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (outcome == null) {
                 _statusToastMessage.value =
-                    "File này chưa có bản đối chiếu lỗi (chỉ áp dụng cho file lưu từ bản 1.3)."
+                    "File này chưa có bản đối chiếu lỗi (chỉ áp dụng cho file đã sửa có bản gốc)."
                 return@launch
             }
             _errorMemoryRuleCount.value = outcome.totalRulesCount
@@ -248,13 +262,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 else ->
                     "Tất cả mục đã có trong thư viện (Tổng: ${result.totalRulesCount} lỗi)"
             }
-        }
-    }
-
-    fun discardSavedDraft() {
-        viewModelScope.launch(Dispatchers.IO) {
-            draftManager.clearDraft()
-            _activeDraftSummary.value = null
         }
     }
 
@@ -367,6 +374,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _saveUiState.value = SaveUiState.Idle
         _customSaveTreeUri.value = null
         _customSaveFolderLabel.value = null
+        activeSessionFileId = UUID.randomUUID().toString()
         EpubCleanForegroundService.start(
             context = appContext,
             source = source,
@@ -389,6 +397,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _saveUiState.value = SaveUiState.Idle
         _customSaveTreeUri.value = null
         _customSaveFolderLabel.value = null
+        activeSessionFileId = null
         manualUndoStack.clear()
         _manualEditorState.value = ManualEditorUiState(
             readingMode = manualEditorPreferences.getReadingMode(),
@@ -454,14 +463,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val totalFixes = snapshot.stats.junkLinksRemoved +
                             snapshot.stats.whitespaceFixes +
                             acceptedSpellingCount
+                        val fileId = getOrCreateActiveFileId()
                         val diffPairs = pipeline.extractDiffPairsFromReview(
                             workspace = workspace,
                             diffs = snapshot.diffs
                         )
 
                         val updatedHistory = withContext(Dispatchers.IO) {
+                            // Also persist full edit_states/{fileId}.json so "Sửa tiếp" & "So sánh" work later
+                            val chapters = pipeline.loadManualChapters(
+                                workspace = workspace,
+                                diffs = snapshot.diffs,
+                                mode = ManualEditorMode.KEEP_CLEANED
+                            )
+                            val tocList = TocGenerator.buildEditableTocItems(
+                                workspace = workspace,
+                                regenerateToc = snapshot.regenerateToc
+                            )
+                            val savedStateFile = draftManager.saveEditState(
+                                fileId = fileId,
+                                sourceFile = source,
+                                workspace = workspace,
+                                metadata = snapshot.metadata,
+                                mode = ManualEditorMode.KEEP_CLEANED,
+                                chapters = chapters,
+                                tocList = tocList,
+                                manualTocEntries = emptyList(),
+                                lastChapterIndex = 0,
+                                lastParagraphIndex = 0,
+                                savedFileUri = result.savedUriString,
+                                savedAbsolutePath = result.savedAbsolutePath,
+                                regenerateToc = snapshot.regenerateToc,
+                                manualEditCount = 0
+                            )
+
                             historyManager.addEntry(
                                 entry = CleanedFileHistory(
+                                    id = fileId,
                                     fileName = result.outputFileName,
                                     filePath = result.savedAbsolutePath ?: result.outputDisplayPath,
                                     uriString = result.savedUriString,
@@ -470,7 +508,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     junkLinksFixed = snapshot.stats.junkLinksRemoved,
                                     whitespaceFixed = snapshot.stats.whitespaceFixes,
                                     spellingFixed = acceptedSpellingCount,
-                                    timestampMillis = System.currentTimeMillis()
+                                    timestampMillis = System.currentTimeMillis(),
+                                    status = FileRecordStatus.SAVED,
+                                    lastChapterIndex = 0,
+                                    totalChapters = chapters.size,
+                                    lastParagraphIndex = 0,
+                                    editStateFile = savedStateFile?.name
                                 ),
                                 diffPairs = diffPairs
                             )
@@ -498,10 +541,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteHistoryItem(id: String) {
         _recentFiles.value = historyManager.removeEntry(id)
+        viewModelScope.launch(Dispatchers.IO) {
+            draftManager.deleteEditState(id)
+        }
     }
 
     fun clearAllHistory() {
         _recentFiles.value = historyManager.clearAll()
+        viewModelScope.launch(Dispatchers.IO) {
+            draftManager.clearAllEditStates()
+        }
     }
 
     fun isProcessingActive(): Boolean {
@@ -1105,8 +1154,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Upgrade 1.2: Saves the active manual editing session (text, original snapshot, TOC,
-     * reading position, cover & images) into `filesDir/drafts/` for offline resumption.
+     * Saves the active manual editing session into `filesDir/edit_states/{fileId}.json`
+     * and upserts the book into "Tất cả các file" with status `DRAFT` ("Bản nháp") at the top
+     * without creating duplicates.
      */
     fun saveCurrentManualDraft(showFeedback: Boolean = true) {
         val snapshot = processingSnapshot.value
@@ -1115,27 +1165,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val editorState = _manualEditorState.value
         if (editorState.chapters.isEmpty()) return
 
+        val fileId = getOrCreateActiveFileId()
+
         viewModelScope.launch {
-            val savedSummary = withContext(Dispatchers.IO) {
-                draftManager.saveDraft(
+            val updatedHistory = withContext(Dispatchers.IO) {
+                val existing = historyManager.getHistory().firstOrNull { it.id == fileId }
+                val existingSavedUri = existing?.uriString?.takeIf { it.isNotBlank() }
+                val existingSavedPath = existing?.filePath?.takeIf { it.isNotBlank() }
+
+                val stateFile = draftManager.saveEditState(
+                    fileId = fileId,
                     sourceFile = source,
                     workspace = workspace,
                     metadata = snapshot.metadata,
                     mode = editorState.mode,
                     chapters = editorState.chapters,
-                    editableTocItems = editorState.editableTocItems,
+                    tocList = editorState.editableTocItems,
                     manualTocEntries = editorState.manualTocEntries,
-                    currentChapterIndex = editorState.currentChapterIndex,
-                    activeParagraphIndex = editorState.activeParagraphIndex,
+                    lastChapterIndex = editorState.currentChapterIndex,
+                    lastParagraphIndex = editorState.activeParagraphIndex,
+                    savedFileUri = existingSavedUri,
+                    savedAbsolutePath = existingSavedPath,
                     regenerateToc = snapshot.regenerateToc,
                     manualEditCount = editorState.manualEditCount
+                ) ?: return@withContext null
+
+                val pipeline = EpubCleanPipeline(appContext)
+                val diffPairs = pipeline.extractDiffPairsFromManualChapters(editorState.chapters)
+                val acceptedSpellingCount = snapshot.diffs.count { it.accepted } + editorState.manualEditCount
+                val totalFixes = snapshot.stats.junkLinksRemoved +
+                    snapshot.stats.whitespaceFixes +
+                    acceptedSpellingCount
+                val displayName = existing?.fileName?.takeIf { it.isNotBlank() }
+                    ?: snapshot.metadata?.title?.trim()?.takeIf { it.isNotBlank() }
+                    ?: source.displayName
+
+                historyManager.addEntry(
+                    entry = CleanedFileHistory(
+                        id = fileId,
+                        fileName = displayName,
+                        filePath = existingSavedPath ?: (source.resolvedFilePath ?: source.displayName),
+                        uriString = existingSavedUri ?: source.sourceUriString,
+                        sourceType = source.fileType.label,
+                        totalFixes = totalFixes,
+                        junkLinksFixed = snapshot.stats.junkLinksRemoved,
+                        whitespaceFixed = snapshot.stats.whitespaceFixes,
+                        spellingFixed = acceptedSpellingCount,
+                        timestampMillis = System.currentTimeMillis(),
+                        status = FileRecordStatus.DRAFT,
+                        lastChapterIndex = editorState.currentChapterIndex,
+                        totalChapters = editorState.chapters.size,
+                        lastParagraphIndex = editorState.activeParagraphIndex,
+                        editStateFile = stateFile.name
+                    ),
+                    diffPairs = diffPairs
                 )
             }
-            if (savedSummary != null) {
-                _activeDraftSummary.value = savedSummary
+            if (updatedHistory != null) {
+                _recentFiles.value = updatedHistory
                 if (showFeedback) {
                     _manualEditorState.value = _manualEditorState.value.copy(
-                        feedbackMessage = "Đã lưu nháp"
+                        feedbackMessage = "Đã lưu bản nháp"
                     )
                 }
             } else if (showFeedback) {
@@ -1147,150 +1237,215 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Upgrade 1.2: Restores a saved offline draft from `filesDir/drafts/`, rebuilds a valid
-     * EPUB staging workspace (with preserved images & cover), and jumps directly to the
-     * exact chapter and paragraph where the user left off.
+     * Unified "Sửa tiếp" handler for BOTH "Bản nháp" and "Đã lưu" entries in "Tất cả các file":
+     * 1. First loads `filesDir/edit_states/{fileId}.json` (if present) restoring `currentParagraphs`,
+     *    `originalParagraphs`, `tocList`, `lastChapterIndex`, `lastParagraphIndex`, cover & images.
+     * 2. Otherwise falls back to reading directly from `savedFileUri` / `filePath` on device storage.
+     * Opens `ManualEditorScreen` directly at the exact chapter & paragraph with Compare & Error Memory intact.
      */
-    fun resumeSavedDraft(onReady: () -> Unit) {
+    fun continueEditingHistoryItem(entry: CleanedFileHistory, onReady: () -> Unit) {
         if (_isResumingDraft.value) return
         viewModelScope.launch {
             _isResumingDraft.value = true
             try {
                 val restored = withContext(Dispatchers.IO) {
-                    val draft = draftManager.loadFullDraft() ?: return@withContext null
-                    val sessionDir = EpubWorkspaceManager.createSessionDir(appContext)
-                    val stageDir = File(sessionDir, "stage").apply { mkdirs() }
-                    val textDir = File(stageDir, "OEBPS/Text").apply { mkdirs() }
-                    val stylesDir = File(stageDir, "OEBPS/Styles").apply { mkdirs() }
-                    val imagesDir = File(stageDir, "OEBPS/Images").apply { mkdirs() }
-                    val originalTextDir = File(sessionDir, "original_text").apply { mkdirs() }
-
-                    File(stylesDir, "style.css").writeText(
-                        TextCleaningEngine.UNIFIED_STYLE_CSS,
-                        Charsets.UTF_8
-                    )
-
-                    // Restore preserved book illustrations if any
-                    val imageRelativePaths = mutableListOf<String>()
-                    val savedImgDir = draft.savedImagesDirPath?.let { File(it) }
-                    if (savedImgDir != null && savedImgDir.exists()) {
-                        savedImgDir.listFiles()?.filter { it.isFile }?.sortedBy { it.name }?.forEach { img ->
-                            val dest = File(imagesDir, img.name)
-                            img.copyTo(dest, overwrite = true)
-                            imageRelativePaths.add("Images/${img.name}")
-                        }
+                    val savedState = draftManager.loadEditState(entry.id)
+                    if (savedState != null) {
+                        rebuildSessionFromEditState(savedState)
+                    } else {
+                        rebuildSessionDirectlyFromStoredFile(entry)
                     }
-
-                    // Write chapter XHTMLs & original snapshot files into fresh staging dir
-                    val descriptors = ArrayList<ChapterDescriptor>(draft.chapters.size)
-                    val wiredChapters = ArrayList<ManualChapterContent>(draft.chapters.size)
-                    draft.chapters.forEachIndexed { idx, chap ->
-                        val stagedFile = File(textDir, chap.fileName)
-                        val bodyHtml = buildString {
-                            chap.currentParagraphs.forEachIndexed { pIdx, para ->
-                                val tag = if (pIdx == 0 && para.length <= 120) "h2" else "p"
-                                append("<$tag>${escapeSimpleXml(para)}</$tag>\n")
-                            }
-                        }
-                        stagedFile.writeText(
-                            EpubWorkspaceManager.buildValidXhtmlDocument(chap.title, bodyHtml),
-                            Charsets.UTF_8
-                        )
-
-                        val origBodyHtml = buildString {
-                            chap.originalParagraphs.forEachIndexed { pIdx, para ->
-                                val tag = if (pIdx == 0 && para.length <= 120) "h2" else "p"
-                                append("<$tag>${escapeSimpleXml(para)}</$tag>\n")
-                            }
-                        }
-                        File(originalTextDir, chap.fileName).writeText(
-                            EpubWorkspaceManager.buildValidXhtmlDocument(chap.title, origBodyHtml),
-                            Charsets.UTF_8
-                        )
-
-                        descriptors.add(
-                            ChapterDescriptor(
-                                id = "chap_${idx + 1}",
-                                fileName = chap.fileName,
-                                title = chap.title,
-                                filePath = stagedFile.absolutePath
-                            )
-                        )
-                        wiredChapters.add(chap.copy(filePath = stagedFile.absolutePath))
-                    }
-
-                    val workspace = PreparedWorkspace(
-                        sessionDirPath = sessionDir.absolutePath,
-                        stageDirPath = stageDir.absolutePath,
-                        tempOutputEpubPath = File(sessionDir, "cleaned_output.epub").absolutePath,
-                        bookTitle = draft.bookTitle,
-                        bookAuthor = draft.bookAuthor,
-                        chapters = descriptors,
-                        imageRelativePaths = imageRelativePaths,
-                        metadata = draft.metadata,
-                        tocInspection = null,
-                        originalTextDirPath = originalTextDir.absolutePath
-                    )
-                    Triple(draft, workspace, wiredChapters)
                 }
 
                 if (restored == null) {
-                    _activeDraftSummary.value = null
-                    _homeErrorBanner.value = "Không tìm thấy dữ liệu bản nháp để khôi phục."
+                    _homeErrorBanner.value = "Không tìm thấy tệp hoặc dữ liệu biên tập để mở sửa tiếp."
                     return@launch
                 }
 
-                val (draft, workspace, wiredChapters) = restored
+                val (snapshotState, workspace, wiredChapters) = restored
                 _saveUiState.value = SaveUiState.Idle
+                activeSessionFileId = entry.id
                 manualUndoStack.clear()
                 lastUndoChapterIdx = -1
                 lastUndoParaIdx = -1
                 lastUndoTimestampMs = 0L
-                manualTocCounter = draft.manualTocEntries.size
+                manualTocCounter = snapshotState.manualTocEntries.size
 
                 ProcessingStateHolder.publish(
                     ProcessingSnapshot(
                         phase = ProcessingPhase.COMPLETED,
-                        sourceFile = draft.sourceFile,
+                        sourceFile = snapshotState.sourceFile,
                         workspace = workspace,
-                        metadata = draft.metadata,
-                        regenerateToc = draft.regenerateToc
+                        metadata = snapshotState.metadata,
+                        regenerateToc = snapshotState.regenerateToc
                     )
                 )
 
-                val tocItems = draft.editableTocItems.ifEmpty {
+                val tocItems = snapshotState.tocList.ifEmpty {
                     TocGenerator.buildEditableTocItems(workspace, regenerateToc = true)
                 }
-                val targetChap = draft.currentChapterIndex.coerceIn(0, wiredChapters.lastIndex)
-                val targetPara = draft.activeParagraphIndex.coerceIn(
+                val targetChap = snapshotState.lastChapterIndex.coerceIn(0, wiredChapters.lastIndex)
+                val targetPara = snapshotState.lastParagraphIndex.coerceIn(
                     0,
                     (wiredChapters[targetChap].currentParagraphs.lastIndex).coerceAtLeast(0)
                 )
 
                 _manualEditorState.value = ManualEditorUiState(
                     isLoading = false,
-                    mode = draft.mode,
+                    mode = snapshotState.mode,
                     chapters = wiredChapters,
                     currentChapterIndex = targetChap,
                     activeParagraphIndex = targetPara,
                     scrollTargetParagraphIndex = targetPara,
                     scrollRequestId = System.currentTimeMillis(),
-                    manualTocEntries = draft.manualTocEntries,
+                    manualTocEntries = snapshotState.manualTocEntries,
                     editableTocItems = tocItems,
                     fontSizeSp = _manualEditorState.value.fontSizeSp,
                     readingMode = manualEditorPreferences.getReadingMode(),
                     skipUndoConfirm = manualEditorPreferences.isSkipUndoConfirm(),
-                    manualEditCount = draft.manualEditCount,
-                    feedbackMessage = "Đã khôi phục bản nháp"
+                    manualEditCount = snapshotState.manualEditCount,
+                    feedbackMessage = if (entry.status == FileRecordStatus.DRAFT) {
+                        "Đã mở bản nháp tại Chương ${targetChap + 1}"
+                    } else {
+                        "Đang sửa tiếp tại Chương ${targetChap + 1}"
+                    }
                 )
                 onReady()
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to resume saved draft", e)
-                _homeErrorBanner.value = e.localizedMessage ?: "Không thể khôi phục bản nháp."
+                Log.e(TAG, "Failed to open history entry for editing", e)
+                _homeErrorBanner.value = e.localizedMessage ?: "Không thể mở tệp để sửa tiếp."
             } finally {
                 _isResumingDraft.value = false
             }
         }
+    }
+
+    private fun rebuildSessionFromEditState(
+        savedState: FileEditStateSnapshot
+    ): Triple<FileEditStateSnapshot, PreparedWorkspace, List<ManualChapterContent>> {
+        val sessionDir = EpubWorkspaceManager.createSessionDir(appContext)
+        val stageDir = File(sessionDir, "stage").apply { mkdirs() }
+        val textDir = File(stageDir, "OEBPS/Text").apply { mkdirs() }
+        val stylesDir = File(stageDir, "OEBPS/Styles").apply { mkdirs() }
+        val imagesDir = File(stageDir, "OEBPS/Images").apply { mkdirs() }
+        val originalTextDir = File(sessionDir, "original_text").apply { mkdirs() }
+
+        File(stylesDir, "style.css").writeText(
+            TextCleaningEngine.UNIFIED_STYLE_CSS,
+            Charsets.UTF_8
+        )
+
+        val imageRelativePaths = mutableListOf<String>()
+        val savedImgDir = savedState.savedImagesDirPath?.let { File(it) }
+        if (savedImgDir != null && savedImgDir.exists()) {
+            savedImgDir.listFiles()?.filter { it.isFile }?.sortedBy { it.name }?.forEach { img ->
+                val dest = File(imagesDir, img.name)
+                img.copyTo(dest, overwrite = true)
+                imageRelativePaths.add("Images/${img.name}")
+            }
+        }
+
+        val descriptors = ArrayList<ChapterDescriptor>(savedState.chapters.size)
+        val wiredChapters = ArrayList<ManualChapterContent>(savedState.chapters.size)
+        savedState.chapters.forEachIndexed { idx, chap ->
+            val stagedFile = File(textDir, chap.fileName)
+            val bodyHtml = buildString {
+                chap.currentParagraphs.forEachIndexed { pIdx, para ->
+                    val tag = if (pIdx == 0 && para.length <= 120) "h2" else "p"
+                    append("<$tag>${escapeSimpleXml(para)}</$tag>\n")
+                }
+            }
+            stagedFile.writeText(
+                EpubWorkspaceManager.buildValidXhtmlDocument(chap.title, bodyHtml),
+                Charsets.UTF_8
+            )
+
+            val origBodyHtml = buildString {
+                chap.originalParagraphs.forEachIndexed { pIdx, para ->
+                    val tag = if (pIdx == 0 && para.length <= 120) "h2" else "p"
+                    append("<$tag>${escapeSimpleXml(para)}</$tag>\n")
+                }
+            }
+            File(originalTextDir, chap.fileName).writeText(
+                EpubWorkspaceManager.buildValidXhtmlDocument(chap.title, origBodyHtml),
+                Charsets.UTF_8
+            )
+
+            descriptors.add(
+                ChapterDescriptor(
+                    id = "chap_${idx + 1}",
+                    fileName = chap.fileName,
+                    title = chap.title,
+                    filePath = stagedFile.absolutePath
+                )
+            )
+            wiredChapters.add(chap.copy(filePath = stagedFile.absolutePath))
+        }
+
+        val workspace = PreparedWorkspace(
+            sessionDirPath = sessionDir.absolutePath,
+            stageDirPath = stageDir.absolutePath,
+            tempOutputEpubPath = File(sessionDir, "cleaned_output.epub").absolutePath,
+            bookTitle = savedState.bookTitle,
+            bookAuthor = savedState.bookAuthor,
+            chapters = descriptors,
+            imageRelativePaths = imageRelativePaths,
+            metadata = savedState.metadata,
+            tocInspection = null,
+            originalTextDirPath = originalTextDir.absolutePath
+        )
+        return Triple(savedState, workspace, wiredChapters)
+    }
+
+    private suspend fun rebuildSessionDirectlyFromStoredFile(
+        entry: CleanedFileHistory
+    ): Triple<FileEditStateSnapshot, PreparedWorkspace, List<ManualChapterContent>>? {
+        val localFile = entry.filePath.takeIf { it.isNotBlank() }?.let { File(it) }
+        val targetUri: Uri = when {
+            localFile != null && localFile.exists() && localFile.canRead() -> Uri.fromFile(localFile)
+            !entry.uriString.isNullOrBlank() -> runCatching { Uri.parse(entry.uriString) }.getOrNull()
+            else -> null
+        } ?: return null
+
+        val source = FilePathResolver.inspectSourceFile(appContext, targetUri) ?: return null
+        val sessionDir = EpubWorkspaceManager.createSessionDir(appContext)
+        val inputWorkFile = File(sessionDir, "reopen_${source.displayName}")
+        FilePathResolver.copyInputToWorkFile(appContext, source, inputWorkFile)
+
+        val meta = EpubMetadataEditor.readMetadataFromSource(appContext, source)
+        val workspace = EpubWorkspaceManager.unpackAndStageEpub(
+            sourceEpubFile = inputWorkFile,
+            fallbackTitle = meta.title.ifBlank { source.baseNameWithoutExt },
+            sessionDir = sessionDir
+        ).copy(metadata = meta)
+
+        val pipeline = EpubCleanPipeline(appContext)
+        val chapters = pipeline.loadManualChapters(
+            workspace = workspace,
+            diffs = emptyList(),
+            mode = ManualEditorMode.KEEP_CLEANED
+        )
+        if (chapters.isEmpty()) return null
+
+        val tocList = TocGenerator.buildEditableTocItems(workspace, regenerateToc = false)
+        val fallbackState = FileEditStateSnapshot(
+            fileId = entry.id,
+            sourceFile = source,
+            metadata = meta,
+            bookTitle = meta.title.ifBlank { workspace.bookTitle },
+            bookAuthor = meta.creator.ifBlank { workspace.bookAuthor },
+            mode = ManualEditorMode.KEEP_CLEANED,
+            chapters = chapters,
+            tocList = tocList,
+            manualTocEntries = emptyList(),
+            lastChapterIndex = entry.lastChapterIndex.coerceIn(0, chapters.lastIndex),
+            lastParagraphIndex = entry.lastParagraphIndex.coerceAtLeast(0),
+            savedFileUri = entry.uriString,
+            savedAbsolutePath = entry.filePath,
+            regenerateToc = false,
+            manualEditCount = 0
+        )
+        return Triple(fallbackState, workspace, chapters)
     }
 
     private fun escapeSimpleXml(text: String): String {
@@ -1307,6 +1462,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val source = snapshot.sourceFile ?: return
         val workspace = snapshot.workspace ?: return
         val editorState = _manualEditorState.value
+        val fileId = getOrCreateActiveFileId()
 
         viewModelScope.launch {
             _saveUiState.value = SaveUiState.Saving
@@ -1339,8 +1495,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val diffPairs = pipeline.extractDiffPairsFromManualChapters(editorState.chapters)
 
                         val updatedHistory = withContext(Dispatchers.IO) {
+                            // Persist edit_states/{fileId}.json WITH savedFileUri so "Sửa tiếp" & "So sánh" stay intact
+                            val savedStateFile = draftManager.saveEditState(
+                                fileId = fileId,
+                                sourceFile = source,
+                                workspace = workspace,
+                                metadata = snapshot.metadata,
+                                mode = editorState.mode,
+                                chapters = editorState.chapters,
+                                tocList = editorState.editableTocItems,
+                                manualTocEntries = editorState.manualTocEntries,
+                                lastChapterIndex = editorState.currentChapterIndex,
+                                lastParagraphIndex = editorState.activeParagraphIndex,
+                                savedFileUri = result.savedUriString,
+                                savedAbsolutePath = result.savedAbsolutePath,
+                                regenerateToc = snapshot.regenerateToc,
+                                manualEditCount = editorState.manualEditCount
+                            )
+
+                            // Promote existing Draft (same fileId) -> SAVED at top of "Tất cả các file" (zero duplicates)
                             historyManager.addEntry(
                                 entry = CleanedFileHistory(
+                                    id = fileId,
                                     fileName = result.outputFileName,
                                     filePath = result.savedAbsolutePath ?: result.outputDisplayPath,
                                     uriString = result.savedUriString,
@@ -1349,14 +1525,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     junkLinksFixed = snapshot.stats.junkLinksRemoved,
                                     whitespaceFixed = snapshot.stats.whitespaceFixes,
                                     spellingFixed = acceptedSpellingCount,
-                                    timestampMillis = System.currentTimeMillis()
+                                    timestampMillis = System.currentTimeMillis(),
+                                    status = FileRecordStatus.SAVED,
+                                    lastChapterIndex = editorState.currentChapterIndex,
+                                    totalChapters = editorState.chapters.size,
+                                    lastParagraphIndex = editorState.activeParagraphIndex,
+                                    editStateFile = savedStateFile?.name
                                 ),
                                 diffPairs = diffPairs
                             )
                         }
-                        // Clear active draft once the user successfully exports the final EPUB
-                        withContext(Dispatchers.IO) { draftManager.clearDraft() }
-                        _activeDraftSummary.value = null
                         _recentFiles.value = updatedHistory
                         _saveUiState.value = SaveUiState.Completed(result)
                     }
