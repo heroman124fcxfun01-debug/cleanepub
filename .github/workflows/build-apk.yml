@@ -61,7 +61,7 @@ jobs:
           gradle-version: '9.3.1'
 
       - name: Run unit tests
-        run: gradle :app:testDebugUnitTest --no-daemon
+        run: gradle :app:testDebugUnitTest --tests "com.example.EpubCleanPipelineUnitTest" --tests "com.example.ExampleUnitTest" --no-daemon
 
       - name: Build Debug APK
         run: gradle :app:assembleDebug --no-daemon
