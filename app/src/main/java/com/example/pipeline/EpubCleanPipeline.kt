@@ -1,8 +1,6 @@
 package com.example.pipeline
 
 import android.content.Context
-import com.example.ai.GeminiProofreader
-import com.example.ai.IndexedParagraph
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -11,19 +9,18 @@ import org.jsoup.nodes.Document
 import java.io.File
 import kotlin.coroutines.coroutineContext
 
-private const val MAX_PARAGRAPHS_PER_BATCH = 12
-private const val MAX_CHARS_PER_BATCH = 2600
+private const val MAX_PREVIEW_DIFFS = 400
 
 class EpubCleanPipeline(
     private val context: Context,
-    private val proofreader: GeminiProofreader = GeminiProofreader()
+    private val proofreader: OnDeviceVietnameseProofreader = OnDeviceVietnameseProofreader()
 ) {
 
     suspend fun run(
         source: SourceFileInfo,
         onUpdate: (ProcessingSnapshot) -> Unit
     ): ProcessingSnapshot = withContext(Dispatchers.IO) {
-        var stepStates = PipelineStep.entries.associateWith { StepState.PENDING }.toMutableMap()
+        val stepStates = PipelineStep.entries.associateWith { StepState.PENDING }.toMutableMap()
         var stats = RealtimeStats()
         var bookContext: BookContext? = null
         val diffs = mutableListOf<DiffEntry>()
@@ -54,7 +51,7 @@ class EpubCleanPipeline(
         }
 
         // ------------------------------------------------------------------
-        // BƯỚC 0: Giải nén / Trích xuất PDF & Đọc ngữ cảnh toàn cục
+        // BƯỚC 0: Giải nén / Trích xuất PDF & Đọc ngữ cảnh toàn cục (100% trên máy)
         // ------------------------------------------------------------------
         stepStates[PipelineStep.STEP_0_UNPACK_CONTEXT] = StepState.RUNNING
         emit(PipelineStep.STEP_0_UNPACK_CONTEXT, 0.04f, "Đang nạp tệp nguồn vào vùng xử lý tạm…")
@@ -100,7 +97,7 @@ class EpubCleanPipeline(
             }
         }
 
-        // Remove raw input copy once unpacked to keep storage/RAM minimal
+        // Remove raw input copy immediately to keep disk/RAM minimal
         rawInputFile.delete()
 
         val totalChapters = workspace.chapters.size
@@ -109,7 +106,7 @@ class EpubCleanPipeline(
         emit(
             PipelineStep.STEP_0_UNPACK_CONTEXT,
             0.15f,
-            "AI đang quét ngữ cảnh toàn cục & trích xuất Tên riêng ($totalChapters chương)…"
+            "Đang quét ngữ cảnh & trích xuất Tên riêng trên máy ($totalChapters chương)…"
         )
         val contextSample = collectLightweightContextSample(workspace.chapters)
         bookContext = proofreader.analyzeGlobalContext(contextSample)
@@ -117,7 +114,7 @@ class EpubCleanPipeline(
         emit(
             PipelineStep.STEP_0_UNPACK_CONTEXT,
             0.20f,
-            "Đã xác định thể loại: ${bookContext.genre} (${bookContext.properNouns.size} tên riêng)"
+            "Thể loại: ${bookContext.genre} (${bookContext.properNouns.size} tên riêng)"
         )
 
         // ------------------------------------------------------------------
@@ -135,7 +132,7 @@ class EpubCleanPipeline(
                 junkLinksRemoved = stats.junkLinksRemoved + result.junkRemovedCount,
                 processedChapters = idx + 1
             )
-            val frac = 0.20f + ((idx + 1).toFloat() / totalChapters) * 0.14f
+            val frac = 0.20f + ((idx + 1).toFloat() / totalChapters) * 0.16f
             emit(
                 PipelineStep.STEP_1_CLEAN_JUNK,
                 frac,
@@ -155,7 +152,7 @@ class EpubCleanPipeline(
             TextCleaningEngine.enforceUnifiedTypography(doc)
             saveXhtml(file, chapter.title, doc)
 
-            val frac = 0.34f + ((idx + 1).toFloat() / totalChapters) * 0.12f
+            val frac = 0.36f + ((idx + 1).toFloat() / totalChapters) * 0.14f
             emit(
                 PipelineStep.STEP_2_UNIFY_FONT,
                 frac,
@@ -178,7 +175,7 @@ class EpubCleanPipeline(
             stats = stats.copy(
                 whitespaceFixes = stats.whitespaceFixes + result.whitespaceFixesCount
             )
-            val frac = 0.46f + ((idx + 1).toFloat() / totalChapters) * 0.14f
+            val frac = 0.50f + ((idx + 1).toFloat() / totalChapters) * 0.14f
             emit(
                 PipelineStep.STEP_3_NORMALIZE_WHITESPACE,
                 frac,
@@ -188,10 +185,10 @@ class EpubCleanPipeline(
         stepStates[PipelineStep.STEP_3_NORMALIZE_WHITESPACE] = StepState.COMPLETED
 
         // ------------------------------------------------------------------
-        // BƯỚC 4: Hiệu đính chính tả & dấu tiếng Việt bằng AI + Đóng gói EPUB
+        // BƯỚC 4: Hiệu đính chính tả & dấu tiếng Việt trên máy + Đóng gói EPUB
         // ------------------------------------------------------------------
         stepStates[PipelineStep.STEP_4_AI_PROOFREAD_PACK] = StepState.RUNNING
-        val activeContext = bookContext ?: BookContext("Sách tiếng Việt", emptyList(), "")
+        val activeContext = bookContext
 
         workspace.chapters.forEachIndexed { chapIdx, chapter ->
             coroutineContext.ensureActive()
@@ -199,51 +196,41 @@ class EpubCleanPipeline(
             val doc = parseXhtml(file)
             val editableElements = TextCleaningEngine.extractEditableParagraphs(doc)
 
-            if (editableElements.isNotEmpty()) {
-                val batches = buildParagraphBatches(editableElements.mapIndexed { pIdx, el ->
-                    IndexedParagraph(index = pIdx, text = el.text())
-                })
-
-                var chapterModified = false
-                batches.forEachIndexed { bIdx, batch ->
-                    coroutineContext.ensureActive()
-                    val chapterProgress = (chapIdx + (bIdx.toFloat() / batches.size.coerceAtLeast(1))) / totalChapters
-                    val frac = 0.60f + chapterProgress * 0.34f
-                    emit(
-                        PipelineStep.STEP_4_AI_PROOFREAD_PACK,
-                        frac,
-                        "AI đang hiệu đính ${chapter.title} (nhóm ${bIdx + 1}/${batches.size})…"
-                    )
-
-                    val corrections = proofreader.proofreadParagraphBatch(batch, activeContext)
-                    for (fix in corrections) {
-                        val targetEl = editableElements.getOrNull(fix.index) ?: continue
-                        val beforeText = targetEl.text()
-                        val cleanedAfter = TextCleaningEngine.normalizeParagraphText(fix.correctedText)
-                        if (cleanedAfter.isNotBlank() && cleanedAfter != beforeText) {
-                            targetEl.text(cleanedAfter)
-                            chapterModified = true
-                            diffs.add(
-                                DiffEntry(
-                                    id = "${chapter.fileName}_${fix.index}_${diffs.size}",
-                                    chapterFileName = chapter.fileName,
-                                    chapterTitle = chapter.title,
-                                    paragraphIndex = fix.index,
-                                    beforeText = beforeText,
-                                    afterText = cleanedAfter,
-                                    reason = fix.reason,
-                                    accepted = true
-                                )
+            var chapterModified = false
+            editableElements.forEachIndexed { pIdx, el ->
+                val beforeText = el.text()
+                val fix = proofreader.proofreadParagraph(beforeText, activeContext)
+                if (fix != null && fix.correctedText != beforeText) {
+                    el.text(fix.correctedText)
+                    chapterModified = true
+                    stats = stats.copy(spellingFixes = stats.spellingFixes + 1)
+                    if (diffs.size < MAX_PREVIEW_DIFFS) {
+                        diffs.add(
+                            DiffEntry(
+                                id = "${chapter.fileName}_${pIdx}_${diffs.size}",
+                                chapterFileName = chapter.fileName,
+                                chapterTitle = chapter.title,
+                                paragraphIndex = pIdx,
+                                beforeText = beforeText,
+                                afterText = fix.correctedText,
+                                reason = fix.reason,
+                                accepted = true
                             )
-                            stats = stats.copy(spellingFixes = stats.spellingFixes + 1)
-                        }
+                        )
                     }
                 }
-
-                if (chapterModified) {
-                    saveXhtml(file, chapter.title, doc)
-                }
             }
+
+            if (chapterModified) {
+                saveXhtml(file, chapter.title, doc)
+            }
+
+            val frac = 0.64f + ((chapIdx + 1).toFloat() / totalChapters) * 0.30f
+            emit(
+                PipelineStep.STEP_4_AI_PROOFREAD_PACK,
+                frac,
+                "Đang hiệu đính chính tả & dấu tiếng Việt (${chapIdx + 1}/$totalChapters chương)…"
+            )
         }
 
         emit(
@@ -257,7 +244,7 @@ class EpubCleanPipeline(
         emit(
             step = PipelineStep.STEP_4_AI_PROOFREAD_PACK,
             progress = 1.0f,
-            detail = "Hoàn tất làm sạch & hiệu đính!",
+            detail = "Hoàn tất làm sạch & hiệu đính trên máy!",
             phase = ProcessingPhase.COMPLETED,
             workspace = workspace
         )
@@ -293,41 +280,20 @@ class EpubCleanPipeline(
 
     private fun collectLightweightContextSample(chapters: List<ChapterDescriptor>): String {
         if (chapters.isEmpty()) return ""
-        val indices = linkedSetOf(0, chapters.size / 2, chapters.lastIndex)
-        val sb = StringBuilder(6500)
-        for (i in indices) {
-            if (sb.length >= 6000) break
+        val step = (chapters.size / 6).coerceAtLeast(1)
+        val sb = StringBuilder(24_000)
+        var i = 0
+        while (i < chapters.size && sb.length < 22_000) {
             val file = File(chapters[i].filePath)
-            if (!file.exists()) continue
-            val text = Jsoup.parse(file, "UTF-8").body().text()
-            if (text.isNotBlank()) {
-                sb.appendLine("--- ${chapters[i].title} ---")
-                sb.appendLine(text.take(2000))
+            if (file.exists()) {
+                val text = Jsoup.parse(file, "UTF-8").body().text()
+                if (text.isNotBlank()) {
+                    sb.appendLine(text.take(3500))
+                }
             }
+            i += step
         }
         return sb.toString()
-    }
-
-    private fun buildParagraphBatches(paragraphs: List<IndexedParagraph>): List<List<IndexedParagraph>> {
-        val batches = mutableListOf<List<IndexedParagraph>>()
-        var current = mutableListOf<IndexedParagraph>()
-        var charCount = 0
-
-        for (p in paragraphs) {
-            if (current.isNotEmpty() &&
-                (current.size >= MAX_PARAGRAPHS_PER_BATCH || charCount + p.text.length > MAX_CHARS_PER_BATCH)
-            ) {
-                batches.add(current)
-                current = mutableListOf()
-                charCount = 0
-            }
-            current.add(p)
-            charCount += p.text.length
-        }
-        if (current.isNotEmpty()) {
-            batches.add(current)
-        }
-        return batches
     }
 
     private fun parseXhtml(file: File): Document {

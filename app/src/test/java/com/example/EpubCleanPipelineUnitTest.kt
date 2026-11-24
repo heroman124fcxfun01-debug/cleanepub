@@ -124,4 +124,24 @@ class EpubCleanPipelineUnitTest {
             tempRoot.deleteRecursively()
         }
     }
+
+    @Test
+    fun onDeviceProofreader_fixesVietnameseDiacriticsOcrAndProtectsProperNouns() {
+        val engine = com.example.pipeline.OnDeviceVietnameseProofreader()
+        val sample = """
+            Trương Vô Kỵ vận dụng nội công và kiếm khí trong tông môn.
+            Sau đó Trương Vô Kỵ gặp lão giả tu luyện đan điền.
+        """.trimIndent()
+        val ctx = engine.analyzeGlobalContext(sample)
+        assertEquals("Kiếm hiệp / Tiên hiệp", ctx.genre)
+        assertTrue("Proper noun should be detected", ctx.properNouns.contains("Trương Vô Kỵ"))
+
+        val input = "Trương Vô Kỵ rất vui vẽ khi sử lý công việc một cách dể dàng, hoà bình và khoẻ mạnh."
+        val fix = engine.proofreadParagraph(input, ctx)
+        assertTrue(fix != null)
+        assertEquals(
+            "Trương Vô Kỵ rất vui vẻ khi xử lý công việc một cách dễ dàng, hòa bình và khỏe mạnh.",
+            fix!!.correctedText
+        )
+    }
 }

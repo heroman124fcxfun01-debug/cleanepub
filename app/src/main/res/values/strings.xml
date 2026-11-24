@@ -7,7 +7,7 @@
     <string name="home_supported_formats">Hỗ trợ EPUB chuẩn &amp; PDF • Xuất file EPUB sạch</string>
     <string name="home_section_recent">GẦN ĐÂY</string>
     <string name="home_empty_title">Chưa có sách nào được xử lý</string>
-    <string name="home_empty_subtitle">Chọn một tệp .epub hoặc .pdf từ bộ nhớ máy để dọn rác định dạng, chuẩn hóa khoảng trắng và hiệu đính chính tả tiếng Việt bằng AI.</string>
+    <string name="home_empty_subtitle">Chọn một tệp .epub hoặc .pdf từ bộ nhớ máy để dọn rác định dạng, chuẩn hóa khoảng trắng và hiệu đính chính tả tiếng Việt hoàn toàn ngoại tuyến ngay trên máy.</string>
     <string name="storage_permission_banner_title">Cấp quyền truy cập toàn bộ bộ nhớ</string>
     <string name="storage_permission_banner_desc">Cho phép đọc và lưu đè trực tiếp vào đúng thư mục gốc của sách.</string>
     <string name="storage_permission_action">Cấp quyền</string>
@@ -18,11 +18,11 @@
 
     <!-- Processing Screen -->
     <string name="processing_title">Quét &amp; Xử lý</string>
-    <string name="processing_background_badge">Chạy nền Foreground Service</string>
+    <string name="processing_background_badge">Chạy nền trên máy</string>
     <string name="processing_section_pipeline">TIẾN TRÌNH 5 BƯỚC</string>
     <string name="processing_metric_junk">Link rác</string>
     <string name="processing_metric_whitespace">Khoảng trắng</string>
-    <string name="processing_metric_spelling">Chính tả / Dấu</string>
+    <string name="processing_metric_spelling">Chính tả</string>
     <string name="processing_cancel">Hủy xử lý</string>
     <string name="processing_retry">Thử lại</string>
     <string name="processing_back_home">Về trang chủ</string>
@@ -31,7 +31,7 @@
     <string name="processing_step_1">Bước 1 · Dọn rác &amp; Liên kết thừa</string>
     <string name="processing_step_2">Bước 2 · Ép 1 Font chuẩn (Cấm nghiêng)</string>
     <string name="processing_step_3">Bước 3 · Chuẩn hóa khoảng trắng</string>
-    <string name="processing_step_4">Bước 4 · Hiệu đính AI &amp; Đóng gói EPUB</string>
+    <string name="processing_step_4">Bước 4 · Hiệu đính tiếng Việt &amp; Đóng gói</string>
 
     <!-- Notification -->
     <string name="notif_channel_name">Xử lý sách EpubCleanAI</string>

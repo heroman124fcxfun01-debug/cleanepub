@@ -423,7 +423,7 @@ private fun LiveMetricCard(
             text = label,
             style = MaterialTheme.typography.labelSmall,
             color = IosLabelSecondary,
-            maxLines = 1,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
     }

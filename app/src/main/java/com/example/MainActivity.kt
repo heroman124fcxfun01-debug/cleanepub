@@ -25,7 +25,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.example.ai.configureAppCheck
 import com.example.pipeline.FilePathResolver
 import com.example.pipeline.ProcessingPhase
 import com.example.ui.MainViewModel
@@ -44,10 +43,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // STEP 1 (MANDATORY): Configure Firebase App Check with launch intent before any UI or Firebase calls
-        configureAppCheck(this, intent)
-
-        // Initialize PDFBox-Android resource loader
+        // Initialize PDFBox-Android resource loader (100% on-device)
         PDFBoxResourceLoader.init(applicationContext)
 
         enableEdgeToEdge(
