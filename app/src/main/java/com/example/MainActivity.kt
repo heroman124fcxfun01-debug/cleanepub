@@ -103,7 +103,7 @@ private fun EpubCleanNavHost(
     val navController = rememberNavController()
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    val recentBooks by viewModel.recentBooks.collectAsStateWithLifecycle()
+    val recentFiles by viewModel.recentFiles.collectAsStateWithLifecycle()
     val hasAllFilesAccess by viewModel.hasAllFilesAccess.collectAsStateWithLifecycle()
     val snapshot by viewModel.processingSnapshot.collectAsStateWithLifecycle()
     val saveUiState by viewModel.saveUiState.collectAsStateWithLifecycle()
@@ -212,7 +212,7 @@ private fun EpubCleanNavHost(
     ) {
         composable(ROUTE_HOME) {
             MainScreen(
-                recentBooks = recentBooks,
+                recentFiles = recentFiles,
                 hasAllFilesAccess = hasAllFilesAccess,
                 cleaningOptions = cleaningOptions,
                 isLoadingMetadata = isLoadingMetadata,
@@ -230,10 +230,14 @@ private fun EpubCleanNavHost(
                 onRequestStoragePermission = ::requestStorageAccess,
                 onOpenSettingsClick = { showSettingsDialog = true },
                 onUpdateCleaningOptions = { viewModel.updateCleaningOptions(it) },
-                onOpenRecentBook = { book ->
-                    openEpubExternally(book.outputFilePath, book.outputUriString)
+                onOpenHistoryFile = { entry ->
+                    openEpubExternally(entry.filePath, entry.uriString)
                 },
-                onDeleteRecentBook = { id -> viewModel.deleteHistoryItem(id) },
+                onReprocessHistoryFile = { entry ->
+                    viewModel.reprocessHistoryItem(entry)
+                },
+                onDeleteHistoryFile = { id -> viewModel.deleteHistoryItem(id) },
+                onClearAllHistory = { viewModel.clearAllHistory() },
                 onDismissError = { viewModel.clearHomeError() }
             )
         }

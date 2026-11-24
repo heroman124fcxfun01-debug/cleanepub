@@ -2,6 +2,7 @@ package com.example.ui.components
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -18,14 +19,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.FileCopy
 import androidx.compose.material.icons.rounded.SaveAs
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -37,34 +38,59 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.R
 import com.example.pipeline.SaveMode
 import com.example.pipeline.SaveResult
 import com.example.pipeline.SourceFileInfo
+import com.example.ui.theme.IosBlue
+import com.example.ui.theme.IosBlueBottom
+import com.example.ui.theme.IosBlueTop
 import com.example.ui.theme.IosScrim
 import com.example.ui.theme.JetBrainsMonoFamily
+import com.example.ui.theme.LocalIsDarkTheme
 
 @Composable
 fun IosCard(
     modifier: Modifier = Modifier,
     shape: RoundedCornerShape = RoundedCornerShape(20.dp),
-    contentPadding: PaddingValues = PaddingValues(16.dp),
+    contentPadding: PaddingValues = PaddingValues(14.dp),
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val isDark = LocalIsDarkTheme.current
     Surface(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .shadow(
+                elevation = 4.dp,
+                shape = shape,
+                ambientColor = Color.Black.copy(alpha = if (isDark) 0.25f else 0.06f),
+                spotColor = Color.Black.copy(alpha = if (isDark) 0.35f else 0.10f)
+            ),
         shape = shape,
         color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outline),
+        border = BorderStroke(
+            width = 0.8.dp,
+            brush = Brush.verticalGradient(
+                colors = if (isDark) {
+                    listOf(Color.White.copy(alpha = 0.16f), Color.White.copy(alpha = 0.04f))
+                } else {
+                    listOf(Color.White.copy(alpha = 0.95f), MaterialTheme.colorScheme.outline)
+                }
+            )
+        ),
         tonalElevation = 0.dp,
         shadowElevation = 0.dp
     ) {
@@ -81,7 +107,7 @@ fun IosHairlineDivider(
     startIndent: Boolean = false
 ) {
     HorizontalDivider(
-        modifier = modifier.padding(start = if (startIndent) 16.dp else 0.dp),
+        modifier = modifier.padding(start = if (startIndent) 14.dp else 0.dp),
         thickness = 0.5.dp,
         color = MaterialTheme.colorScheme.outline
     )
@@ -96,20 +122,24 @@ fun IosSectionHeader(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 4.dp, vertical = 4.dp),
+            .padding(horizontal = 2.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Surface(
             shape = RoundedCornerShape(50),
-            color = MaterialTheme.colorScheme.surfaceVariant
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.78f),
+            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outline)
         ) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.labelMedium,
+                fontSize = 11.sp,
+                lineHeight = 14.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
             )
         }
         if (trailing != null) {
@@ -119,55 +149,89 @@ fun IosSectionHeader(
 }
 
 /**
- * Primary iOS pill/oval button (`RoundedCornerShape(50)`).
+ * 3D Glossy iOS Pill Primary Button (`RoundedCornerShape(50)`):
+ * - Blue glow drop shadow (`elevation = 10.dp`, `spotColor = #007AFF @ 45%`)
+ * - Vertical glossy gradient `#2E9BFF` -> `#0066E6`
+ * - Top highlight bevel border `Color.White.copy(alpha = 0.35f)`
+ * - Compact height `48.dp`, single-line `15.sp` SemiBold label
  */
 @Composable
 fun IosPrimaryButton(
     text: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    height: Dp = 48.dp,
     enabled: Boolean = true,
     leadingIcon: @Composable (() -> Unit)? = null
 ) {
-    Button(
-        onClick = onClick,
-        enabled = enabled,
+    val pillShape = RoundedCornerShape(50)
+    val gradientColors = if (enabled) {
+        listOf(IosBlueTop, IosBlueBottom)
+    } else {
+        listOf(IosBlueTop.copy(alpha = 0.45f), IosBlueBottom.copy(alpha = 0.45f))
+    }
+
+    Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(54.dp),
-        shape = RoundedCornerShape(50),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-            disabledContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
-            disabledContentColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f)
-        ),
-        elevation = ButtonDefaults.buttonElevation(
-            defaultElevation = 0.dp,
-            pressedElevation = 0.dp
-        )
+            .height(height)
+            .shadow(
+                elevation = if (enabled) 10.dp else 2.dp,
+                shape = pillShape,
+                ambientColor = IosBlue.copy(alpha = 0.25f),
+                spotColor = IosBlue.copy(alpha = 0.45f)
+            )
+            .clip(pillShape)
+            .background(brush = Brush.verticalGradient(gradientColors))
+            .border(
+                width = 1.dp,
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = 0.35f),
+                        Color.White.copy(alpha = 0.08f)
+                    )
+                ),
+                shape = pillShape
+            )
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 16.dp),
+        contentAlignment = Alignment.Center
     ) {
-        if (leadingIcon != null) {
-            leadingIcon()
-            Spacer(modifier = Modifier.width(8.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            if (leadingIcon != null) {
+                leadingIcon()
+                Spacer(modifier = Modifier.width(6.dp))
+            }
+            Text(
+                text = text,
+                fontSize = 15.sp,
+                lineHeight = 19.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
         }
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold
-        )
     }
 }
 
 /**
- * Reusable iOS Floating Rounded-Square Dialog Card (`RoundedCornerShape(28.dp)`)
- * floating over a dimmed scrim with pure white surface in Light Mode and `#1C1C1E` in Dark Mode.
+ * Reusable iOS Floating Rounded-Square Dialog Card (`RoundedCornerShape(24.dp)`):
+ * - Deep elevation (`16.dp`) floating over a dimmed scrim
+ * - Subtle `1.dp` luminous white bevel border for crisp 3D separation
  */
 @Composable
 fun IosFloatingDialog(
     onDismissRequest: () -> Unit,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val isDark = LocalIsDarkTheme.current
+    val dialogShape = RoundedCornerShape(24.dp)
+
     Dialog(
         onDismissRequest = onDismissRequest,
         properties = DialogProperties(
@@ -184,23 +248,43 @@ fun IosFloatingDialog(
                     indication = null,
                     onClick = onDismissRequest
                 )
-                .padding(horizontal = 20.dp, vertical = 28.dp),
+                .padding(horizontal = 20.dp, vertical = 24.dp),
             contentAlignment = Alignment.Center
         ) {
-            Surface(
+            Box(
                 modifier = Modifier
-                    .widthIn(max = 460.dp)
+                    .widthIn(max = 420.dp)
                     .fillMaxWidth()
+                    .shadow(
+                        elevation = 16.dp,
+                        shape = dialogShape,
+                        ambientColor = Color.Black.copy(alpha = 0.22f),
+                        spotColor = Color.Black.copy(alpha = 0.36f)
+                    )
+                    .clip(dialogShape)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(
+                        width = 1.dp,
+                        brush = Brush.verticalGradient(
+                            colors = if (isDark) {
+                                listOf(
+                                    Color.White.copy(alpha = 0.24f),
+                                    Color.White.copy(alpha = 0.06f)
+                                )
+                            } else {
+                                listOf(
+                                    Color.White.copy(alpha = 0.92f),
+                                    Color.White.copy(alpha = 0.35f)
+                                )
+                            }
+                        ),
+                        shape = dialogShape
+                    )
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                         onClick = {}
-                    ),
-                shape = RoundedCornerShape(28.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outline),
-                shadowElevation = 24.dp,
-                tonalElevation = 0.dp
+                    )
             ) {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
@@ -212,7 +296,7 @@ fun IosFloatingDialog(
 }
 
 /**
- * Floating iOS Rounded-Square Save Dialog (`RoundedCornerShape(28.dp)`) with oval action buttons:
+ * Floating iOS Rounded-Square Save Dialog (`RoundedCornerShape(24.dp)`) with 3D pill options:
  * 1. Lưu thay thế file cũ
  * 2. Giữ lại file cũ (_clean.epub)
  */
@@ -229,14 +313,18 @@ fun IosSaveActionSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(22.dp),
+                .verticalScroll(rememberScrollState())
+                .padding(18.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
                 text = stringResource(R.string.sheet_save_title),
-                style = MaterialTheme.typography.titleLarge,
+                fontSize = 18.sp,
+                lineHeight = 22.sp,
                 color = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center
             )
             Spacer(modifier = Modifier.height(6.dp))
@@ -246,19 +334,19 @@ fun IosSaveActionSheet(
             ) {
                 Text(
                     text = "Thư mục: ${sourceFile.displayParentFolder}",
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        fontFamily = JetBrainsMonoFamily
-                    ),
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp,
+                    fontFamily = JetBrainsMonoFamily,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                 )
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // Option 1: Replace original (oval pill card)
+            // Option 1: Replace original
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -271,26 +359,30 @@ fun IosSaveActionSheet(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.SaveAs,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(20.dp)
                     )
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = stringResource(R.string.sheet_option_replace),
-                            style = MaterialTheme.typography.titleSmall,
+                            fontSize = 14.sp,
+                            lineHeight = 18.sp,
                             color = MaterialTheme.colorScheme.error,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = stringResource(R.string.sheet_option_replace_sub),
-                            style = MaterialTheme.typography.bodySmall,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -301,7 +393,7 @@ fun IosSaveActionSheet(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Option 2: Keep original -> _clean.epub (oval pill card)
+            // Option 2: Keep original -> _clean.epub
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -314,29 +406,33 @@ fun IosSaveActionSheet(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.FileCopy,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(20.dp)
                     )
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = stringResource(R.string.sheet_option_keep),
-                            style = MaterialTheme.typography.titleSmall,
+                            fontSize = 14.sp,
+                            lineHeight = 18.sp,
                             color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = stringResource(
                                 R.string.sheet_option_keep_sub,
                                 sourceFile.cleanCopyFileName
                             ),
-                            style = MaterialTheme.typography.bodySmall,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -345,22 +441,23 @@ fun IosSaveActionSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
             OutlinedButton(
                 onClick = onDismiss,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp)
+                    .height(44.dp)
                     .testTag("action_sheet_cancel"),
                 shape = RoundedCornerShape(50),
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
             ) {
                 Text(
                     text = stringResource(R.string.sheet_cancel),
-                    style = MaterialTheme.typography.labelLarge,
+                    fontSize = 14.sp,
                     color = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1
                 )
             }
         }
@@ -377,12 +474,13 @@ fun IosSaveSuccessDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(22.dp),
+                .verticalScroll(rememberScrollState())
+                .padding(18.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Box(
                 modifier = Modifier
-                    .size(58.dp)
+                    .size(48.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.secondaryContainer),
                 contentAlignment = Alignment.Center
@@ -391,25 +489,28 @@ fun IosSaveSuccessDialog(
                     imageVector = Icons.Rounded.CheckCircle,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.secondary,
-                    modifier = Modifier.size(34.dp)
+                    modifier = Modifier.size(28.dp)
                 )
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             Text(
                 text = stringResource(R.string.save_success_title),
-                style = MaterialTheme.typography.titleLarge,
+                fontSize = 18.sp,
+                lineHeight = 22.sp,
                 color = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.Bold,
+                maxLines = 1,
                 textAlign = TextAlign.Center
             )
 
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
             Text(
                 text = result.outputFileName,
-                style = MaterialTheme.typography.bodyMedium,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
                 color = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.SemiBold,
                 textAlign = TextAlign.Center
@@ -419,52 +520,44 @@ fun IosSaveSuccessDialog(
 
             Text(
                 text = result.outputDisplayPath,
-                style = MaterialTheme.typography.bodySmall.copy(
-                    fontFamily = JetBrainsMonoFamily
-                ),
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+                fontFamily = JetBrainsMonoFamily,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedButton(
                     onClick = onOpenEpub,
                     modifier = Modifier
                         .weight(1f)
-                        .height(48.dp)
+                        .height(44.dp)
                         .testTag("dialog_open_epub_button"),
                     shape = RoundedCornerShape(50),
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
                 ) {
                     Text(
                         text = stringResource(R.string.save_success_open),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1
                     )
                 }
 
-                Button(
-                    onClick = onDone,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp)
-                        .testTag("dialog_done_button"),
-                    shape = RoundedCornerShape(50),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = Color.White
-                    ),
-                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
-                ) {
-                    Text(
+                Box(modifier = Modifier.weight(1f)) {
+                    IosPrimaryButton(
                         text = stringResource(R.string.save_success_done),
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold
+                        onClick = onDone,
+                        height = 44.dp,
+                        modifier = Modifier.testTag("dialog_done_button")
                     )
                 }
             }

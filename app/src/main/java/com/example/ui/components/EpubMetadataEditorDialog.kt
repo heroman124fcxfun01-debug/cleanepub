@@ -95,7 +95,7 @@ fun EpubMetadataEditorDialog(
                 .fillMaxWidth()
                 .heightIn(max = 640.dp)
                 .verticalScroll(rememberScrollState())
-                .padding(22.dp)
+                .padding(18.dp)
         ) {
             // Header
             Row(
@@ -108,7 +108,9 @@ fun EpubMetadataEditorDialog(
                         text = "Thông tin sách",
                         style = MaterialTheme.typography.titleLarge,
                         color = MaterialTheme.colorScheme.onSurface,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         text = fileDisplayName,
@@ -119,19 +121,20 @@ fun EpubMetadataEditorDialog(
                     )
                 }
                 Spacer(modifier = Modifier.width(8.dp))
-                IconButton(
-                    onClick = onDismiss,
+                Box(
                     modifier = Modifier
-                        .size(40.dp)
+                        .size(32.dp)
                         .clip(CircleShape)
                         .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .testTag("metadata_close_button")
+                        .clickable(onClick = onDismiss)
+                        .testTag("metadata_close_button"),
+                    contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Close,
                         contentDescription = "Đóng",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                 }
             }
@@ -295,61 +298,54 @@ fun EpubMetadataEditorDialog(
                 }
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // Bottom Oval CTA Buttons
+            // Bottom 3D Pill CTA Buttons
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedButton(
                     onClick = onDismiss,
                     modifier = Modifier
-                        .weight(0.42f)
-                        .height(50.dp)
+                        .weight(0.38f)
+                        .height(46.dp)
                         .testTag("metadata_cancel_button"),
                     shape = RoundedCornerShape(50),
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
                 ) {
                     Text(
                         text = "Hủy",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurface
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1
                     )
                 }
 
-                Button(
-                    onClick = {
-                        onConfirm(
-                            metadata.copy(
-                                title = title.trim().ifBlank { metadata.title },
-                                creator = creator.trim().ifBlank { "Không rõ tác giả" },
-                                identifier = identifier.trim().ifBlank { metadata.identifier },
-                                language = language.trim().ifBlank { "vi" }
-                            )
-                        )
-                    },
-                    modifier = Modifier
-                        .weight(0.58f)
-                        .height(50.dp)
-                        .testTag("metadata_confirm_button"),
-                    shape = RoundedCornerShape(50),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = Color.White
-                    ),
-                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
+                Box(modifier = Modifier.weight(0.62f)) {
+                    IosPrimaryButton(
                         text = confirmButtonLabel,
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold
+                        height = 46.dp,
+                        onClick = {
+                            onConfirm(
+                                metadata.copy(
+                                    title = title.trim().ifBlank { metadata.title },
+                                    creator = creator.trim().ifBlank { "Không rõ tác giả" },
+                                    identifier = identifier.trim().ifBlank { metadata.identifier },
+                                    language = language.trim().ifBlank { "vi" }
+                                )
+                            )
+                        },
+                        modifier = Modifier.testTag("metadata_confirm_button"),
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.PlayArrow,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     )
                 }
             }

@@ -6,8 +6,18 @@ import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+
+/**
+ * Exposes the active Light / Dark mode flag so 3D pill surfaces and bevel borders
+ * can adapt their vertical gradients and edge highlights cleanly.
+ */
+val LocalIsDarkTheme = staticCompositionLocalOf { false }
 
 private val IosLightColorScheme = lightColorScheme(
     primary = IosBlue,
@@ -65,9 +75,9 @@ private val IosDarkColorScheme = darkColorScheme(
 
 private val IosShapes = Shapes(
     small = RoundedCornerShape(12.dp),
-    medium = RoundedCornerShape(18.dp),
+    medium = RoundedCornerShape(16.dp),
     large = RoundedCornerShape(24.dp),
-    extraLarge = RoundedCornerShape(28.dp)
+    extraLarge = RoundedCornerShape(24.dp)
 )
 
 @Composable
@@ -75,11 +85,22 @@ fun EpubCleanAITheme(
     darkTheme: Boolean = false,
     content: @Composable () -> Unit
 ) {
-    val colorScheme = if (darkTheme) IosDarkColorScheme else IosLightColorScheme
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = AppTypography,
-        shapes = IosShapes,
-        content = content
+    val currentDensity = LocalDensity.current
+    val clampedDensity = Density(
+        density = currentDensity.density,
+        fontScale = currentDensity.fontScale.coerceAtMost(1.0f)
     )
+    val colorScheme = if (darkTheme) IosDarkColorScheme else IosLightColorScheme
+
+    CompositionLocalProvider(
+        LocalDensity provides clampedDensity,
+        LocalIsDarkTheme provides darkTheme
+    ) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = AppTypography,
+            shapes = IosShapes,
+            content = content
+        )
+    }
 }

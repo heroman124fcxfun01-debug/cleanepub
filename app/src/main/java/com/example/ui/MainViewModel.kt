@@ -5,9 +5,8 @@ import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.data.AppDatabase
-import com.example.data.HistoryRepository
-import com.example.data.ProcessedBookEntity
+import com.example.data.CleanedFileHistory
+import com.example.data.HistoryManager
 import com.example.data.ThemePreferences
 import com.example.pipeline.CleaningOptions
 import com.example.pipeline.EpubCleanPipeline
@@ -23,10 +22,8 @@ import com.example.service.EpubCleanForegroundService
 import com.example.service.ProcessingStateHolder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -49,16 +46,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val appContext = application.applicationContext
     private val themePreferences = ThemePreferences(appContext)
-    private val historyRepository = HistoryRepository(
-        AppDatabase.getInstance(appContext).processedBookDao()
-    )
+    private val historyManager = HistoryManager(appContext)
 
-    val recentBooks: StateFlow<List<ProcessedBookEntity>> = historyRepository.recentBooks
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5_000),
-            initialValue = emptyList()
-        )
+    private val _recentFiles = MutableStateFlow(historyManager.getHistory())
+    val recentFiles: StateFlow<List<CleanedFileHistory>> = _recentFiles.asStateFlow()
 
     val processingSnapshot: StateFlow<ProcessingSnapshot> = ProcessingStateHolder.snapshot
 
@@ -129,6 +120,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _isLoadingMetadata.value = false
             }
         }
+    }
+
+    /**
+     * Re-opens a file from the offline history list for re-processing.
+     */
+    fun reprocessHistoryItem(entry: CleanedFileHistory) {
+        val localFile = entry.filePath.takeIf { it.isNotBlank() }?.let { File(it) }
+        val targetUri: Uri? = when {
+            localFile != null && localFile.exists() && localFile.canRead() -> Uri.fromFile(localFile)
+            !entry.uriString.isNullOrBlank() -> runCatching { Uri.parse(entry.uriString) }.getOrNull()
+            else -> null
+        }
+
+        if (targetUri == null) {
+            _homeErrorBanner.value = "Không tìm thấy tệp gốc tại đường dẫn đã lưu."
+            return
+        }
+        onFilePicked(targetUri)
     }
 
     /**
@@ -231,20 +240,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 when (result) {
                     is SaveResult.Success -> {
                         val acceptedSpellingCount = snapshot.diffs.count { it.accepted }
-                        historyRepository.recordProcessedBook(
-                            ProcessedBookEntity(
-                                originalFileName = source.displayName,
-                                outputFileName = result.outputFileName,
-                                outputFilePath = result.savedAbsolutePath ?: result.outputDisplayPath,
-                                outputUriString = result.savedUriString,
-                                sourceFileType = source.fileType.label,
-                                detectedGenre = snapshot.bookContext?.genre.orEmpty().ifBlank { "Sách tiếng Việt" },
+                        val totalFixes = snapshot.stats.junkLinksRemoved +
+                            snapshot.stats.whitespaceFixes +
+                            acceptedSpellingCount
+
+                        val updatedHistory = historyManager.addEntry(
+                            CleanedFileHistory(
+                                fileName = result.outputFileName,
+                                filePath = result.savedAbsolutePath ?: result.outputDisplayPath,
+                                uriString = result.savedUriString,
+                                sourceType = source.fileType.label,
+                                totalFixes = totalFixes,
                                 junkLinksFixed = snapshot.stats.junkLinksRemoved,
                                 whitespaceFixed = snapshot.stats.whitespaceFixes,
                                 spellingFixed = acceptedSpellingCount,
-                                saveMode = mode.code
+                                timestampMillis = System.currentTimeMillis()
                             )
                         )
+                        _recentFiles.value = updatedHistory
                         _saveUiState.value = SaveUiState.Completed(result)
                     }
 
@@ -265,10 +278,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _saveUiState.value = SaveUiState.Idle
     }
 
-    fun deleteHistoryItem(id: Long) {
-        viewModelScope.launch {
-            historyRepository.deleteEntry(id)
-        }
+    fun deleteHistoryItem(id: String) {
+        _recentFiles.value = historyManager.removeEntry(id)
+    }
+
+    fun clearAllHistory() {
+        _recentFiles.value = historyManager.clearAll()
     }
 
     fun isProcessingActive(): Boolean {
