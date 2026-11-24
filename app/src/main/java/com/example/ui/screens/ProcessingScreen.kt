@@ -3,6 +3,7 @@ package com.example.ui.screens
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -58,19 +59,6 @@ import com.example.ui.components.IosCard
 import com.example.ui.components.IosHairlineDivider
 import com.example.ui.components.IosPrimaryButton
 import com.example.ui.components.IosSectionHeader
-import com.example.ui.theme.IosBackground
-import com.example.ui.theme.IosBlue
-import com.example.ui.theme.IosBlueSoft
-import com.example.ui.theme.IosGreen
-import com.example.ui.theme.IosGreenSoft
-import com.example.ui.theme.IosLabelPrimary
-import com.example.ui.theme.IosLabelSecondary
-import com.example.ui.theme.IosLabelTertiary
-import com.example.ui.theme.IosOrange
-import com.example.ui.theme.IosOrangeSoft
-import com.example.ui.theme.IosRed
-import com.example.ui.theme.IosRedSoft
-import com.example.ui.theme.IosSeparator
 import com.example.ui.theme.JetBrainsMonoFamily
 
 @Composable
@@ -96,7 +84,7 @@ fun ProcessingScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(IosBackground),
+            .background(MaterialTheme.colorScheme.background),
         contentAlignment = Alignment.TopCenter
     ) {
         Column(
@@ -122,18 +110,19 @@ fun ProcessingScreen(
                             Text(
                                 text = stringResource(R.string.processing_title),
                                 style = MaterialTheme.typography.headlineMedium,
-                                color = IosLabelPrimary
+                                color = MaterialTheme.colorScheme.onBackground
                             )
                             if (snapshot.phase == ProcessingPhase.RUNNING) {
                                 Surface(
-                                    shape = RoundedCornerShape(20.dp),
-                                    color = IosBlueSoft
+                                    shape = RoundedCornerShape(50),
+                                    color = MaterialTheme.colorScheme.primaryContainer
                                 ) {
                                     Text(
                                         text = stringResource(R.string.processing_background_badge),
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = IosBlue,
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                                     )
                                 }
                             }
@@ -142,7 +131,7 @@ fun ProcessingScreen(
                         Text(
                             text = snapshot.sourceFile?.displayName.orEmpty(),
                             style = MaterialTheme.typography.bodyMedium,
-                            color = IosLabelSecondary,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -162,14 +151,24 @@ fun ProcessingScreen(
                                 style = MaterialTheme.typography.displaySmall.copy(
                                     fontFamily = JetBrainsMonoFamily
                                 ),
-                                color = if (snapshot.phase == ProcessingPhase.ERROR) IosRed else IosBlue
+                                color = if (snapshot.phase == ProcessingPhase.ERROR) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.primary
+                                }
                             )
                             if (snapshot.stats.totalChapters > 0) {
-                                Text(
-                                    text = "${snapshot.stats.totalChapters} chương",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = IosLabelSecondary
-                                )
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = MaterialTheme.colorScheme.surfaceVariant
+                                ) {
+                                    Text(
+                                        text = "${snapshot.stats.totalChapters} chương",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                    )
+                                }
                             }
                         }
 
@@ -179,10 +178,14 @@ fun ProcessingScreen(
                             progress = { animatedProgress },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(7.dp)
-                                .clip(RoundedCornerShape(4.dp)),
-                            color = if (snapshot.phase == ProcessingPhase.ERROR) IosRed else IosBlue,
-                            trackColor = IosSeparator,
+                                .height(8.dp)
+                                .clip(RoundedCornerShape(50)),
+                            color = if (snapshot.phase == ProcessingPhase.ERROR) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            },
+                            trackColor = MaterialTheme.colorScheme.outline,
                             strokeCap = StrokeCap.Round
                         )
 
@@ -191,7 +194,7 @@ fun ProcessingScreen(
                         Text(
                             text = snapshot.statusDetail.ifBlank { "Đang chuẩn bị…" },
                             style = MaterialTheme.typography.bodySmall,
-                            color = IosLabelSecondary
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
                         // Global Context Pill once Step 0 detects genre + proper nouns
@@ -199,25 +202,25 @@ fun ProcessingScreen(
                         if (ctx != null && ctx.genre.isNotBlank()) {
                             Spacer(modifier = Modifier.height(12.dp))
                             Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = IosBackground,
+                                shape = RoundedCornerShape(50),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Icon(
                                         imageVector = Icons.Rounded.AutoAwesome,
                                         contentDescription = null,
-                                        tint = IosBlue,
+                                        tint = MaterialTheme.colorScheme.primary,
                                         modifier = Modifier.size(16.dp)
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
                                         text = "${ctx.genre} · Bảo vệ ${ctx.properNouns.size} tên riêng",
                                         style = MaterialTheme.typography.labelMedium,
-                                        color = IosLabelPrimary,
+                                        color = MaterialTheme.colorScheme.onSurface,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
@@ -236,24 +239,24 @@ fun ProcessingScreen(
                         LiveMetricCard(
                             modifier = Modifier.weight(1f),
                             icon = Icons.Rounded.LinkOff,
-                            iconTint = IosOrange,
-                            iconBg = IosOrangeSoft,
+                            iconTint = MaterialTheme.colorScheme.tertiary,
+                            iconBg = MaterialTheme.colorScheme.tertiaryContainer,
                             count = snapshot.stats.junkLinksRemoved,
                             label = stringResource(R.string.processing_metric_junk)
                         )
                         LiveMetricCard(
                             modifier = Modifier.weight(1f),
                             icon = Icons.Rounded.SpaceBar,
-                            iconTint = IosBlue,
-                            iconBg = IosBlueSoft,
+                            iconTint = MaterialTheme.colorScheme.primary,
+                            iconBg = MaterialTheme.colorScheme.primaryContainer,
                             count = snapshot.stats.whitespaceFixes,
                             label = stringResource(R.string.processing_metric_whitespace)
                         )
                         LiveMetricCard(
                             modifier = Modifier.weight(1f),
                             icon = Icons.Rounded.Spellcheck,
-                            iconTint = IosGreen,
-                            iconBg = IosGreenSoft,
+                            iconTint = MaterialTheme.colorScheme.secondary,
+                            iconBg = MaterialTheme.colorScheme.secondaryContainer,
                             count = snapshot.stats.spellingFixes,
                             label = stringResource(R.string.processing_metric_spelling)
                         )
@@ -264,8 +267,8 @@ fun ProcessingScreen(
                 if (snapshot.phase == ProcessingPhase.ERROR && !snapshot.errorMessage.isNullOrBlank()) {
                     item(key = "error_card") {
                         Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = IosRedSoft,
+                            shape = RoundedCornerShape(22.dp),
+                            color = MaterialTheme.colorScheme.errorContainer,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(modifier = Modifier.padding(16.dp)) {
@@ -273,14 +276,14 @@ fun ProcessingScreen(
                                     Icon(
                                         imageVector = Icons.Rounded.Error,
                                         contentDescription = null,
-                                        tint = IosRed,
+                                        tint = MaterialTheme.colorScheme.error,
                                         modifier = Modifier.size(20.dp)
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
                                         text = "Xử lý gặp sự cố",
                                         style = MaterialTheme.typography.titleSmall,
-                                        color = IosRed,
+                                        color = MaterialTheme.colorScheme.error,
                                         fontWeight = FontWeight.SemiBold
                                     )
                                 }
@@ -288,7 +291,7 @@ fun ProcessingScreen(
                                 Text(
                                     text = snapshot.errorMessage,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = IosLabelPrimary
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
                         }
@@ -338,12 +341,13 @@ fun ProcessingScreen(
                                 .fillMaxWidth()
                                 .height(50.dp)
                                 .testTag("cancel_processing_button"),
-                            shape = RoundedCornerShape(14.dp)
+                            shape = RoundedCornerShape(50),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f))
                         ) {
                             Text(
                                 text = stringResource(R.string.processing_cancel),
                                 style = MaterialTheme.typography.labelLarge,
-                                color = IosRed
+                                color = MaterialTheme.colorScheme.error
                             )
                         }
                     }
@@ -359,11 +363,12 @@ fun ProcessingScreen(
                                     .weight(1f)
                                     .height(52.dp)
                                     .testTag("processing_back_home_button"),
-                                shape = RoundedCornerShape(14.dp)
+                                shape = RoundedCornerShape(50),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
                             ) {
                                 Text(
                                     text = stringResource(R.string.processing_back_home),
-                                    color = IosLabelPrimary
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
                             IosPrimaryButton(
@@ -398,8 +403,8 @@ private fun LiveMetricCard(
     ) {
         Box(
             modifier = Modifier
-                .size(30.dp)
-                .clip(RoundedCornerShape(8.dp))
+                .size(32.dp)
+                .clip(CircleShape)
                 .background(iconBg),
             contentAlignment = Alignment.Center
         ) {
@@ -416,13 +421,13 @@ private fun LiveMetricCard(
             style = MaterialTheme.typography.titleLarge.copy(
                 fontFamily = JetBrainsMonoFamily
             ),
-            color = IosLabelPrimary,
+            color = MaterialTheme.colorScheme.onSurface,
             fontWeight = FontWeight.Bold
         )
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = IosLabelSecondary,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
@@ -446,7 +451,7 @@ private fun StepRow(
                 Icon(
                     imageVector = Icons.Rounded.CheckCircle,
                     contentDescription = "Hoàn tất",
-                    tint = IosGreen,
+                    tint = MaterialTheme.colorScheme.secondary,
                     modifier = Modifier.size(22.dp)
                 )
             }
@@ -455,7 +460,7 @@ private fun StepRow(
                 CircularProgressIndicator(
                     modifier = Modifier.size(20.dp),
                     strokeWidth = 2.4.dp,
-                    color = IosBlue
+                    color = MaterialTheme.colorScheme.primary
                 )
             }
 
@@ -463,7 +468,7 @@ private fun StepRow(
                 Icon(
                     imageVector = Icons.Rounded.Error,
                     contentDescription = "Lỗi",
-                    tint = IosRed,
+                    tint = MaterialTheme.colorScheme.error,
                     modifier = Modifier.size(22.dp)
                 )
             }
@@ -473,13 +478,13 @@ private fun StepRow(
                     modifier = Modifier
                         .size(22.dp)
                         .clip(CircleShape)
-                        .background(IosBackground),
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = stepNumber.toString(),
                         style = MaterialTheme.typography.labelSmall,
-                        color = IosLabelTertiary
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -491,10 +496,10 @@ private fun StepRow(
             text = title,
             style = MaterialTheme.typography.bodyMedium,
             color = when (state) {
-                StepState.RUNNING -> IosBlue
-                StepState.FAILED -> IosRed
-                StepState.COMPLETED -> IosLabelPrimary
-                StepState.PENDING -> IosLabelSecondary
+                StepState.RUNNING -> MaterialTheme.colorScheme.primary
+                StepState.FAILED -> MaterialTheme.colorScheme.error
+                StepState.COMPLETED -> MaterialTheme.colorScheme.onSurface
+                StepState.PENDING -> MaterialTheme.colorScheme.onSurfaceVariant
             },
             fontWeight = if (state == StepState.RUNNING) FontWeight.SemiBold else FontWeight.Normal,
             modifier = Modifier.weight(1f)

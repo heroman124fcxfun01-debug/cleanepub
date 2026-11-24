@@ -3,6 +3,7 @@ package com.example.ui.theme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
@@ -35,20 +36,48 @@ private val IosLightColorScheme = lightColorScheme(
     outlineVariant = IosHairline
 )
 
+private val IosDarkColorScheme = darkColorScheme(
+    primary = IosDarkBlue,
+    onPrimary = Color.White,
+    primaryContainer = IosDarkBlueSoft,
+    onPrimaryContainer = IosDarkBlue,
+    secondary = IosDarkGreen,
+    onSecondary = Color.Black,
+    secondaryContainer = IosDarkGreenSoft,
+    onSecondaryContainer = IosDarkGreen,
+    tertiary = IosDarkOrange,
+    onTertiary = Color.Black,
+    tertiaryContainer = IosDarkOrangeSoft,
+    onTertiaryContainer = IosDarkOrange,
+    error = IosDarkRed,
+    onError = Color.White,
+    errorContainer = IosDarkRedSoft,
+    onErrorContainer = IosDarkRed,
+    background = IosDarkBackground,
+    onBackground = IosDarkLabelPrimary,
+    surface = IosDarkCardSurface,
+    onSurface = IosDarkLabelPrimary,
+    surfaceVariant = IosDarkSecondarySurface,
+    onSurfaceVariant = IosDarkLabelSecondary,
+    outline = IosDarkSeparator,
+    outlineVariant = IosDarkHairline
+)
+
 private val IosShapes = Shapes(
-    small = RoundedCornerShape(10.dp),
-    medium = RoundedCornerShape(14.dp),
-    large = RoundedCornerShape(16.dp),
-    extraLarge = RoundedCornerShape(22.dp)
+    small = RoundedCornerShape(12.dp),
+    medium = RoundedCornerShape(18.dp),
+    large = RoundedCornerShape(24.dp),
+    extraLarge = RoundedCornerShape(28.dp)
 )
 
 @Composable
 fun EpubCleanAITheme(
+    darkTheme: Boolean = false,
     content: @Composable () -> Unit
 ) {
-    // Consistently render the requested iOS minimalist light aesthetic (#F2F2F7 canvas, #FFFFFF cards, #007AFF accent)
+    val colorScheme = if (darkTheme) IosDarkColorScheme else IosLightColorScheme
     MaterialTheme(
-        colorScheme = IosLightColorScheme,
+        colorScheme = colorScheme,
         typography = AppTypography,
         shapes = IosShapes,
         content = content

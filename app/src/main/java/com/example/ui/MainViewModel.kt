@@ -8,7 +8,11 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.AppDatabase
 import com.example.data.HistoryRepository
 import com.example.data.ProcessedBookEntity
+import com.example.data.ThemePreferences
+import com.example.pipeline.CleaningOptions
 import com.example.pipeline.EpubCleanPipeline
+import com.example.pipeline.EpubMetadata
+import com.example.pipeline.EpubMetadataEditor
 import com.example.pipeline.FilePathResolver
 import com.example.pipeline.ProcessingPhase
 import com.example.pipeline.ProcessingSnapshot
@@ -25,6 +29,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 private const val TAG = "MainViewModel"
 
@@ -35,9 +40,15 @@ sealed interface SaveUiState {
     data class Error(val message: String) : SaveUiState
 }
 
+data class PendingImportMetadata(
+    val source: SourceFileInfo,
+    val metadata: EpubMetadata
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val appContext = application.applicationContext
+    private val themePreferences = ThemePreferences(appContext)
     private val historyRepository = HistoryRepository(
         AppDatabase.getInstance(appContext).processedBookDao()
     )
@@ -51,6 +62,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val processingSnapshot: StateFlow<ProcessingSnapshot> = ProcessingStateHolder.snapshot
 
+    private val _isDarkMode = MutableStateFlow(themePreferences.isDarkMode())
+    val isDarkMode: StateFlow<Boolean> = _isDarkMode.asStateFlow()
+
+    private val _cleaningOptions = MutableStateFlow(CleaningOptions())
+    val cleaningOptions: StateFlow<CleaningOptions> = _cleaningOptions.asStateFlow()
+
     private val _hasAllFilesAccess = MutableStateFlow(FilePathResolver.hasAllFilesAccess(appContext))
     val hasAllFilesAccess: StateFlow<Boolean> = _hasAllFilesAccess.asStateFlow()
 
@@ -60,6 +77,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _homeErrorBanner = MutableStateFlow<String?>(null)
     val homeErrorBanner: StateFlow<String?> = _homeErrorBanner.asStateFlow()
 
+    private val _isLoadingMetadata = MutableStateFlow(false)
+    val isLoadingMetadata: StateFlow<Boolean> = _isLoadingMetadata.asStateFlow()
+
+    private val _pendingImport = MutableStateFlow<PendingImportMetadata?>(null)
+    val pendingImport: StateFlow<PendingImportMetadata?> = _pendingImport.asStateFlow()
+
+    fun setDarkMode(enabled: Boolean) {
+        themePreferences.setDarkMode(enabled)
+        _isDarkMode.value = enabled
+    }
+
+    fun updateCleaningOptions(options: CleaningOptions) {
+        _cleaningOptions.value = options
+    }
+
     fun refreshStoragePermission() {
         _hasAllFilesAccess.value = FilePathResolver.hasAllFilesAccess(appContext)
     }
@@ -68,25 +100,95 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _homeErrorBanner.value = null
     }
 
-    fun onFilePicked(uri: Uri): Boolean {
+    /**
+     * Inspects the picked .epub/.pdf file and reads its OPF metadata + existing cover
+     * so the user can edit metadata/cover before launching the cleaning pipeline.
+     */
+    fun onFilePicked(uri: Uri) {
         _homeErrorBanner.value = null
         val inspected = FilePathResolver.inspectSourceFile(appContext, uri)
         if (inspected == null) {
             _homeErrorBanner.value = "Vui lòng chọn tệp định dạng .epub hoặc .pdf hợp lệ."
-            return false
+            return
         }
-        startProcessing(inspected)
+
+        viewModelScope.launch {
+            _isLoadingMetadata.value = true
+            try {
+                val meta = withContext(Dispatchers.IO) {
+                    EpubMetadataEditor.readMetadataFromSource(appContext, inspected)
+                }
+                _pendingImport.value = PendingImportMetadata(
+                    source = inspected,
+                    metadata = meta
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed reading metadata on import", e)
+                _homeErrorBanner.value = e.localizedMessage ?: "Không thể đọc thông tin tệp đã chọn."
+            } finally {
+                _isLoadingMetadata.value = false
+            }
+        }
+    }
+
+    /**
+     * Replaces the cover image on the pending import (or active review workspace) from PickVisualMedia.
+     */
+    fun onCoverImagePicked(imageUri: Uri, forReviewScreen: Boolean = false) {
+        viewModelScope.launch {
+            val coverFile = withContext(Dispatchers.IO) {
+                val coversDir = File(appContext.cacheDir, "epub_covers").apply { mkdirs() }
+                val dest = File(coversDir, "cover_${System.currentTimeMillis()}.jpg")
+                EpubMetadataEditor.prepareCoverImageFromUri(appContext, imageUri, dest)
+            }
+            if (coverFile == null) {
+                _homeErrorBanner.value = "Không thể đọc ảnh bìa đã chọn."
+                return@launch
+            }
+
+            if (forReviewScreen) {
+                val currentMeta = processingSnapshot.value.metadata ?: return@launch
+                ProcessingStateHolder.updateActiveMetadata(
+                    currentMeta.copy(newCoverImagePath = coverFile.absolutePath)
+                )
+            } else {
+                val current = _pendingImport.value ?: return@launch
+                _pendingImport.value = current.copy(
+                    metadata = current.metadata.copy(newCoverImagePath = coverFile.absolutePath)
+                )
+            }
+        }
+    }
+
+    fun dismissPendingImport() {
+        _pendingImport.value = null
+    }
+
+    fun confirmImportAndStartProcessing(editedMetadata: EpubMetadata): Boolean {
+        val current = _pendingImport.value ?: return false
+        _pendingImport.value = null
+        startProcessing(current.source, editedMetadata)
         return true
     }
 
-    fun startProcessing(source: SourceFileInfo) {
+    fun updateReviewMetadata(editedMetadata: EpubMetadata) {
+        ProcessingStateHolder.updateActiveMetadata(editedMetadata)
+    }
+
+    fun startProcessing(source: SourceFileInfo, metadata: EpubMetadata? = null) {
         _saveUiState.value = SaveUiState.Idle
-        EpubCleanForegroundService.start(appContext, source)
+        EpubCleanForegroundService.start(
+            context = appContext,
+            source = source,
+            metadata = metadata,
+            options = _cleaningOptions.value
+        )
     }
 
     fun retryProcessing() {
         val lastSource = processingSnapshot.value.sourceFile ?: return
-        startProcessing(lastSource)
+        val lastMeta = processingSnapshot.value.metadata
+        startProcessing(lastSource, lastMeta)
     }
 
     fun cancelProcessing() {

@@ -80,10 +80,16 @@ class EpubCleanForegroundService : Service() {
     private fun launchPipeline(source: SourceFileInfo) {
         activeJob?.cancel()
         val pipeline = EpubCleanPipeline(applicationContext)
+        val metadata = ProcessingStateHolder.pendingMetadata
+        val options = ProcessingStateHolder.pendingOptions
 
         activeJob = serviceScope.launch {
             try {
-                pipeline.run(source) { snapshot ->
+                pipeline.run(
+                    source = source,
+                    metadata = metadata,
+                    options = options
+                ) { snapshot ->
                     ProcessingStateHolder.publish(snapshot)
                     val now = System.currentTimeMillis()
                     if (now - lastNotificationUpdateMs >= 450L || snapshot.phase == ProcessingPhase.COMPLETED) {
@@ -92,7 +98,7 @@ class EpubCleanForegroundService : Service() {
                         val statsSummary = "${snapshot.statusDetail} • " +
                             "Link: ${snapshot.stats.junkLinksRemoved} | " +
                             "Trắng: ${snapshot.stats.whitespaceFixes} | " +
-                            "AI: ${snapshot.stats.spellingFixes}"
+                            "Chính tả: ${snapshot.stats.spellingFixes}"
                         updateNotification(
                             title = if (snapshot.phase == ProcessingPhase.COMPLETED) {
                                 getString(R.string.notif_title_done, source.displayName)
@@ -247,7 +253,14 @@ class EpubCleanForegroundService : Service() {
         private const val EXTRA_FILE_TYPE = "extra_file_type"
         private const val EXTRA_FILE_SIZE = "extra_file_size"
 
-        fun start(context: Context, source: SourceFileInfo) {
+        fun start(
+            context: Context,
+            source: SourceFileInfo,
+            metadata: com.example.pipeline.EpubMetadata? = null,
+            options: com.example.pipeline.CleaningOptions = com.example.pipeline.CleaningOptions()
+        ) {
+            ProcessingStateHolder.pendingMetadata = metadata
+            ProcessingStateHolder.pendingOptions = options
             ProcessingStateHolder.publish(
                 ProcessingSnapshot(
                     phase = ProcessingPhase.RUNNING,
@@ -257,7 +270,8 @@ class EpubCleanForegroundService : Service() {
                         if (it == PipelineStep.STEP_0_UNPACK_CONTEXT) StepState.RUNNING else StepState.PENDING
                     },
                     progressFraction = 0.02f,
-                    statusDetail = "Đang khởi động dịch vụ chạy nền…"
+                    statusDetail = "Đang khởi động dịch vụ chạy nền…",
+                    metadata = metadata
                 )
             )
             val intent = Intent(context, EpubCleanForegroundService::class.java).apply {

@@ -22,11 +22,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBackIos
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Save
@@ -64,17 +66,6 @@ import com.example.ui.components.IosPrimaryButton
 import com.example.ui.components.IosSaveActionSheet
 import com.example.ui.components.IosSaveSuccessDialog
 import com.example.ui.components.IosSectionHeader
-import com.example.ui.theme.IosBackground
-import com.example.ui.theme.IosBlue
-import com.example.ui.theme.IosBlueSoft
-import com.example.ui.theme.IosCardSurface
-import com.example.ui.theme.IosGreen
-import com.example.ui.theme.IosGreenSoft
-import com.example.ui.theme.IosLabelPrimary
-import com.example.ui.theme.IosLabelSecondary
-import com.example.ui.theme.IosOrange
-import com.example.ui.theme.IosRed
-import com.example.ui.theme.IosRedSoft
 import com.example.ui.theme.JetBrainsMonoFamily
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -84,6 +75,7 @@ fun ReviewScreen(
     saveUiState: SaveUiState,
     onToggleDiff: (String) -> Unit,
     onSetAllDiffs: (Boolean) -> Unit,
+    onEditMetadataClick: () -> Unit,
     onSaveWithMode: (SaveMode) -> Unit,
     onOpenSavedFile: (absolutePath: String?, uriString: String?) -> Unit,
     onFinishToHome: () -> Unit,
@@ -102,7 +94,7 @@ fun ReviewScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(IosBackground),
+            .background(MaterialTheme.colorScheme.background),
         contentAlignment = Alignment.TopCenter
     ) {
         Column(
@@ -111,7 +103,7 @@ fun ReviewScreen(
                 .fillMaxSize()
                 .statusBarsPadding()
         ) {
-            // Top Bar (iOS minimalist)
+            // Top Bar (iOS minimalist + oval Metadata Edit button)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -127,7 +119,7 @@ fun ReviewScreen(
                     Icon(
                         imageVector = Icons.AutoMirrored.Rounded.ArrowBackIos,
                         contentDescription = stringResource(R.string.cd_back),
-                        tint = IosBlue,
+                        tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -135,15 +127,46 @@ fun ReviewScreen(
                     Text(
                         text = stringResource(R.string.review_title),
                         style = MaterialTheme.typography.titleLarge,
-                        color = IosLabelPrimary
+                        color = MaterialTheme.colorScheme.onBackground
                     )
                     Text(
-                        text = snapshot.sourceFile?.displayName.orEmpty(),
+                        text = snapshot.metadata?.title?.ifBlank { snapshot.sourceFile?.displayName.orEmpty() }
+                            ?: snapshot.sourceFile?.displayName.orEmpty(),
                         style = MaterialTheme.typography.bodySmall,
-                        color = IosLabelSecondary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                }
+                if (snapshot.metadata != null) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        modifier = Modifier
+                            .padding(end = 8.dp)
+                            .clip(RoundedCornerShape(50))
+                            .testTag("review_edit_metadata_button")
+                            .clickable(onClick = onEditMetadataClick)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Edit,
+                                contentDescription = "Sửa Metadata",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Text(
+                                text = "Metadata",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
                 }
             }
 
@@ -160,9 +183,9 @@ fun ReviewScreen(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            SummaryStatItem("Link rác", snapshot.stats.junkLinksRemoved, IosOrange)
-                            SummaryStatItem("Khoảng trắng", snapshot.stats.whitespaceFixes, IosBlue)
-                            SummaryStatItem("Chính tả AI", acceptedCount, IosGreen)
+                            SummaryStatItem("Link rác", snapshot.stats.junkLinksRemoved, MaterialTheme.colorScheme.tertiary)
+                            SummaryStatItem("Khoảng trắng", snapshot.stats.whitespaceFixes, MaterialTheme.colorScheme.primary)
+                            SummaryStatItem("Chính tả", acceptedCount, MaterialTheme.colorScheme.secondary)
                         }
 
                         val ctx = snapshot.bookContext
@@ -180,13 +203,13 @@ fun ReviewScreen(
                                 Text(
                                     text = "${ctx.genre} · ${ctx.properNouns.size} tên riêng được bảo vệ",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = IosLabelSecondary,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.weight(1f)
                                 )
                                 Icon(
                                     imageVector = if (expandProperNouns) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
                                     contentDescription = null,
-                                    tint = IosLabelSecondary,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
@@ -198,14 +221,14 @@ fun ReviewScreen(
                                 ) {
                                     ctx.properNouns.take(24).forEach { noun ->
                                         Surface(
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = IosBackground
+                                            shape = RoundedCornerShape(50),
+                                            color = MaterialTheme.colorScheme.surfaceVariant
                                         ) {
                                             Text(
                                                 text = noun,
                                                 style = MaterialTheme.typography.labelSmall,
-                                                color = IosLabelPrimary,
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                                             )
                                         }
                                     }
@@ -219,22 +242,22 @@ fun ReviewScreen(
                 if (saveUiState is SaveUiState.Error) {
                     item(key = "save_error") {
                         Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = IosRedSoft,
+                            shape = RoundedCornerShape(50),
+                            color = MaterialTheme.colorScheme.errorContainer,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
                                     text = saveUiState.message,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = IosRed,
+                                    color = MaterialTheme.colorScheme.error,
                                     modifier = Modifier.weight(1f)
                                 )
                                 TextButton(onClick = onDismissSaveError) {
-                                    Text("Đóng", color = IosRed)
+                                    Text("Đóng", color = MaterialTheme.colorScheme.error)
                                 }
                             }
                         }
@@ -247,18 +270,25 @@ fun ReviewScreen(
                         title = "${stringResource(R.string.review_section_diffs)} (${snapshot.diffs.size})",
                         trailing = if (snapshot.diffs.isNotEmpty()) {
                             {
-                                Text(
-                                    text = if (allSelected) {
-                                        stringResource(R.string.review_deselect_all)
-                                    } else {
-                                        stringResource(R.string.review_select_all)
-                                    },
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = IosBlue,
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = MaterialTheme.colorScheme.primaryContainer,
                                     modifier = Modifier
+                                        .clip(RoundedCornerShape(50))
                                         .clickable { onSetAllDiffs(!allSelected) }
-                                        .padding(horizontal = 6.dp, vertical = 4.dp)
-                                )
+                                ) {
+                                    Text(
+                                        text = if (allSelected) {
+                                            stringResource(R.string.review_deselect_all)
+                                        } else {
+                                            stringResource(R.string.review_select_all)
+                                        },
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                                    )
+                                }
                             }
                         } else null
                     )
@@ -273,15 +303,15 @@ fun ReviewScreen(
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .size(48.dp)
-                                        .clip(RoundedCornerShape(24.dp))
-                                        .background(IosGreenSoft),
+                                        .size(50.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.secondaryContainer),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
                                         imageVector = Icons.Rounded.CheckCircle,
                                         contentDescription = null,
-                                        tint = IosGreen,
+                                        tint = MaterialTheme.colorScheme.secondary,
                                         modifier = Modifier.size(28.dp)
                                     )
                                 }
@@ -289,13 +319,13 @@ fun ReviewScreen(
                                 Text(
                                     text = stringResource(R.string.review_no_ai_changes_title),
                                     style = MaterialTheme.typography.titleMedium,
-                                    color = IosLabelPrimary
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text(
                                     text = stringResource(R.string.review_no_ai_changes_desc),
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = IosLabelSecondary
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
@@ -315,9 +345,9 @@ fun ReviewScreen(
                 item { Spacer(modifier = Modifier.height(12.dp)) }
             }
 
-            // Pinned Bottom Bar with Save CTA
+            // Pinned Bottom Bar with Oval Save CTA
             Surface(
-                color = IosCardSurface,
+                color = MaterialTheme.colorScheme.surface,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.navigationBarsPadding()) {
@@ -359,7 +389,7 @@ fun ReviewScreen(
         }
     }
 
-    // iOS Action Sheet (Replace Original vs Keep Original _clean.epub)
+    // Floating iOS Rounded-Square Save Dialog (Replace Original vs Keep Original _clean.epub)
     val sourceFile = snapshot.sourceFile
     if (sourceFile != null) {
         IosSaveActionSheet(
@@ -373,7 +403,7 @@ fun ReviewScreen(
         )
     }
 
-    // Save Success Dialog
+    // Floating Save Success Dialog
     if (saveUiState is SaveUiState.Completed) {
         IosSaveSuccessDialog(
             result = saveUiState.result,
@@ -402,7 +432,7 @@ private fun SummaryStatItem(label: String, value: Int, accent: Color) {
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = IosLabelSecondary
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }
@@ -413,7 +443,7 @@ private fun DiffComparisonCard(
     onToggle: () -> Unit
 ) {
     IosCard(contentPadding = PaddingValues(14.dp)) {
-        // Card header: Chapter + reason pill + accept switch
+        // Card header: Chapter + oval reason pill + accept switch
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -422,21 +452,21 @@ private fun DiffComparisonCard(
                 Text(
                     text = diff.chapterTitle,
                     style = MaterialTheme.typography.labelMedium,
-                    color = IosLabelPrimary,
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = IosBlueSoft
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.primaryContainer
                 ) {
                     Text(
                         text = diff.reason,
                         style = MaterialTheme.typography.labelSmall,
-                        color = IosBlue,
-                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
                     )
                 }
             }
@@ -447,9 +477,9 @@ private fun DiffComparisonCard(
                 modifier = Modifier.testTag("diff_card_toggle"),
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White,
-                    checkedTrackColor = IosGreen,
+                    checkedTrackColor = MaterialTheme.colorScheme.secondary,
                     uncheckedThumbColor = Color.White,
-                    uncheckedTrackColor = IosLabelSecondary.copy(alpha = 0.25f),
+                    uncheckedTrackColor = MaterialTheme.colorScheme.outline,
                     uncheckedBorderColor = Color.Transparent
                 )
             )
@@ -461,21 +491,21 @@ private fun DiffComparisonCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
-                .background(IosRedSoft.copy(alpha = 0.72f))
+                .clip(RoundedCornerShape(14.dp))
+                .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f))
                 .padding(10.dp)
         ) {
             Text(
                 text = stringResource(R.string.review_label_before),
                 style = MaterialTheme.typography.labelSmall,
-                color = IosRed,
+                color = MaterialTheme.colorScheme.error,
                 fontWeight = FontWeight.Bold
             )
             Spacer(modifier = Modifier.height(3.dp))
             Text(
                 text = diff.beforeText,
                 style = MaterialTheme.typography.bodyMedium,
-                color = IosLabelPrimary
+                color = MaterialTheme.colorScheme.onSurface
             )
         }
 
@@ -488,7 +518,7 @@ private fun DiffComparisonCard(
             Icon(
                 imageVector = Icons.Rounded.ArrowDownward,
                 contentDescription = null,
-                tint = IosLabelSecondary,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(16.dp)
             )
         }
@@ -497,24 +527,32 @@ private fun DiffComparisonCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
+                .clip(RoundedCornerShape(14.dp))
                 .background(
-                    if (diff.accepted) IosGreenSoft.copy(alpha = 0.8f)
-                    else IosBackground
+                    if (diff.accepted) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.8f)
+                    else MaterialTheme.colorScheme.surfaceVariant
                 )
                 .padding(10.dp)
         ) {
             Text(
                 text = stringResource(R.string.review_label_after),
                 style = MaterialTheme.typography.labelSmall,
-                color = if (diff.accepted) Color(0xFF1A7F37) else IosLabelSecondary,
+                color = if (diff.accepted) {
+                    MaterialTheme.colorScheme.onSecondaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
                 fontWeight = FontWeight.Bold
             )
             Spacer(modifier = Modifier.height(3.dp))
             Text(
                 text = diff.afterText,
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (diff.accepted) IosLabelPrimary else IosLabelSecondary
+                color = if (diff.accepted) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
             )
         }
     }

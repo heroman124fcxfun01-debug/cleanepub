@@ -10,11 +10,15 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -28,7 +32,9 @@ import androidx.navigation.compose.rememberNavController
 import com.example.pipeline.FilePathResolver
 import com.example.pipeline.ProcessingPhase
 import com.example.ui.MainViewModel
-import com.example.ui.screens.HomeScreen
+import com.example.ui.components.EpubMetadataEditorDialog
+import com.example.ui.components.SettingsDialog
+import com.example.ui.screens.MainScreen
 import com.example.ui.screens.ProcessingScreen
 import com.example.ui.screens.ReviewScreen
 import com.example.ui.theme.EpubCleanAITheme
@@ -58,8 +64,32 @@ class MainActivity : ComponentActivity() {
         )
 
         setContent {
-            EpubCleanAITheme {
-                EpubCleanNavHost()
+            val viewModel: MainViewModel = viewModel()
+            val isDarkMode by viewModel.isDarkMode.collectAsStateWithLifecycle()
+
+            LaunchedEffect(isDarkMode) {
+                enableEdgeToEdge(
+                    statusBarStyle = if (isDarkMode) {
+                        SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                    } else {
+                        SystemBarStyle.light(
+                            android.graphics.Color.TRANSPARENT,
+                            android.graphics.Color.TRANSPARENT
+                        )
+                    },
+                    navigationBarStyle = if (isDarkMode) {
+                        SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                    } else {
+                        SystemBarStyle.light(
+                            android.graphics.Color.TRANSPARENT,
+                            android.graphics.Color.TRANSPARENT
+                        )
+                    }
+                )
+            }
+
+            EpubCleanAITheme(darkTheme = isDarkMode) {
+                EpubCleanNavHost(viewModel = viewModel)
             }
         }
     }
@@ -67,7 +97,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun EpubCleanNavHost(
-    viewModel: MainViewModel = viewModel()
+    viewModel: MainViewModel
 ) {
     val context = LocalContext.current
     val navController = rememberNavController()
@@ -78,6 +108,14 @@ private fun EpubCleanNavHost(
     val snapshot by viewModel.processingSnapshot.collectAsStateWithLifecycle()
     val saveUiState by viewModel.saveUiState.collectAsStateWithLifecycle()
     val homeError by viewModel.homeErrorBanner.collectAsStateWithLifecycle()
+    val isDarkMode by viewModel.isDarkMode.collectAsStateWithLifecycle()
+    val cleaningOptions by viewModel.cleaningOptions.collectAsStateWithLifecycle()
+    val isLoadingMetadata by viewModel.isLoadingMetadata.collectAsStateWithLifecycle()
+    val pendingImport by viewModel.pendingImport.collectAsStateWithLifecycle()
+
+    var showSettingsDialog by remember { mutableStateOf(false) }
+    var showReviewMetadataDialog by remember { mutableStateOf(false) }
+    var coverPickerForReview by remember { mutableStateOf(false) }
 
     // Re-check MANAGE_EXTERNAL_STORAGE when returning from Android Settings
     DisposableEffect(lifecycleOwner) {
@@ -101,7 +139,17 @@ private fun EpubCleanNavHost(
         onResult = { viewModel.refreshStoragePermission() }
     )
 
-    // System file picker for .epub and .pdf
+    // Zero-permission Android Photo Picker for changing book cover
+    val coverPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+        onResult = { uri ->
+            if (uri != null) {
+                viewModel.onCoverImagePicked(uri, forReviewScreen = coverPickerForReview)
+            }
+        }
+    )
+
+    // System file picker for .epub and .pdf -> opens Metadata & Cover Editor before scanning
     val documentPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri ->
@@ -115,12 +163,7 @@ private fun EpubCleanNavHost(
                         notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                     }
                 }
-                val accepted = viewModel.onFilePicked(uri)
-                if (accepted) {
-                    navController.navigate(ROUTE_PROCESSING) {
-                        launchSingleTop = true
-                    }
-                }
+                viewModel.onFilePicked(uri)
             }
         }
     )
@@ -168,9 +211,11 @@ private fun EpubCleanNavHost(
         startDestination = ROUTE_HOME
     ) {
         composable(ROUTE_HOME) {
-            HomeScreen(
+            MainScreen(
                 recentBooks = recentBooks,
                 hasAllFilesAccess = hasAllFilesAccess,
+                cleaningOptions = cleaningOptions,
+                isLoadingMetadata = isLoadingMetadata,
                 errorBanner = homeError,
                 onSelectFileClick = {
                     documentPickerLauncher.launch(
@@ -183,6 +228,8 @@ private fun EpubCleanNavHost(
                     )
                 },
                 onRequestStoragePermission = ::requestStorageAccess,
+                onOpenSettingsClick = { showSettingsDialog = true },
+                onUpdateCleaningOptions = { viewModel.updateCleaningOptions(it) },
                 onOpenRecentBook = { book ->
                     openEpubExternally(book.outputFilePath, book.outputUriString)
                 },
@@ -213,6 +260,7 @@ private fun EpubCleanNavHost(
                 saveUiState = saveUiState,
                 onToggleDiff = { diffId -> viewModel.toggleDiffAccepted(diffId) },
                 onSetAllDiffs = { accepted -> viewModel.setAllDiffsAccepted(accepted) },
+                onEditMetadataClick = { showReviewMetadataDialog = true },
                 onSaveWithMode = { mode -> viewModel.saveProcessedBook(mode) },
                 onOpenSavedFile = { absPath, uriStr -> openEpubExternally(absPath, uriStr) },
                 onFinishToHome = {
@@ -222,5 +270,60 @@ private fun EpubCleanNavHost(
                 onDismissSaveError = { viewModel.dismissSaveState() }
             )
         }
+    }
+
+    // Floating iOS Settings Dialog (Light/Dark Mode + App Info)
+    SettingsDialog(
+        visible = showSettingsDialog,
+        isDarkMode = isDarkMode,
+        onToggleDarkMode = { enabled -> viewModel.setDarkMode(enabled) },
+        onDismiss = { showSettingsDialog = false }
+    )
+
+    // Floating iOS Metadata & Cover Editor Dialog immediately on file import
+    val currentPending = pendingImport
+    if (currentPending != null) {
+        EpubMetadataEditorDialog(
+            metadata = currentPending.metadata,
+            fileDisplayName = currentPending.source.displayName,
+            confirmButtonLabel = "Bắt đầu xử lý",
+            onPickCoverClick = {
+                coverPickerForReview = false
+                coverPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            },
+            onConfirm = { edited ->
+                val started = viewModel.confirmImportAndStartProcessing(edited)
+                if (started) {
+                    navController.navigate(ROUTE_PROCESSING) {
+                        launchSingleTop = true
+                    }
+                }
+            },
+            onDismiss = { viewModel.dismissPendingImport() }
+        )
+    }
+
+    // Optional Metadata & Cover Editor from Review screen before saving
+    val reviewMeta = snapshot.metadata
+    val reviewSource = snapshot.sourceFile
+    if (showReviewMetadataDialog && reviewMeta != null && reviewSource != null) {
+        EpubMetadataEditorDialog(
+            metadata = reviewMeta,
+            fileDisplayName = reviewSource.displayName,
+            confirmButtonLabel = "Áp dụng thông tin",
+            onPickCoverClick = {
+                coverPickerForReview = true
+                coverPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            },
+            onConfirm = { edited ->
+                viewModel.updateReviewMetadata(edited)
+                showReviewMetadataDialog = false
+            },
+            onDismiss = { showReviewMetadataDialog = false }
+        )
     }
 }

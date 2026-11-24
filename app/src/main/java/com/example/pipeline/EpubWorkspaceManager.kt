@@ -234,7 +234,15 @@ object EpubWorkspaceManager {
         // Ensure clean unified CSS is present
         File(stylesDir, "style.css").writeText(TextCleaningEngine.UNIFIED_STYLE_CSS, Charsets.UTF_8)
 
-        val bookUuid = "urn:uuid:${UUID.randomUUID()}"
+        val effectiveMeta = workspace.metadata ?: EpubMetadata(
+            title = workspace.bookTitle,
+            creator = workspace.bookAuthor,
+            identifier = "urn:uuid:${UUID.randomUUID()}",
+            language = "vi"
+        )
+        val bookUuid = effectiveMeta.identifier.trim().ifBlank { "urn:uuid:${UUID.randomUUID()}" }
+        val bookLang = effectiveMeta.language.trim().ifBlank { "vi" }
+        val bookTitle = effectiveMeta.title.trim().ifBlank { workspace.bookTitle }
 
         // META-INF/container.xml
         File(metaInfDir, "container.xml").writeText(
@@ -255,7 +263,7 @@ object EpubWorkspaceManager {
         File(oebpsDir, "nav.xhtml").writeText(
             """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="vi" lang="vi">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${escapeXml(bookLang)}" lang="${escapeXml(bookLang)}">
 <head>
   <meta charset="UTF-8" />
   <title>Mục lục</title>
@@ -286,12 +294,12 @@ $navItems
             """<?xml version="1.0" encoding="UTF-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <head>
-    <meta name="dtb:uid" content="$bookUuid" />
+    <meta name="dtb:uid" content="${escapeXml(bookUuid)}" />
     <meta name="dtb:depth" content="1" />
     <meta name="dtb:totalPageCount" content="0" />
     <meta name="dtb:maxPageNumber" content="0" />
   </head>
-  <docTitle><text>${escapeXml(workspace.bookTitle)}</text></docTitle>
+  <docTitle><text>${escapeXml(bookTitle)}</text></docTitle>
   <navMap>
 $navPoints
   </navMap>
@@ -300,44 +308,16 @@ $navPoints
             Charsets.UTF_8
         )
 
-        // OEBPS/content.opf
-        val manifestChapters = workspace.chapters.joinToString("\n") { chap ->
-            """    <item id="${chap.id}" href="Text/${chap.fileName}" media-type="application/xhtml+xml" />"""
-        }
-        val manifestImages = workspace.imageRelativePaths.mapIndexed { idx, relPath ->
-            """    <item id="img_$idx" href="$relPath" media-type="${mediaTypeForImage(relPath)}" />"""
-        }.joinToString("\n")
-        val spineItems = workspace.chapters.joinToString("\n") { chap ->
-            """    <itemref idref="${chap.id}" />"""
-        }
-
-        val modifiedIso = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
-            .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
-            .format(java.util.Date())
-
-        File(oebpsDir, "content.opf").writeText(
-            """<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId" xml:lang="vi">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:identifier id="BookId">$bookUuid</dc:identifier>
-    <dc:title>${escapeXml(workspace.bookTitle)}</dc:title>
-    <dc:creator>${escapeXml(workspace.bookAuthor)}</dc:creator>
-    <dc:language>vi</dc:language>
-    <meta property="dcterms:modified">$modifiedIso</meta>
-  </metadata>
-  <manifest>
-    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml" />
-    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav" />
-    <item id="style" href="Styles/style.css" media-type="text/css" />
-$manifestChapters
-$manifestImages
-  </manifest>
-  <spine toc="ncx">
-$spineItems
-  </spine>
-</package>
-""",
-            Charsets.UTF_8
+        // OEBPS/content.opf + OEBPS/images/cover.jpg via EpubMetadataEditor
+        EpubMetadataEditor.writeMetadataAndCoverToStage(
+            oebpsDir = oebpsDir,
+            metadata = effectiveMeta.copy(
+                title = bookTitle,
+                identifier = bookUuid,
+                language = bookLang
+            ),
+            chapters = workspace.chapters,
+            imageRelativePaths = workspace.imageRelativePaths
         )
 
         // Write final ZIP archive with uncompressed `mimetype` strictly first

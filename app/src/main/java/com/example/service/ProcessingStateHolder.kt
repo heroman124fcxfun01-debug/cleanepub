@@ -1,5 +1,7 @@
 package com.example.service
 
+import com.example.pipeline.CleaningOptions
+import com.example.pipeline.EpubMetadata
 import com.example.pipeline.ProcessingSnapshot
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -14,8 +16,28 @@ object ProcessingStateHolder {
     private val _snapshot = MutableStateFlow(ProcessingSnapshot())
     val snapshot: StateFlow<ProcessingSnapshot> = _snapshot.asStateFlow()
 
+    @Volatile
+    var pendingMetadata: EpubMetadata? = null
+
+    @Volatile
+    var pendingOptions: CleaningOptions = CleaningOptions()
+
     fun publish(newSnapshot: ProcessingSnapshot) {
         _snapshot.value = newSnapshot
+    }
+
+    fun updateActiveMetadata(metadata: EpubMetadata) {
+        pendingMetadata = metadata
+        _snapshot.update { current ->
+            current.copy(
+                metadata = metadata,
+                workspace = current.workspace?.copy(
+                    bookTitle = metadata.title,
+                    bookAuthor = metadata.creator,
+                    metadata = metadata
+                )
+            )
+        }
     }
 
     fun toggleDiffAccepted(diffId: String) {
@@ -37,6 +59,7 @@ object ProcessingStateHolder {
     }
 
     fun reset() {
+        pendingMetadata = null
         _snapshot.value = ProcessingSnapshot()
     }
 }

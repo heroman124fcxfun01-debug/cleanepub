@@ -82,6 +82,14 @@ data class ChapterDescriptor(
     val filePath: String
 )
 
+data class CleaningOptions(
+    val cleanLinks: Boolean = true,
+    val fixFonts: Boolean = true,
+    val fixSpelling: Boolean = true,
+    val fixWhitespace: Boolean = true,
+    val optimizeContent: Boolean = true
+)
+
 data class PreparedWorkspace(
     val sessionDirPath: String,
     val stageDirPath: String,
@@ -89,7 +97,8 @@ data class PreparedWorkspace(
     val bookTitle: String,
     val bookAuthor: String,
     val chapters: List<ChapterDescriptor>,
-    val imageRelativePaths: List<String>
+    val imageRelativePaths: List<String>,
+    val metadata: EpubMetadata? = null
 )
 
 sealed interface SaveResult {
@@ -123,5 +132,6 @@ data class ProcessingSnapshot(
     val bookContext: BookContext? = null,
     val diffs: List<DiffEntry> = emptyList(),
     val workspace: PreparedWorkspace? = null,
+    val metadata: EpubMetadata? = null,
     val errorMessage: String? = null
 )
