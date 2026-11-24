@@ -237,6 +237,7 @@ class VietnameseSyllableFixer(
         } else null
 
         var allCommon = true
+        var allInternalBigrams = true
         var currentScore = 0
         for (k in start..end) {
             val w = tokens[k].lowerCore
@@ -250,7 +251,9 @@ class VietnameseSyllableFixer(
                 currentScore += dict.getBigramBonusNormalized(leftContext, w)
             }
             if (k > start) {
-                currentScore += dict.getBigramBonusNormalized(tokens[k - 1].lowerCore, w)
+                val bg = dict.getBigramBonusNormalized(tokens[k - 1].lowerCore, w)
+                if (bg == 0) allInternalBigrams = false
+                currentScore += bg
             }
             if (k == end && rightContext != null) {
                 currentScore += dict.getBigramBonusNormalized(w, rightContext)
@@ -258,9 +261,9 @@ class VietnameseSyllableFixer(
         }
 
         // Fast-path CPU optimization (< 50ms/chapter):
-        // If ALL words in this window are already Tier-1 common (+1000), check in O(1) if ANY
-        // alternative first-syllable cut exists in `raw`. If none exists, skip DP immediately!
-        if (allCommon && windowSize >= 2 && !hasAlternativeFirstCut(raw, tokens[start].lowerCore.length)) {
+        // 1. If ALL words are Tier-1 common AND every internal pair is already a known Bigram, skip DP.
+        // 2. If ALL words are Tier-1 common AND no alternative first-syllable cut exists in `raw`, skip DP.
+        if (allCommon && windowSize >= 2 && (allInternalBigrams || !hasAlternativeFirstCut(raw, tokens[start].lowerCore.length))) {
             return null
         }
 

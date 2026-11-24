@@ -41,6 +41,9 @@ object OfflineVietnameseDict {
     // Bigram/collocation bonus map: "w1 w2" -> BIGRAM_BONUS (+2500)
     private val bigramBonuses: HashMap<String, Int> = HashMap(64_000)
 
+    // Zero-allocation 2-level bigram index: w1 -> set of valid w2
+    private val bigramIndex: HashMap<String, HashSet<String>> = HashMap(4_096)
+
     // Full phrase map from vi_words.txt (supports 2-word and 3-word lookup)
     private val words: HashSet<String> = HashSet(64_000)
 
@@ -351,6 +354,7 @@ object OfflineVietnameseDict {
         syllableScores.clear()
         rawAssetSyllables.clear()
         bigramBonuses.clear()
+        bigramIndex.clear()
         words.clear()
 
         // 1. Load raw asset syllables -> assign Tier 3 (+50) ONLY if NOT a ghost/OCR fragment
@@ -382,6 +386,9 @@ object OfflineVietnameseDict {
                         if (secondSpaceIdx < 0) {
                             // Exact 2-syllable compound / collocation
                             bigramBonuses[clean] = BIGRAM_BONUS
+                            val w1 = clean.substring(0, spaceIdx)
+                            val w2 = clean.substring(spaceIdx + 1)
+                            bigramIndex.getOrPut(w1) { HashSet(8) }.add(w2)
                         }
                         val parts = clean.split(' ')
                         for (part in parts) {
@@ -432,6 +439,12 @@ object OfflineVietnameseDict {
             if (clean.isNotEmpty()) {
                 words.add(clean)
                 bigramBonuses[clean] = BIGRAM_BONUS
+                val spaceIdx = clean.indexOf(' ')
+                if (spaceIdx > 0 && clean.indexOf(' ', spaceIdx + 1) < 0) {
+                    val w1 = clean.substring(0, spaceIdx)
+                    val w2 = clean.substring(spaceIdx + 1)
+                    bigramIndex.getOrPut(w1) { HashSet(8) }.add(w2)
+                }
             }
         }
     }
@@ -500,7 +513,7 @@ object OfflineVietnameseDict {
 
     fun getBigramBonusNormalized(firstLower: String, secondLower: String): Int {
         if (firstLower.isEmpty() || secondLower.isEmpty()) return 0
-        return bigramBonuses["$firstLower $secondLower"] ?: 0
+        return if (bigramIndex[firstLower]?.contains(secondLower) == true) BIGRAM_BONUS else 0
     }
 
     fun isRealSyllableNormalized(lowerNfc: String): Boolean {
@@ -519,7 +532,7 @@ object OfflineVietnameseDict {
 
     fun isKnownBigram(first: String, second: String): Boolean {
         if (first.isEmpty() || second.isEmpty()) return false
-        return bigramBonuses.containsKey("${normalizeKey(first)} ${normalizeKey(second)}")
+        return bigramIndex[normalizeKey(first)]?.contains(normalizeKey(second)) == true
     }
 
     fun isKnownTrigram(first: String, second: String, third: String): Boolean {
