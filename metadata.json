@@ -1,0 +1,6 @@
+{
+  "name": "EpubCleanAI",
+  "description": "Ứng dụng làm sạch định dạng, chuẩn hóa văn bản và hiệu đính chính tả tiếng Việt bằng AI cho sách điện tử EPUB và PDF.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

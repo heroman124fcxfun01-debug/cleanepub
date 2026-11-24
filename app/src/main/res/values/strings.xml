@@ -1,0 +1,69 @@
+<resources>
+    <string name="app_name">EpubCleanAI</string>
+    <string name="app_subtitle">Làm sạch định dạng &amp; hiệu đính sách tiếng Việt</string>
+
+    <!-- Home Screen -->
+    <string name="btn_select_file">+ Chọn file EPUB / PDF</string>
+    <string name="home_supported_formats">Hỗ trợ EPUB chuẩn &amp; PDF • Xuất file EPUB sạch</string>
+    <string name="home_section_recent">GẦN ĐÂY</string>
+    <string name="home_empty_title">Chưa có sách nào được xử lý</string>
+    <string name="home_empty_subtitle">Chọn một tệp .epub hoặc .pdf từ bộ nhớ máy để dọn rác định dạng, chuẩn hóa khoảng trắng và hiệu đính chính tả tiếng Việt bằng AI.</string>
+    <string name="storage_permission_banner_title">Cấp quyền truy cập toàn bộ bộ nhớ</string>
+    <string name="storage_permission_banner_desc">Cho phép đọc và lưu đè trực tiếp vào đúng thư mục gốc của sách.</string>
+    <string name="storage_permission_action">Cấp quyền</string>
+    <string name="storage_permission_granted">Đã cấp quyền đọc/ghi trực tiếp thư mục gốc</string>
+    <string name="cd_delete_history">Xóa khỏi lịch sử</string>
+    <string name="cd_open_file">Mở tệp EPUB</string>
+    <string name="cd_empty_illustration">Minh họa thư viện sách điện tử</string>
+
+    <!-- Processing Screen -->
+    <string name="processing_title">Quét &amp; Xử lý</string>
+    <string name="processing_background_badge">Chạy nền Foreground Service</string>
+    <string name="processing_section_pipeline">TIẾN TRÌNH 5 BƯỚC</string>
+    <string name="processing_metric_junk">Link rác</string>
+    <string name="processing_metric_whitespace">Khoảng trắng</string>
+    <string name="processing_metric_spelling">Chính tả / Dấu</string>
+    <string name="processing_cancel">Hủy xử lý</string>
+    <string name="processing_retry">Thử lại</string>
+    <string name="processing_back_home">Về trang chủ</string>
+    <string name="processing_context_label">Ngữ cảnh toàn cục</string>
+    <string name="processing_step_0">Bước 0 · Giải nén &amp; Ngữ cảnh</string>
+    <string name="processing_step_1">Bước 1 · Dọn rác &amp; Liên kết thừa</string>
+    <string name="processing_step_2">Bước 2 · Ép 1 Font chuẩn (Cấm nghiêng)</string>
+    <string name="processing_step_3">Bước 3 · Chuẩn hóa khoảng trắng</string>
+    <string name="processing_step_4">Bước 4 · Hiệu đính AI &amp; Đóng gói EPUB</string>
+
+    <!-- Notification -->
+    <string name="notif_channel_name">Xử lý sách EpubCleanAI</string>
+    <string name="notif_channel_desc">Hiển thị tiến trình làm sạch và hiệu đính sách điện tử khi chạy nền</string>
+    <string name="notif_title_running">Đang xử lý: %1$s</string>
+    <string name="notif_title_done">Hoàn tất: %1$s</string>
+    <string name="notif_action_cancel">Hủy</string>
+
+    <!-- Review & Save Screen -->
+    <string name="review_title">Kiểm tra &amp; Lưu</string>
+    <string name="review_section_diffs">ĐỐI CHIẾU HIỆU ĐÍNH AI</string>
+    <string name="review_label_before">Trước</string>
+    <string name="review_label_after">Sau</string>
+    <string name="review_btn_save">Lưu lại</string>
+    <string name="review_saving">Đang đóng gói &amp; lưu…</string>
+    <string name="review_no_ai_changes_title">Văn bản đã chuẩn chính tả</string>
+    <string name="review_no_ai_changes_desc">AI không phát hiện lỗi chính tả hay dấu tiếng Việt cần sửa. Các bước dọn rác, ép font và chuẩn hóa khoảng trắng đã hoàn tất.</string>
+    <string name="review_select_all">Chọn tất cả</string>
+    <string name="review_deselect_all">Bỏ chọn tất cả</string>
+    <string name="cd_back">Quay lại</string>
+
+    <!-- iOS Action Sheet -->
+    <string name="sheet_save_title">Lưu tệp EPUB đã làm sạch</string>
+    <string name="sheet_option_replace">Lưu thay thế file cũ</string>
+    <string name="sheet_option_replace_sub">Ghi đè trực tiếp tại đúng thư mục gốc</string>
+    <string name="sheet_option_keep">Giữ lại file cũ</string>
+    <string name="sheet_option_keep_sub">Lưu thành %1$s tại đúng thư mục gốc</string>
+    <string name="sheet_cancel">Hủy</string>
+
+    <!-- Save Result Dialog -->
+    <string name="save_success_title">Đã lưu thành công</string>
+    <string name="save_success_open">Mở file EPUB</string>
+    <string name="save_success_done">Hoàn tất</string>
+    <string name="error_invalid_file">Vui lòng chọn tệp định dạng .epub hoặc .pdf hợp lệ.</string>
+</resources>
