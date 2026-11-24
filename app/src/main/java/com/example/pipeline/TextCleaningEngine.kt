@@ -270,7 +270,7 @@ img {
 
     fun extractEditableParagraphs(doc: Document): List<Element> {
         return doc.body().select("p, h1, h2, h3").filter { el ->
-            el.select("img").isEmpty() && el.text().trim().length >= 6
+            el.select("img").isEmpty() && el.text().isNotBlank()
         }
     }
 }

@@ -51,10 +51,14 @@ class EpubCleanPipeline(
         }
 
         // ------------------------------------------------------------------
-        // BƯỚC 0: Giải nén / Trích xuất PDF & Đọc ngữ cảnh toàn cục (100% trên máy)
+        // BƯỚC 0: Giải nén / Trích xuất PDF, nạp Từ điển Offline & Đọc ngữ cảnh
         // ------------------------------------------------------------------
         stepStates[PipelineStep.STEP_0_UNPACK_CONTEXT] = StepState.RUNNING
-        emit(PipelineStep.STEP_0_UNPACK_CONTEXT, 0.04f, "Đang nạp tệp nguồn vào vùng xử lý tạm…")
+        emit(PipelineStep.STEP_0_UNPACK_CONTEXT, 0.03f, "Đang nạp bộ từ điển tiếng Việt ngoại tuyến…")
+        OfflineVietnameseDict.ensureLoaded(context)
+        val textCleaner = TextCleaner(OfflineVietnameseDict)
+
+        emit(PipelineStep.STEP_0_UNPACK_CONTEXT, 0.05f, "Đang nạp tệp nguồn vào vùng xử lý tạm…")
 
         val sessionDir = EpubWorkspaceManager.createSessionDir(context)
         val rawInputFile = File(
@@ -162,24 +166,71 @@ class EpubCleanPipeline(
         stepStates[PipelineStep.STEP_2_UNIFY_FONT] = StepState.COMPLETED
 
         // ------------------------------------------------------------------
-        // BƯỚC 3: Chuẩn hóa khoảng trắng tuyệt đối
+        // BƯỚC 3: Chuẩn hóa khoảng trắng & Sửa tách/trượt khoảng trắng bằng Từ điển Offline
         // ------------------------------------------------------------------
         stepStates[PipelineStep.STEP_3_NORMALIZE_WHITESPACE] = StepState.RUNNING
+        val activeContext = bookContext
+        val diffIndexByKey = HashMap<String, Int>(MAX_PREVIEW_DIFFS)
+
         workspace.chapters.forEachIndexed { idx, chapter ->
             coroutineContext.ensureActive()
             val file = File(chapter.filePath)
             val doc = parseXhtml(file)
-            val result = TextCleaningEngine.normalizeWhitespace(doc)
+
+            // Bước A: Gom khoảng trắng liên tiếp, xóa đoạn rỗng & chuẩn hóa dấu câu
+            val stepAResult = TextCleaningEngine.normalizeWhitespace(doc)
+            var chapterWhitespaceFixes = stepAResult.whitespaceFixesCount
+
+            // Bước B & C: Sửa lỗi trượt khoảng trắng (DP) & ghép âm tiết bị tách giả trên p, h1..h3
+            val editableElements = TextCleaningEngine.extractEditableParagraphs(doc)
+            editableElements.forEachIndexed { pIdx, el ->
+                val beforeWordClean = el.text()
+                val cleanRes = textCleaner.cleanParagraph(beforeWordClean, activeContext.properNouns)
+                if (cleanRes.cleanedText != beforeWordClean && cleanRes.cleanedText.isNotBlank()) {
+                    el.text(cleanRes.cleanedText)
+                    chapterWhitespaceFixes += cleanRes.totalWordFixes.coerceAtLeast(1)
+                    if (diffs.size < MAX_PREVIEW_DIFFS) {
+                        val key = "${chapter.fileName}#$pIdx"
+                        diffs.add(
+                            DiffEntry(
+                                id = "${chapter.fileName}_${pIdx}_${diffs.size}",
+                                chapterFileName = chapter.fileName,
+                                chapterTitle = chapter.title,
+                                paragraphIndex = pIdx,
+                                beforeText = beforeWordClean,
+                                afterText = cleanRes.cleanedText,
+                                reason = cleanRes.reasons.joinToString(" · ")
+                                    .ifBlank { "Sửa lỗi khoảng trắng từ điển" },
+                                accepted = true
+                            )
+                        )
+                        diffIndexByKey[key] = diffs.lastIndex
+                    }
+                }
+            }
+
+            // Cũng làm sạch các thẻ li, blockquote nếu có
+            doc.body().select("li, blockquote").forEach { el ->
+                if (el.select("img").isEmpty() && el.text().isNotBlank()) {
+                    val before = el.text()
+                    val cleanRes = textCleaner.cleanParagraph(before, activeContext.properNouns)
+                    if (cleanRes.cleanedText != before && cleanRes.cleanedText.isNotBlank()) {
+                        el.text(cleanRes.cleanedText)
+                        chapterWhitespaceFixes += cleanRes.totalWordFixes.coerceAtLeast(1)
+                    }
+                }
+            }
+
             saveXhtml(file, chapter.title, doc)
 
             stats = stats.copy(
-                whitespaceFixes = stats.whitespaceFixes + result.whitespaceFixesCount
+                whitespaceFixes = stats.whitespaceFixes + chapterWhitespaceFixes
             )
             val frac = 0.50f + ((idx + 1).toFloat() / totalChapters) * 0.14f
             emit(
                 PipelineStep.STEP_3_NORMALIZE_WHITESPACE,
                 frac,
-                "Đang chuẩn hóa khoảng trắng & dấu câu (${idx + 1}/$totalChapters)…"
+                "Đang sửa tách chữ & trượt khoảng trắng (${idx + 1}/$totalChapters)…"
             )
         }
         stepStates[PipelineStep.STEP_3_NORMALIZE_WHITESPACE] = StepState.COMPLETED
@@ -188,7 +239,6 @@ class EpubCleanPipeline(
         // BƯỚC 4: Hiệu đính chính tả & dấu tiếng Việt trên máy + Đóng gói EPUB
         // ------------------------------------------------------------------
         stepStates[PipelineStep.STEP_4_AI_PROOFREAD_PACK] = StepState.RUNNING
-        val activeContext = bookContext
 
         workspace.chapters.forEachIndexed { chapIdx, chapter ->
             coroutineContext.ensureActive()
@@ -204,7 +254,16 @@ class EpubCleanPipeline(
                     el.text(fix.correctedText)
                     chapterModified = true
                     stats = stats.copy(spellingFixes = stats.spellingFixes + 1)
-                    if (diffs.size < MAX_PREVIEW_DIFFS) {
+
+                    val key = "${chapter.fileName}#$pIdx"
+                    val existingIdx = diffIndexByKey[key]
+                    if (existingIdx != null) {
+                        val existing = diffs[existingIdx]
+                        diffs[existingIdx] = existing.copy(
+                            afterText = fix.correctedText,
+                            reason = "${existing.reason} · ${fix.reason}"
+                        )
+                    } else if (diffs.size < MAX_PREVIEW_DIFFS) {
                         diffs.add(
                             DiffEntry(
                                 id = "${chapter.fileName}_${pIdx}_${diffs.size}",
@@ -217,6 +276,7 @@ class EpubCleanPipeline(
                                 accepted = true
                             )
                         )
+                        diffIndexByKey[key] = diffs.lastIndex
                     }
                 }
             }

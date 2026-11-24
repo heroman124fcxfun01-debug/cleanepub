@@ -1,17 +1,43 @@
 package com.example
 
 import com.example.pipeline.EpubWorkspaceManager
+import com.example.pipeline.OfflineVietnameseDict
+import com.example.pipeline.TextCleaner
 import com.example.pipeline.TextCleaningEngine
 import org.jsoup.Jsoup
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.BeforeClass
 import org.junit.Test
 import java.io.File
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
 class EpubCleanPipelineUnitTest {
+
+    companion object {
+        @JvmStatic
+        @BeforeClass
+        fun loadOfflineVietnameseDictionaries() {
+            val sylFile = listOf(
+                File("src/main/assets/vi_syllables.txt"),
+                File("app/src/main/assets/vi_syllables.txt")
+            ).firstOrNull { it.exists() }
+                ?: error("Could not locate vi_syllables.txt asset for unit tests")
+
+            val wordsFile = listOf(
+                File("src/main/assets/vi_words.txt"),
+                File("app/src/main/assets/vi_words.txt")
+            ).firstOrNull { it.exists() }
+                ?: error("Could not locate vi_words.txt asset for unit tests")
+
+            OfflineVietnameseDict.loadFromFiles(sylFile, wordsFile)
+            assertTrue("OfflineVietnameseDict should be loaded", OfflineVietnameseDict.isLoaded)
+            assertTrue("Expected > 7000 syllables", OfflineVietnameseDict.syllableCount > 7_000)
+            assertTrue("Expected > 40000 words", OfflineVietnameseDict.wordCount > 40_000)
+        }
+    }
 
     @Test
     fun step1_stripsUrlsAndVietnameseSourceSignatures() {
@@ -76,6 +102,63 @@ class EpubCleanPipelineUnitTest {
         assertTrue(result.whitespaceFixesCount >= 2)
         assertEquals(1, doc.select("p").size)
         assertEquals("Xin chào thế giới, đây là tiếng Việt!", doc.selectFirst("p")?.text())
+    }
+
+    @Test
+    fun offlineDictAndTextCleaner_fixesCase1FakeWordSplit() {
+        val cleaner = TextCleaner(OfflineVietnameseDict)
+
+        val res1 = cleaner.cleanParagraph("Củ  a  tâm lí")
+        assertEquals("Của tâm lí", res1.cleanedText)
+        assertTrue(res1.fakeSplitFixes >= 1)
+
+        val res2 = cleaner.cleanParagraph("Khô ng có gì thay đổi trong ngà y hôm qua.")
+        assertEquals("Không có gì thay đổi trong ngày hôm qua.", res2.cleanedText)
+
+        val res3 = cleaner.cleanParagraph("Tô i nghĩ điều đó đượ c tạo ra từ nỗ lực củ a mỗi người.")
+        assertEquals("Tôi nghĩ điều đó được tạo ra từ nỗ lực của mỗi người.", res3.cleanedText)
+    }
+
+    @Test
+    fun offlineDictAndTextCleaner_fixesCase2SlidingSpacesAndMultiTokenDp() {
+        val cleaner = TextCleaner(OfflineVietnameseDict)
+
+        val res1 = cleaner.cleanParagraph("Anh cần chú ýt ới từng chi tiết nhỏ.")
+        assertEquals("Anh cần chú ý tới từng chi tiết nhỏ.", res1.cleanedText)
+        assertTrue(res1.slidingSpaceFixes >= 1)
+
+        val res2 = cleaner.cleanParagraph("t ôi đi học vào n gày mai.")
+        assertEquals("tôi đi học vào ngày mai.", res2.cleanedText)
+
+        val res3 = cleaner.cleanParagraph("n ga y ma i trời sẽ sáng.")
+        assertEquals("ngay mai trời sẽ sáng.", res3.cleanedText)
+
+        val res4 = cleaner.cleanParagraph("n gà y ma i trời sẽ sáng.")
+        assertEquals("ngày mai trời sẽ sáng.", res4.cleanedText)
+
+        val res5 = cleaner.cleanParagraph("Hãy chú ýtới cảm xúc củ atâm lí học.")
+        assertEquals("Hãy chú ý tới cảm xúc của tâm lí học.", res5.cleanedText)
+
+        val res6 = cleaner.cleanParagraph("Nhữ ng người bạ n cũ đã quay về.")
+        assertEquals("Những người bạn cũ đã quay về.", res6.cleanedText)
+    }
+
+    @Test
+    fun offlineDictAndTextCleaner_protectsValidPhrasesAndExceptions() {
+        val cleaner = TextCleaner(OfflineVietnameseDict)
+
+        val safeSentences = listOf(
+            "Ông ấy nói trời ơi sao mà lạnh thế!",
+            "Cô ấy chú ý rất kỹ khi bước vào khu A.",
+            "Chương I: Anh cho ai mượn cuốn sách đó à?",
+            "Em à, cái ao trước nhà to à?",
+            "Lương y như từ mẫu, củ, a đều khác nhau."
+        )
+
+        for (sentence in safeSentences) {
+            val res = cleaner.cleanParagraph(sentence)
+            assertEquals("Should not corrupt valid sentence: $sentence", sentence, res.cleanedText)
+        }
     }
 
     @Test
