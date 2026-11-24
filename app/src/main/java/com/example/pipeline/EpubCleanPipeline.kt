@@ -1,6 +1,8 @@
 package com.example.pipeline
 
 import android.content.Context
+import com.example.data.ErrorMemoryManager
+import com.example.data.ParagraphDiffPair
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -144,27 +146,79 @@ class EpubCleanPipeline(
         )
 
         // ------------------------------------------------------------------
-        // BƯỚC 1: Dọn sạch quảng cáo rác (AdCleaner) & Liên kết thừa (tuần tự từng chương)
+        // BƯỚC 1: Áp dụng Thư viện Ghi nhớ Lỗi (ưu tiên trước) + Dọn quảng cáo rác & liên kết
         // ------------------------------------------------------------------
         stepStates[PipelineStep.STEP_1_CLEAN_JUNK] = StepState.RUNNING
-        if (options.cleanLinks) {
+        val errorMemoryManager = ErrorMemoryManager(context)
+        val learnedRules = if (errorMemoryManager.isAutoApplyEnabled()) {
+            errorMemoryManager.getRules()
+        } else {
+            emptyList()
+        }
+
+        if (learnedRules.isNotEmpty() || options.cleanLinks) {
             workspace.chapters.forEachIndexed { idx, chapter ->
                 coroutineContext.ensureActive()
                 val file = File(chapter.filePath)
                 val doc = parseXhtml(file)
-                val adResult = AdCleaner.cleanDocument(doc)
-                val linkResult = TextCleaningEngine.cleanJunkAndLinks(doc)
+                var chapterJunkRemoved = 0
+                var chapterLearnedVocabFixes = 0
+
+                // Ưu tiên chạy qua Thư viện ghi nhớ lỗi trước (Upgrade 1.3)
+                if (learnedRules.isNotEmpty()) {
+                    val elements = TextCleaningEngine.extractEditableParagraphs(doc)
+                    elements.forEachIndexed { pIdx, el ->
+                        val beforeMem = el.text()
+                        if (beforeMem.isBlank()) return@forEachIndexed
+                        val memRes = ErrorMemoryManager.applyRulesToText(beforeMem, learnedRules)
+                        if (memRes.totalFixes > 0) {
+                            chapterJunkRemoved += memRes.junkDeletionCount
+                            chapterLearnedVocabFixes += memRes.vocabFixCount
+                            if (memRes.cleanedText.isBlank()) {
+                                el.remove()
+                            } else if (memRes.cleanedText != beforeMem) {
+                                el.text(memRes.cleanedText)
+                                if (diffs.size < MAX_PREVIEW_DIFFS) {
+                                    diffs.add(
+                                        DiffEntry(
+                                            id = "mem_${chapter.fileName}_${pIdx}_${diffs.size}",
+                                            chapterFileName = chapter.fileName,
+                                            chapterTitle = chapter.title,
+                                            paragraphIndex = pIdx,
+                                            beforeText = beforeMem,
+                                            afterText = memRes.cleanedText,
+                                            reason = "Thư viện ghi nhớ lỗi",
+                                            accepted = true
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (options.cleanLinks) {
+                    val adResult = AdCleaner.cleanDocument(doc)
+                    val linkResult = TextCleaningEngine.cleanJunkAndLinks(doc)
+                    chapterJunkRemoved += adResult.removedCount + linkResult.junkRemovedCount
+                }
+
                 saveXhtml(file, chapter.title, doc)
 
                 stats = stats.copy(
-                    junkLinksRemoved = stats.junkLinksRemoved + adResult.removedCount + linkResult.junkRemovedCount,
+                    junkLinksRemoved = stats.junkLinksRemoved + chapterJunkRemoved,
+                    spellingFixes = stats.spellingFixes + chapterLearnedVocabFixes,
                     processedChapters = idx + 1
                 )
                 val frac = 0.20f + ((idx + 1).toFloat() / totalChapters) * 0.16f
                 emit(
                     PipelineStep.STEP_1_CLEAN_JUNK,
                     frac,
-                    "Đang dọn quảng cáo rác & liên kết thừa (${idx + 1}/$totalChapters chương)…"
+                    if (learnedRules.isNotEmpty()) {
+                        "Đang áp dụng Thư viện ghi nhớ lỗi & dọn rác (${idx + 1}/$totalChapters chương)…"
+                    } else {
+                        "Đang dọn quảng cáo rác & liên kết thừa (${idx + 1}/$totalChapters chương)…"
+                    }
                 )
             }
         } else {
@@ -203,52 +257,58 @@ class EpubCleanPipeline(
         val activeContext = bookContext
         val diffIndexByKey = HashMap<String, Int>(MAX_PREVIEW_DIFFS)
 
-        if (options.fixWhitespace) {
+        if (options.fixWhitespace || options.optimizeContent) {
             workspace.chapters.forEachIndexed { idx, chapter ->
                 coroutineContext.ensureActive()
                 val file = File(chapter.filePath)
                 val doc = parseXhtml(file)
 
-                // Bước A: Gom khoảng trắng liên tiếp, xóa đoạn rỗng & chuẩn hóa dấu câu
-                val stepAResult = TextCleaningEngine.normalizeWhitespace(doc)
-                var chapterWhitespaceFixes = stepAResult.whitespaceFixesCount
+                // Bước 3.0 (Upgrade 1.2): Tự động nối đoạn <p> bị ngắt dòng lỗi giữa câu
+                val mergeResult = ParagraphMerger.mergeBrokenParagraphs(doc)
+                var chapterWhitespaceFixes = mergeResult.mergedCount
 
-                // Bước B & C: Sửa lỗi trượt khoảng trắng (DP) & ghép âm tiết bị tách giả trên p, h1..h3
-                val editableElements = TextCleaningEngine.extractEditableParagraphs(doc)
-                editableElements.forEachIndexed { pIdx, el ->
-                    val beforeWordClean = el.text()
-                    val cleanRes = textCleaner.cleanParagraph(beforeWordClean, activeContext.properNouns)
-                    if (cleanRes.cleanedText != beforeWordClean && cleanRes.cleanedText.isNotBlank()) {
-                        el.text(cleanRes.cleanedText)
-                        chapterWhitespaceFixes += cleanRes.totalWordFixes.coerceAtLeast(1)
-                        if (diffs.size < MAX_PREVIEW_DIFFS) {
-                            val key = "${chapter.fileName}#$pIdx"
-                            diffs.add(
-                                DiffEntry(
-                                    id = "${chapter.fileName}_${pIdx}_${diffs.size}",
-                                    chapterFileName = chapter.fileName,
-                                    chapterTitle = chapter.title,
-                                    paragraphIndex = pIdx,
-                                    beforeText = beforeWordClean,
-                                    afterText = cleanRes.cleanedText,
-                                    reason = cleanRes.reasons.joinToString(" · ")
-                                        .ifBlank { "Sửa lỗi khoảng trắng từ điển" },
-                                    accepted = true
-                                )
-                            )
-                            diffIndexByKey[key] = diffs.lastIndex
-                        }
-                    }
-                }
+                if (options.fixWhitespace) {
+                    // Bước A: Gom khoảng trắng liên tiếp, xóa đoạn rỗng & chuẩn hóa dấu câu
+                    val stepAResult = TextCleaningEngine.normalizeWhitespace(doc)
+                    chapterWhitespaceFixes += stepAResult.whitespaceFixesCount
 
-                // Cũng làm sạch các thẻ li, blockquote nếu có
-                doc.body().select("li, blockquote").forEach { el ->
-                    if (el.select("img").isEmpty() && el.text().isNotBlank()) {
-                        val before = el.text()
-                        val cleanRes = textCleaner.cleanParagraph(before, activeContext.properNouns)
-                        if (cleanRes.cleanedText != before && cleanRes.cleanedText.isNotBlank()) {
+                    // Bước B & C: Sửa lỗi trượt khoảng trắng (DP) & ghép âm tiết bị tách giả trên p, h1..h3
+                    val editableElements = TextCleaningEngine.extractEditableParagraphs(doc)
+                    editableElements.forEachIndexed { pIdx, el ->
+                        val beforeWordClean = el.text()
+                        val cleanRes = textCleaner.cleanParagraph(beforeWordClean, activeContext.properNouns)
+                        if (cleanRes.cleanedText != beforeWordClean && cleanRes.cleanedText.isNotBlank()) {
                             el.text(cleanRes.cleanedText)
                             chapterWhitespaceFixes += cleanRes.totalWordFixes.coerceAtLeast(1)
+                            if (diffs.size < MAX_PREVIEW_DIFFS) {
+                                val key = "${chapter.fileName}#$pIdx"
+                                diffs.add(
+                                    DiffEntry(
+                                        id = "${chapter.fileName}_${pIdx}_${diffs.size}",
+                                        chapterFileName = chapter.fileName,
+                                        chapterTitle = chapter.title,
+                                        paragraphIndex = pIdx,
+                                        beforeText = beforeWordClean,
+                                        afterText = cleanRes.cleanedText,
+                                        reason = cleanRes.reasons.joinToString(" · ")
+                                            .ifBlank { "Sửa lỗi khoảng trắng từ điển" },
+                                        accepted = true
+                                    )
+                                )
+                                diffIndexByKey[key] = diffs.lastIndex
+                            }
+                        }
+                    }
+
+                    // Cũng làm sạch các thẻ li, blockquote nếu có
+                    doc.body().select("li, blockquote").forEach { el ->
+                        if (el.select("img").isEmpty() && el.text().isNotBlank()) {
+                            val before = el.text()
+                            val cleanRes = textCleaner.cleanParagraph(before, activeContext.properNouns)
+                            if (cleanRes.cleanedText != before && cleanRes.cleanedText.isNotBlank()) {
+                                el.text(cleanRes.cleanedText)
+                                chapterWhitespaceFixes += cleanRes.totalWordFixes.coerceAtLeast(1)
+                            }
                         }
                     }
                 }
@@ -256,13 +316,14 @@ class EpubCleanPipeline(
                 saveXhtml(file, chapter.title, doc)
 
                 stats = stats.copy(
-                    whitespaceFixes = stats.whitespaceFixes + chapterWhitespaceFixes
+                    whitespaceFixes = stats.whitespaceFixes + chapterWhitespaceFixes,
+                    mergedParagraphs = stats.mergedParagraphs + mergeResult.mergedCount
                 )
                 val frac = 0.50f + ((idx + 1).toFloat() / totalChapters) * 0.14f
                 emit(
                     PipelineStep.STEP_3_NORMALIZE_WHITESPACE,
                     frac,
-                    "Đang sửa tách chữ & trượt khoảng trắng (${idx + 1}/$totalChapters)…"
+                    "Đang nối đoạn lỗi & sửa khoảng trắng (${idx + 1}/$totalChapters)…"
                 )
             }
         } else {
@@ -362,12 +423,28 @@ class EpubCleanPipeline(
             }
         }
 
+        // Bước 4D (Upgrade 1.2): Dọn ảnh lỗi/pixel theo dõi & nén ảnh minh họa dung lượng lớn
+        var finalWorkspace = workspace
+        if (options.optimizeContent || options.cleanLinks) {
+            emit(
+                PipelineStep.STEP_4_AI_PROOFREAD_PACK,
+                0.95f,
+                "Đang dọn ảnh lỗi & nén tối ưu ảnh minh họa…"
+            )
+            val imgOpt = ImageOptimizer.optimizeWorkspaceImages(workspace)
+            finalWorkspace = workspace.copy(imageRelativePaths = imgOpt.updatedImageRelativePaths)
+            stats = stats.copy(
+                junkLinksRemoved = stats.junkLinksRemoved + imgOpt.brokenOrTinyTagsRemoved,
+                imagesOptimized = stats.imagesOptimized + imgOpt.totalOptimizations
+            )
+        }
+
         emit(
             PipelineStep.STEP_4_AI_PROOFREAD_PACK,
-            0.96f,
+            0.97f,
             "Đang ghi Metadata, mục lục, ảnh bìa & đóng gói EPUB chuẩn…"
         )
-        EpubWorkspaceManager.packStandardEpub(workspace, regenerateToc = defaultRegenerateToc)
+        EpubWorkspaceManager.packStandardEpub(finalWorkspace, regenerateToc = defaultRegenerateToc)
         stepStates[PipelineStep.STEP_4_AI_PROOFREAD_PACK] = StepState.COMPLETED
 
         emit(
@@ -375,7 +452,7 @@ class EpubCleanPipeline(
             progress = 1.0f,
             detail = "Hoàn tất làm sạch & hiệu đính trên máy!",
             phase = ProcessingPhase.COMPLETED,
-            workspace = workspace
+            workspace = finalWorkspace
         )
     }
 
@@ -472,28 +549,67 @@ class EpubCleanPipeline(
     }
 
     /**
-     * Writes user's manual paragraph edits + manual TOC `#anchorId` attributes back into staged
-     * XHTML chapters (preserving images and chapter headings), then repacks the EPUB.
+     * Writes user's manual paragraph edits, dynamic Chapter Splits / Merges, and manual TOC `#anchorId`
+     * attributes back into staged XHTML chapters (preserving images and chapter headings), then repacks EPUB.
      */
     suspend fun writeManualEditsAndPackEpub(
         workspace: PreparedWorkspace,
         chapters: List<ManualChapterContent>,
         manualTocEntries: List<ManualTocEntry>,
-        regenerateToc: Boolean = workspace.tocInspection?.shouldRegenerateByDefault ?: true
+        regenerateToc: Boolean = workspace.tocInspection?.shouldRegenerateByDefault ?: true,
+        editableTocItems: List<EditableTocItem>? = null
     ): File = withContext(Dispatchers.IO) {
-        val anchorsByChapter = manualTocEntries.groupBy { it.chapterFileName }
+        val textDir = File(workspace.stageDirPath, "OEBPS/Text").apply { mkdirs() }
+        val activeAnchors: List<ManualTocEntry> = if (editableTocItems != null) {
+            editableTocItems.mapNotNull { item ->
+                val anchor = item.anchorId ?: return@mapNotNull null
+                ManualTocEntry(
+                    id = item.id,
+                    title = item.title,
+                    chapterIndex = item.chapterIndex,
+                    chapterFileName = item.chapterFileName,
+                    paragraphIndex = item.paragraphIndex,
+                    anchorId = anchor
+                )
+            }
+        } else {
+            manualTocEntries
+        }
+        val anchorsByChapter = activeAnchors.groupBy { it.chapterFileName }
 
-        for (chapter in chapters) {
-            val file = File(chapter.filePath)
-            if (!file.exists()) continue
-            val doc = parseXhtml(file)
-            val editableElements = TextCleaningEngine.extractEditableParagraphs(doc)
+        // Remove any merged-away chapter .xhtml files from OEBPS/Text so OPF spine/manifest stays clean
+        val activeFileNames = chapters.map { it.fileName }.toSet()
+        textDir.listFiles()?.forEach { existingFile ->
+            if (existingFile.isFile && existingFile.extension.equals("xhtml", ignoreCase = true)) {
+                if (existingFile.name !in activeFileNames) {
+                    existingFile.delete()
+                }
+            }
+        }
+
+        val syncedDescriptors = ArrayList<ChapterDescriptor>(chapters.size)
+
+        chapters.forEachIndexed { idx, chapter ->
+            val file = chapter.filePath.takeIf { it.isNotBlank() }?.let { File(it) }
+                ?: File(textDir, chapter.fileName)
             val chapterAnchors = anchorsByChapter[chapter.fileName]
                 .orEmpty()
                 .associateBy { it.paragraphIndex }
-
             val newParagraphs = chapter.currentParagraphs
-            if (editableElements.size == newParagraphs.size) {
+
+            val doc: Document = if (file.exists()) {
+                parseXhtml(file)
+            } else {
+                Jsoup.parse("<html><head></head><body></body></html>").apply {
+                    outputSettings()
+                        .syntax(Document.OutputSettings.Syntax.xml)
+                        .charset(Charsets.UTF_8)
+                        .prettyPrint(true)
+                }
+            }
+
+            val editableElements = TextCleaningEngine.extractEditableParagraphs(doc)
+            if (file.exists() && editableElements.size == newParagraphs.size) {
                 // Fast in-place update: preserves exact tag hierarchy (h1/h2/h3/p) and surrounding images
                 editableElements.forEachIndexed { pIdx, el ->
                     val updatedText = newParagraphs[pIdx]
@@ -504,8 +620,7 @@ class EpubCleanPipeline(
                     }
                 }
             } else {
-                // Paragraph count changed (e.g. user chose "Giữ nguyên" after Step 1 stripped ad blocks):
-                // Preserve any existing images, then write clean heading + paragraphs with anchors.
+                // Newly split chapter, merged chapter, or altered paragraph count: preserve existing images
                 val preservedImages = doc.body().select("img").map { it.outerHtml() }
                 val body = doc.body()
                 body.empty()
@@ -526,13 +641,91 @@ class EpubCleanPipeline(
             }
 
             saveXhtml(file, chapter.title, doc)
+            syncedDescriptors.add(
+                ChapterDescriptor(
+                    id = "chap_${idx + 1}",
+                    fileName = chapter.fileName,
+                    title = chapter.title,
+                    filePath = file.absolutePath
+                )
+            )
         }
 
+        val syncedWorkspace = workspace.copy(chapters = syncedDescriptors)
+        val customEntries = editableTocItems?.let { TocGenerator.toTocEntries(it) }
         EpubWorkspaceManager.packStandardEpub(
-            workspace = workspace,
+            workspace = syncedWorkspace,
             regenerateToc = regenerateToc,
-            manualTocEntries = manualTocEntries
+            manualTocEntries = activeAnchors,
+            customTocEntries = customEntries
         )
+    }
+
+    /**
+     * Upgrade 1.3: Extracts `(original, final)` paragraph pairs from manual editing chapters
+     * (including fully deleted paragraphs for Group 5 junk deletion learning) to persist with History.
+     */
+    fun extractDiffPairsFromManualChapters(chapters: List<ManualChapterContent>): List<ParagraphDiffPair> {
+        val pairs = mutableListOf<ParagraphDiffPair>()
+        for (chap in chapters) {
+            val orig = chap.originalParagraphs
+            val curr = chap.currentParagraphs
+            val maxLen = maxOf(orig.size, curr.size)
+            for (i in 0 until maxLen) {
+                val b = orig.getOrNull(i)?.trim().orEmpty()
+                val a = curr.getOrNull(i)?.trim().orEmpty()
+                if (b.isNotEmpty() && b != a) {
+                    pairs.add(ParagraphDiffPair(beforeText = b, afterText = a))
+                }
+            }
+        }
+        return pairs
+    }
+
+    /**
+     * Upgrade 1.3: Extracts `(original, final)` pairs from accepted ReviewScreen diffs
+     * plus any deleted junk lines from the pre-clean original snapshot.
+     */
+    suspend fun extractDiffPairsFromReview(
+        workspace: PreparedWorkspace,
+        diffs: List<DiffEntry>
+    ): List<ParagraphDiffPair> = withContext(Dispatchers.IO) {
+        val pairs = mutableListOf<ParagraphDiffPair>()
+        for (d in diffs) {
+            if (d.accepted && d.beforeText.isNotBlank() && d.beforeText != d.afterText) {
+                pairs.add(ParagraphDiffPair(beforeText = d.beforeText, afterText = d.afterText))
+            }
+        }
+
+        // Also detect completely removed short junk/URL lines by comparing original_text vs staged chapter
+        val originalDir = workspace.originalTextDirPath?.let { File(it) }
+        if (originalDir != null && originalDir.exists()) {
+            for (chap in workspace.chapters) {
+                val origFile = File(originalDir, chap.fileName)
+                val stagedFile = File(chap.filePath)
+                if (!origFile.exists() || !stagedFile.exists()) continue
+                val origParas = extractDisplayParagraphs(parseXhtml(origFile))
+                val stagedSet = extractDisplayParagraphs(parseXhtml(stagedFile)).toHashSet()
+                for (origLine in origParas) {
+                    if (origLine.length in 5..150 && origLine !in stagedSet) {
+                        val trimmed = origLine.trim()
+                        val looksLikeJunk = trimmed.contains("http", true) ||
+                            trimmed.contains("www.", true) ||
+                            trimmed.contains(".vn", true) ||
+                            trimmed.contains(".com", true) ||
+                            trimmed.contains(".net", true) ||
+                            trimmed.contains("sưu tầm", true) ||
+                            trimmed.contains("truyện", true) ||
+                            trimmed.contains("chúc các bạn", true) ||
+                            trimmed.contains("fanpage", true)
+                        if (looksLikeJunk) {
+                            pairs.add(ParagraphDiffPair(beforeText = trimmed, afterText = ""))
+                        }
+                    }
+                }
+            }
+        }
+        pairs
     }
 
     private fun extractDisplayParagraphs(doc: Document): List<String> {

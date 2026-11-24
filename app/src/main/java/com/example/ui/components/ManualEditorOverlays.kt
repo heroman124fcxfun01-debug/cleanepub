@@ -23,12 +23,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.MenuBook
+import androidx.compose.material.icons.automirrored.rounded.Undo
 import androidx.compose.material.icons.rounded.Bookmark
+import androidx.compose.material.icons.rounded.CallMerge
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FindReplace
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -51,8 +56,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.pipeline.ManualChapterContent
-import com.example.pipeline.ManualTocEntry
+import com.example.pipeline.EditableTocItem
 
 // Warm Vintage Old-Book Sepia Palette
 internal val SepiaBg = Color(0xFFF4ECD8)
@@ -63,10 +67,9 @@ internal val SepiaInk = Color(0xFF3B2F2F)
 internal val SepiaInkMuted = Color(0xFF75624E)
 internal val SepiaAccent = Color(0xFFB35A28)
 internal val SepiaAccentSoft = Color(0x22B35A28)
+internal val SepiaActiveParagraphBg = Color(0xFFE8D8B5)
 internal val SepiaSearchHighlight = Color(0xFFF3CA6E)
 internal val SepiaSearchActive = Color(0xFFE59736)
-internal val SepiaDiffOrigBg = Color(0x1EC0392B)
-internal val SepiaDiffCurrBg = Color(0x1E2E7D32)
 
 /**
  * Compact Sepia Find & Replace panel shown directly below the Top Bar when Search is active.
@@ -77,12 +80,14 @@ fun SepiaFindReplaceBar(
     replaceQuery: String,
     matchCount: Int,
     activeMatchIndex: Int,
+    customReplaceCount: Int,
     onSearchQueryChange: (String) -> Unit,
     onReplaceQueryChange: (String) -> Unit,
     onPrevMatch: () -> Unit,
     onNextMatch: () -> Unit,
     onReplaceOne: () -> Unit,
     onReplaceAll: () -> Unit,
+    onOpenCustomReplace: () -> Unit,
     onClose: () -> Unit
 ) {
     Column(
@@ -108,8 +113,7 @@ fun SepiaFindReplaceBar(
             )
 
             Text(
-                text = if (searchQuery.isBlank()) "0/0"
-                else if (matchCount == 0) "0/0"
+                text = if (searchQuery.isBlank() || matchCount == 0) "0/0"
                 else "${activeMatchIndex + 1}/$matchCount",
                 fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -162,11 +166,11 @@ fun SepiaFindReplaceBar(
             }
         }
 
-        // Row 2: Replace field + Thay + Tất cả
+        // Row 2: Replace field + Thay + Tất cả + Thay nhanh (Upgrade 1.2)
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             SepiaCompactInput(
                 value = replaceQuery,
@@ -190,6 +194,13 @@ fun SepiaFindReplaceBar(
                 emphasized = true,
                 onClick = onReplaceAll,
                 modifier = Modifier.testTag("manual_replace_all")
+            )
+
+            SepiaSmallActionChip(
+                label = if (customReplaceCount > 0) "Nhanh ($customReplaceCount)" else "Nhanh",
+                enabled = true,
+                onClick = onOpenCustomReplace,
+                modifier = Modifier.testTag("manual_custom_replace_open")
             )
         }
     }
@@ -277,19 +288,26 @@ private fun SepiaSmallActionChip(
 }
 
 /**
- * Floating Sepia Table of Contents Dialog listing all chapters + user's manual TOC bookmarks.
+ * Floating Sepia Table of Contents Dialog with dedicated "Sửa" Edit Mode:
+ * - Normal mode: click any TOC item to jump directly to chapter/paragraph.
+ * - TOC Edit mode (top-right pill "Sửa" lit): each row displays Pencil (Rename) & Trash (Delete) icons.
  */
 @Composable
 fun ManualTocOverlayDialog(
     visible: Boolean,
-    chapters: List<ManualChapterContent>,
+    tocItems: List<EditableTocItem>,
     currentChapterIndex: Int,
-    manualBookmarks: List<ManualTocEntry>,
-    onSelectChapter: (chapterIndex: Int, paragraphIndex: Int) -> Unit,
-    onDeleteBookmark: (String) -> Unit,
+    totalChapters: Int,
+    onSelectTarget: (chapterIndex: Int, paragraphIndex: Int) -> Unit,
+    onRenameItem: (entryId: String, newTitle: String) -> Unit,
+    onDeleteItem: (entryId: String) -> Unit,
+    onMergeChapterWithNext: (chapterIndex: Int) -> Unit,
     onDismiss: () -> Unit
 ) {
     if (!visible) return
+
+    var isTocEditMode by remember { mutableStateOf(false) }
+    var renamingItem by remember { mutableStateOf<EditableTocItem?>(null) }
 
     IosFloatingDialog(onDismissRequest = onDismiss) {
         Column(
@@ -298,29 +316,56 @@ fun ManualTocOverlayDialog(
                 .background(SepiaBg)
                 .padding(16.dp)
         ) {
+            // Header: Title | "Sửa" pill | Close X
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.MenuBook,
+                    contentDescription = null,
+                    tint = SepiaAccent,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Mục lục (${tocItems.size})",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = SepiaInk,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+
+                // Dedicated "Sửa" toggle button inside TOC header
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (isTocEditMode) SepiaAccent else SepiaCard,
+                    border = if (isTocEditMode) null else BorderStroke(0.9.dp, SepiaBorder),
+                    modifier = Modifier
+                        .height(30.dp)
+                        .clip(RoundedCornerShape(50))
+                        .clickable { isTocEditMode = !isTocEditMode }
+                        .testTag("toc_edit_mode_button")
                 ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.MenuBook,
-                        contentDescription = null,
-                        tint = SepiaAccent,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Text(
-                        text = "Mục lục (${chapters.size + manualBookmarks.size})",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = SepiaInk,
-                        maxLines = 1
-                    )
+                    Box(
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Sửa",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isTocEditMode) Color.White else SepiaInk,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
                 Box(
                     modifier = Modifier
                         .size(30.dp)
@@ -339,108 +384,363 @@ fun ManualTocOverlayDialog(
                 }
             }
 
+            if (isTocEditMode) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Bấm gộp để nối chương vào chương dưới, bút chì để đổi tên hoặc thùng rác để xóa.",
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp,
+                    color = SepiaAccent
+                )
+            }
+
             Spacer(modifier = Modifier.height(10.dp))
             HorizontalDivider(thickness = 0.8.dp, color = SepiaBorder)
             Spacer(modifier = Modifier.height(8.dp))
 
-            val bookmarksByChapter = remember(manualBookmarks) {
-                manualBookmarks.groupBy { it.chapterIndex }
-            }
+            if (tocItems.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Danh sách mục lục đang trống.",
+                        fontSize = 12.sp,
+                        color = SepiaInkMuted
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp),
+                    contentPadding = PaddingValues(vertical = 2.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    itemsIndexed(
+                        items = tocItems,
+                        key = { _, item -> item.id }
+                    ) { idx, item ->
+                        val isCurrent = !item.isManualBookmark && item.chapterIndex == currentChapterIndex
+                        val startPadding = if (item.isManualBookmark) 18.dp else 0.dp
 
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 420.dp),
-                contentPadding = PaddingValues(vertical = 2.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                itemsIndexed(
-                    items = chapters,
-                    key = { idx, c -> "${c.fileName}_$idx" }
-                ) { idx, chapter ->
-                    val isSelected = idx == currentChapterIndex
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = if (isSelected) SepiaAccentSoft else Color.Transparent,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable {
-                                onSelectChapter(idx, 0)
-                                onDismiss()
-                            }
-                    ) {
-                        Row(
+                        Surface(
+                            shape = RoundedCornerShape(11.dp),
+                            color = when {
+                                isCurrent -> SepiaAccentSoft
+                                item.isManualBookmark -> SepiaCard
+                                else -> Color.Transparent
+                            },
+                            border = if (item.isManualBookmark) BorderStroke(0.6.dp, SepiaBorder) else null,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 10.dp, vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "${idx + 1}.",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (isSelected) SepiaAccent else SepiaInkMuted,
-                                modifier = Modifier.width(26.dp)
-                            )
-                            Text(
-                                text = chapter.title,
-                                fontSize = 13.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                color = if (isSelected) SepiaAccent else SepiaInk,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-
-                    // Nested manual bookmarks belonging to this chapter
-                    val chapterBms = bookmarksByChapter[idx].orEmpty()
-                    for (bm in chapterBms) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(start = 24.dp, top = 2.dp, bottom = 2.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(SepiaCard)
-                                .border(0.6.dp, SepiaBorder, RoundedCornerShape(10.dp))
-                                .clickable {
-                                    onSelectChapter(bm.chapterIndex, bm.paragraphIndex)
+                                .padding(start = startPadding)
+                                .clip(RoundedCornerShape(11.dp))
+                                .clickable(enabled = !isTocEditMode) {
+                                    onSelectTarget(item.chapterIndex, item.paragraphIndex)
                                     onDismiss()
                                 }
-                                .padding(start = 10.dp, end = 4.dp, top = 5.dp, bottom = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Bookmark,
-                                contentDescription = null,
-                                tint = SepiaAccent,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = bm.title,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = SepiaInk,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
-                            IconButton(
-                                onClick = { onDeleteBookmark(bm.id) },
-                                modifier = Modifier.size(28.dp)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(
+                                        start = 10.dp,
+                                        end = if (isTocEditMode) 4.dp else 10.dp,
+                                        top = 7.dp,
+                                        bottom = 7.dp
+                                    ),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.DeleteOutline,
-                                    contentDescription = "Xóa mục lục thủ công",
-                                    tint = SepiaInkMuted,
-                                    modifier = Modifier.size(15.dp)
+                                if (item.isManualBookmark) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Bookmark,
+                                        contentDescription = null,
+                                        tint = SepiaAccent,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                } else {
+                                    Text(
+                                        text = "${idx + 1}.",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (isCurrent) SepiaAccent else SepiaInkMuted,
+                                        modifier = Modifier.width(26.dp)
+                                    )
+                                }
+
+                                Text(
+                                    text = item.title,
+                                    fontSize = if (item.isManualBookmark) 12.sp else 13.sp,
+                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isCurrent) SepiaAccent else SepiaInk,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
                                 )
+
+                                if (isTocEditMode) {
+                                    if (!item.isManualBookmark && item.chapterIndex in 0 until (totalChapters - 1)) {
+                                        IconButton(
+                                            onClick = { onMergeChapterWithNext(item.chapterIndex) },
+                                            modifier = Modifier
+                                                .size(32.dp)
+                                                .testTag("toc_merge_${item.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.CallMerge,
+                                                contentDescription = "Gộp vào chương dưới",
+                                                tint = SepiaInk,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                    IconButton(
+                                        onClick = { renamingItem = item },
+                                        modifier = Modifier
+                                            .size(32.dp)
+                                            .testTag("toc_rename_${item.id}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Edit,
+                                            contentDescription = "Sửa tên mục lục",
+                                            tint = SepiaAccent,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { onDeleteItem(item.id) },
+                                        modifier = Modifier
+                                            .size(32.dp)
+                                            .testTag("toc_delete_${item.id}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.DeleteOutline,
+                                            contentDescription = "Xóa mục lục",
+                                            tint = Color(0xFFB3261E),
+                                            modifier = Modifier.size(17.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Small inline rename dialog for the chosen TOC item
+    val activeRename = renamingItem
+    if (activeRename != null) {
+        RenameTocItemDialog(
+            initialTitle = activeRename.title,
+            onConfirm = { newTitle ->
+                onRenameItem(activeRename.id, newTitle)
+                renamingItem = null
+            },
+            onDismiss = { renamingItem = null }
+        )
+    }
+}
+
+@Composable
+private fun RenameTocItemDialog(
+    initialTitle: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var titleText by remember(initialTitle) { mutableStateOf(initialTitle) }
+
+    IosFloatingDialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(SepiaBg)
+                .padding(18.dp)
+        ) {
+            Text(
+                text = "Đổi tên mục lục",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = SepiaInk,
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(SepiaCard)
+                    .border(1.dp, SepiaBorder, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            ) {
+                BasicTextField(
+                    value = titleText,
+                    onValueChange = { titleText = it },
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = SepiaInk
+                    ),
+                    cursorBrush = SolidColor(SepiaAccent),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("toc_rename_input")
+                )
+            }
+            Spacer(modifier = Modifier.height(14.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onDismiss) {
+                    Text(
+                        text = "Hủy",
+                        fontSize = 13.sp,
+                        color = SepiaInkMuted,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (titleText.isNotBlank()) SepiaAccent else SepiaBorder,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable(enabled = titleText.isNotBlank()) {
+                            onConfirm(titleText.trim())
+                        }
+                        .testTag("toc_rename_confirm")
+                ) {
+                    Text(
+                        text = "OK",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Floating iOS-style Undo Confirmation Dialog with persisted "Không hỏi lại" Checkbox.
+ */
+@Composable
+fun UndoConfirmDialog(
+    visible: Boolean,
+    onConfirmUndo: (dontAskAgain: Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    if (!visible) return
+
+    var dontAskAgain by remember { mutableStateOf(false) }
+
+    IosFloatingDialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(SepiaBg)
+                .padding(18.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.Undo,
+                    contentDescription = null,
+                    tint = SepiaAccent,
+                    modifier = Modifier.size(20.dp)
+                )
+                Text(
+                    text = "Hoàn tác",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = SepiaInk,
+                    maxLines = 1
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Bạn có chắc muốn hoàn tác thay đổi gần nhất?",
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                color = SepiaInk
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { dontAskAgain = !dontAskAgain }
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = dontAskAgain,
+                    onCheckedChange = { dontAskAgain = it },
+                    colors = CheckboxDefaults.colors(
+                        checkedColor = SepiaAccent,
+                        uncheckedColor = SepiaInkMuted,
+                        checkmarkColor = Color.White
+                    ),
+                    modifier = Modifier.testTag("undo_skip_confirm_checkbox")
+                )
+                Text(
+                    text = "Không hỏi lại",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = SepiaInk
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.testTag("undo_cancel_button")
+                ) {
+                    Text(
+                        text = "Hủy",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = SepiaInkMuted
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = SepiaAccent,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable { onConfirmUndo(dontAskAgain) }
+                        .testTag("undo_confirm_button")
+                ) {
+                    Text(
+                        text = "Hoàn tác",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
                 }
             }
         }

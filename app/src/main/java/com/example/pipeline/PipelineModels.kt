@@ -60,6 +60,8 @@ data class RealtimeStats(
     val junkLinksRemoved: Int = 0,
     val whitespaceFixes: Int = 0,
     val spellingFixes: Int = 0,
+    val mergedParagraphs: Int = 0,
+    val imagesOptimized: Int = 0,
     val totalChapters: Int = 0,
     val processedChapters: Int = 0
 )
@@ -131,6 +133,22 @@ data class ManualSearchMatch(
     val paragraphIndex: Int,
     val startOffset: Int,
     val endOffset: Int
+)
+
+enum class ManualReadingMode {
+    VERTICAL_SCROLL,
+    HORIZONTAL_PAGER
+}
+
+data class EditableTocItem(
+    val id: String,
+    val title: String,
+    val href: String,
+    val chapterIndex: Int,
+    val chapterFileName: String,
+    val paragraphIndex: Int = 0,
+    val anchorId: String? = null,
+    val isManualBookmark: Boolean = false
 )
 
 sealed interface SaveResult {

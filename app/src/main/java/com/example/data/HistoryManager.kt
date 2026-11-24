@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -11,7 +12,9 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * Lightweight record of a cleaned ebook stored offline in SharedPreferences (JSON).
+ * Lightweight record of a cleaned ebook stored offline in SharedPreferences (JSON),
+ * optionally linked to a local diff snapshot file (`filesDir/history_diffs/<id>.json`)
+ * so the user can tap `⋮ -> Ghi nhớ lỗi (Lưu vào thư viện)` anytime later.
  */
 data class CleanedFileHistory(
     val id: String = UUID.randomUUID().toString(),
@@ -23,19 +26,23 @@ data class CleanedFileHistory(
     val junkLinksFixed: Int = 0,
     val whitespaceFixed: Int = 0,
     val spellingFixed: Int = 0,
-    val timestampMillis: Long = System.currentTimeMillis()
+    val timestampMillis: Long = System.currentTimeMillis(),
+    val diffSnapshotFile: String? = null
 )
 
 /**
- * 100% Offline History Manager backed by SharedPreferences (lightweight JSON, max 20 recent files).
- * Automatically prepends newly saved files to the top and deduplicates by file path.
+ * 100% Offline History Manager backed by SharedPreferences (lightweight JSON, max 20 recent files)
+ * plus per-book `(original, edited)` diff snapshots stored in `filesDir/history_diffs/`.
  */
 class HistoryManager(context: Context) {
 
-    private val prefs: SharedPreferences = context.applicationContext.getSharedPreferences(
+    private val appContext = context.applicationContext
+    private val prefs: SharedPreferences = appContext.getSharedPreferences(
         PREFS_NAME,
         Context.MODE_PRIVATE
     )
+    private val diffsDir: File
+        get() = File(appContext.filesDir, "history_diffs")
 
     fun getHistory(): List<CleanedFileHistory> {
         val rawJson = prefs.getString(KEY_HISTORY_JSON, null)
@@ -60,7 +67,8 @@ class HistoryManager(context: Context) {
                         junkLinksFixed = obj.optInt("junkLinksFixed", 0),
                         whitespaceFixed = obj.optInt("whitespaceFixed", 0),
                         spellingFixed = obj.optInt("spellingFixed", 0),
-                        timestampMillis = obj.optLong("timestampMillis", System.currentTimeMillis())
+                        timestampMillis = obj.optLong("timestampMillis", System.currentTimeMillis()),
+                        diffSnapshotFile = obj.optString("diffSnapshotFile").takeIf { it.isNotBlank() }
                     )
                 )
             }
@@ -68,28 +76,109 @@ class HistoryManager(context: Context) {
         }.getOrDefault(emptyList())
     }
 
-    fun addEntry(entry: CleanedFileHistory): List<CleanedFileHistory> {
-        val current = getHistory().toMutableList()
-        // Deduplicate by exact saved path or same file name + path so re-cleaned books move to top
-        current.removeAll { existing ->
-            existing.id == entry.id ||
-                (entry.filePath.isNotBlank() && existing.filePath == entry.filePath)
+    /**
+     * Adds a history entry and persists its associated `(before, after)` diff pairs offline
+     * so `ErrorMemoryManager` can analyze & learn from this book later.
+     */
+    fun addEntry(
+        entry: CleanedFileHistory,
+        diffPairs: List<ParagraphDiffPair> = emptyList()
+    ): List<CleanedFileHistory> {
+        val snapshotName = if (diffPairs.isNotEmpty()) {
+            saveDiffPairsFile(entry.id, diffPairs)
+        } else {
+            entry.diffSnapshotFile
         }
-        current.add(0, entry)
+        val finalEntry = entry.copy(diffSnapshotFile = snapshotName)
+
+        val current = getHistory().toMutableList()
+        val removed = current.filter { existing ->
+            existing.id == finalEntry.id ||
+                (finalEntry.filePath.isNotBlank() && existing.filePath == finalEntry.filePath)
+        }
+        for (old in removed) {
+            if (old.diffSnapshotFile != null && old.diffSnapshotFile != snapshotName) {
+                deleteDiffFile(old.diffSnapshotFile)
+            }
+        }
+        current.removeAll { existing ->
+            existing.id == finalEntry.id ||
+                (finalEntry.filePath.isNotBlank() && existing.filePath == finalEntry.filePath)
+        }
+        current.add(0, finalEntry)
         val trimmed = current.take(MAX_ITEMS)
+        val pruned = current.drop(MAX_ITEMS)
+        for (old in pruned) {
+            old.diffSnapshotFile?.let { deleteDiffFile(it) }
+        }
         saveList(trimmed)
         return trimmed
     }
 
+    fun loadDiffPairsForEntry(entry: CleanedFileHistory): List<ParagraphDiffPair> {
+        val fileName = entry.diffSnapshotFile ?: return emptyList()
+        val file = File(diffsDir, fileName)
+        if (!file.exists()) return emptyList()
+        return runCatching {
+            val arr = JSONArray(file.readText(Charsets.UTF_8))
+            val result = ArrayList<ParagraphDiffPair>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val before = obj.optString("b")
+                val after = obj.optString("a")
+                if (before.isNotBlank() && before != after) {
+                    result.add(ParagraphDiffPair(beforeText = before, afterText = after))
+                }
+            }
+            result
+        }.getOrDefault(emptyList())
+    }
+
     fun removeEntry(id: String): List<CleanedFileHistory> {
-        val updated = getHistory().filterNot { it.id == id }
+        val current = getHistory()
+        current.filter { it.id == id }.forEach { old ->
+            old.diffSnapshotFile?.let { deleteDiffFile(it) }
+        }
+        val updated = current.filterNot { it.id == id }
         saveList(updated)
         return updated
     }
 
     fun clearAll(): List<CleanedFileHistory> {
         prefs.edit().remove(KEY_HISTORY_JSON).apply()
+        runCatching {
+            if (diffsDir.exists()) diffsDir.deleteRecursively()
+        }
         return emptyList()
+    }
+
+    private fun saveDiffPairsFile(historyId: String, pairs: List<ParagraphDiffPair>): String? {
+        return runCatching {
+            if (!diffsDir.exists()) diffsDir.mkdirs()
+            val safeName = "diff_${historyId.replace(Regex("[^a-zA-Z0-9_-]"), "")}.json"
+            val arr = JSONArray()
+            // Cap at 1500 changed pairs per book for crisp disk/memory efficiency
+            for (pair in pairs.take(MAX_DIFF_PAIRS_PER_BOOK)) {
+                if (pair.beforeText.isNotBlank() && pair.beforeText != pair.afterText) {
+                    arr.put(
+                        JSONObject().apply {
+                            put("b", pair.beforeText)
+                            put("a", pair.afterText)
+                        }
+                    )
+                }
+            }
+            if (arr.length() == 0) return null
+            File(diffsDir, safeName).writeText(arr.toString(), Charsets.UTF_8)
+            safeName
+        }.getOrNull()
+    }
+
+    private fun deleteDiffFile(fileName: String) {
+        runCatching {
+            val f = File(diffsDir, fileName)
+            if (f.exists()) f.delete()
+        }
     }
 
     private fun saveList(items: List<CleanedFileHistory>) {
@@ -106,6 +195,7 @@ class HistoryManager(context: Context) {
                 put("whitespaceFixed", item.whitespaceFixed)
                 put("spellingFixed", item.spellingFixed)
                 put("timestampMillis", item.timestampMillis)
+                put("diffSnapshotFile", item.diffSnapshotFile.orEmpty())
             }
             array.put(obj)
         }
@@ -116,6 +206,7 @@ class HistoryManager(context: Context) {
         private const val PREFS_NAME = "epubclean_history_prefs"
         private const val KEY_HISTORY_JSON = "cleaned_files_history_v1"
         const val MAX_ITEMS = 20
+        private const val MAX_DIFF_PAIRS_PER_BOOK = 1500
 
         /**
          * Formats timestamp concisely in Vietnamese:

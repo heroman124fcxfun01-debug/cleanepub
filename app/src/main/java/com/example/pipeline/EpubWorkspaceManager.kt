@@ -265,7 +265,8 @@ object EpubWorkspaceManager {
     fun packStandardEpub(
         workspace: PreparedWorkspace,
         regenerateToc: Boolean = workspace.tocInspection?.shouldRegenerateByDefault ?: true,
-        manualTocEntries: List<ManualTocEntry> = emptyList()
+        manualTocEntries: List<ManualTocEntry> = emptyList(),
+        customTocEntries: List<TocEntry>? = null
     ): File {
         val stageDir = File(workspace.stageDirPath)
         val metaInfDir = File(stageDir, "META-INF").apply { mkdirs() }
@@ -297,11 +298,12 @@ object EpubWorkspaceManager {
             Charsets.UTF_8
         )
 
-        // OEBPS/nav.xhtml & OEBPS/toc.ncx via TocGenerator (preserve original TOC or regenerate smartly + manual bookmarks)
+        // OEBPS/nav.xhtml & OEBPS/toc.ncx via TocGenerator (edited TOC, original TOC, or regenerated + manual bookmarks)
         val tocEntries = TocGenerator.resolveEntriesForPackaging(
             workspace = workspace,
             regenerateToc = regenerateToc,
-            manualEntries = manualTocEntries
+            manualEntries = manualTocEntries,
+            customTocEntries = customTocEntries
         )
         File(oebpsDir, "nav.xhtml").writeText(
             TocGenerator.buildNavXhtml(tocEntries, bookLang),

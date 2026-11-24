@@ -34,16 +34,22 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.FormatColorText
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.LinkOff
+import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SpaceBar
 import androidx.compose.material.icons.rounded.Spellcheck
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -72,6 +78,7 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.data.CleanedFileHistory
 import com.example.data.HistoryManager
+import com.example.data.SavedDraftSummary
 import com.example.pipeline.CleaningOptions
 import com.example.ui.components.IosFloatingDialog
 import com.example.ui.components.IosPrimaryButton
@@ -91,16 +98,21 @@ import com.example.ui.theme.LocalIsDarkTheme
 @Composable
 fun MainScreen(
     recentFiles: List<CleanedFileHistory>,
+    activeDraft: SavedDraftSummary?,
+    isResumingDraft: Boolean,
     hasAllFilesAccess: Boolean,
     cleaningOptions: CleaningOptions,
     isLoadingMetadata: Boolean,
     errorBanner: String?,
     onSelectFileClick: () -> Unit,
+    onResumeDraftClick: () -> Unit,
+    onDiscardDraftClick: () -> Unit,
     onRequestStoragePermission: () -> Unit,
     onOpenSettingsClick: () -> Unit,
     onUpdateCleaningOptions: (CleaningOptions) -> Unit,
     onOpenHistoryFile: (CleanedFileHistory) -> Unit,
     onReprocessHistoryFile: (CleanedFileHistory) -> Unit,
+    onLearnErrorsFromHistory: (CleanedFileHistory) -> Unit,
     onDeleteHistoryFile: (String) -> Unit,
     onClearAllHistory: () -> Unit,
     onDismissError: () -> Unit
@@ -318,6 +330,17 @@ fun MainScreen(
                 }
             )
 
+            // 2B (Upgrade 1.2): "Tiếp tục sửa dở" Pill Card when an un-exported manual draft exists
+            if (activeDraft != null) {
+                Spacer(modifier = Modifier.height(10.dp))
+                ResumeDraftPillCard(
+                    draft = activeDraft,
+                    isResuming = isResumingDraft,
+                    onResumeClick = onResumeDraftClick,
+                    onDiscardClick = onDiscardDraftClick
+                )
+            }
+
             Spacer(modifier = Modifier.height(12.dp))
 
             // 3. Compact 2-Column 3D Pill Feature Grid (3 rows, 8.dp spacing, 42.dp pill height)
@@ -507,7 +530,11 @@ fun MainScreen(
                         ) { item ->
                             HistoryFileCard(
                                 item = item,
-                                onClick = { selectedHistoryItem = item }
+                                onClick = { selectedHistoryItem = item },
+                                onLearnErrorsClick = { onLearnErrorsFromHistory(item) },
+                                onOpenClick = { onOpenHistoryFile(item) },
+                                onReprocessClick = { onReprocessHistoryFile(item) },
+                                onDeleteClick = { onDeleteHistoryFile(item.id) }
                             )
                         }
                     }
@@ -525,6 +552,10 @@ fun MainScreen(
                 selectedHistoryItem = null
                 onOpenHistoryFile(activeItem)
             },
+            onLearnErrorsClick = {
+                selectedHistoryItem = null
+                onLearnErrorsFromHistory(activeItem)
+            },
             onReprocessClick = {
                 selectedHistoryItem = null
                 onReprocessHistoryFile(activeItem)
@@ -535,6 +566,127 @@ fun MainScreen(
             },
             onDismiss = { selectedHistoryItem = null }
         )
+    }
+}
+
+/**
+ * Compact prominent 3D Pill Card on MainScreen (Upgrade 1.2):
+ * "Tiếp tục sửa dở: [Tên sách]" with chapter position, relative time, and X discard button.
+ */
+@Composable
+private fun ResumeDraftPillCard(
+    draft: SavedDraftSummary,
+    isResuming: Boolean,
+    onResumeClick: () -> Unit,
+    onDiscardClick: () -> Unit
+) {
+    val isDark = LocalIsDarkTheme.current
+    val pillShape = RoundedCornerShape(50)
+    val timeLabel = remember(draft.savedAtMillis) {
+        HistoryManager.formatRelativeTime(draft.savedAtMillis)
+    }
+
+    val bgBrush = Brush.verticalGradient(
+        colors = if (isDark) {
+            listOf(Color(0xFF3A3123), Color(0xFF2B241A))
+        } else {
+            listOf(Color(0xFFFFF8EC), Color(0xFFF6E8CF))
+        }
+    )
+    val borderBrush = Brush.verticalGradient(
+        colors = if (isDark) {
+            listOf(IosOrange.copy(alpha = 0.48f), IosOrange.copy(alpha = 0.16f))
+        } else {
+            listOf(Color.White.copy(alpha = 0.96f), IosOrange.copy(alpha = 0.36f))
+        }
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .shadow(
+                elevation = 5.dp,
+                shape = pillShape,
+                ambientColor = Color.Black.copy(alpha = 0.08f),
+                spotColor = Color.Black.copy(alpha = 0.14f)
+            )
+            .clip(pillShape)
+            .background(brush = bgBrush)
+            .border(width = 1.dp, brush = borderBrush, shape = pillShape)
+            .clickable(enabled = !isResuming, onClick = onResumeClick)
+            .testTag("resume_draft_pill_card")
+            .padding(start = 10.dp, end = 8.dp, top = 7.dp, bottom = 7.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(IosOrange.copy(alpha = if (isDark) 0.24f else 0.16f)),
+                contentAlignment = Alignment.Center
+            ) {
+                if (isResuming) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 1.8.dp,
+                        color = IosOrange
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Rounded.EditNote,
+                        contentDescription = null,
+                        tint = IosOrange,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Tiếp tục sửa dở: ${draft.bookTitle}",
+                    fontSize = 12.sp,
+                    lineHeight = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "Chương ${draft.chapterIndex + 1}/${draft.totalChapters} • Lưu lúc $timeLabel",
+                    fontSize = 10.sp,
+                    lineHeight = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(modifier = Modifier.width(6.dp))
+
+            Box(
+                modifier = Modifier
+                    .size(26.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                    .clickable(enabled = !isResuming, onClick = onDiscardClick)
+                    .testTag("discard_draft_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Close,
+                    contentDescription = "Xóa bản nháp",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+        }
     }
 }
 
@@ -677,8 +829,13 @@ private fun CompactFeature3DPill(
 @Composable
 private fun HistoryFileCard(
     item: CleanedFileHistory,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLearnErrorsClick: () -> Unit,
+    onOpenClick: () -> Unit,
+    onReprocessClick: () -> Unit,
+    onDeleteClick: () -> Unit
 ) {
+    var menuExpanded by remember { mutableStateOf(false) }
     val isDark = LocalIsDarkTheme.current
     val isPdf = item.sourceType.equals("PDF", ignoreCase = true)
     val badgeBg = when {
@@ -769,26 +926,130 @@ private fun HistoryFileCard(
                 )
             }
 
-            Spacer(modifier = Modifier.width(6.dp))
+            Spacer(modifier = Modifier.width(2.dp))
 
-            Icon(
-                imageVector = Icons.Rounded.ChevronRight,
-                contentDescription = "Chi tiết tệp",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                modifier = Modifier.size(18.dp)
-            )
+            // 3-dot overflow menu with "Ghi nhớ lỗi (Lưu vào thư viện)"
+            Box {
+                IconButton(
+                    onClick = { menuExpanded = true },
+                    modifier = Modifier
+                        .size(34.dp)
+                        .testTag("history_item_menu_${item.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.MoreVert,
+                        contentDescription = "Tùy chọn tệp",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
+
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false },
+                    modifier = Modifier.background(MaterialTheme.colorScheme.surface)
+                ) {
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = "Ghi nhớ lỗi (Lưu vào thư viện)",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.Psychology,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            onLearnErrorsClick()
+                        },
+                        modifier = Modifier.testTag("history_learn_errors_${item.id}")
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = "Mở đọc sách",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.MenuBook,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            onOpenClick()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = "Xử lý lại file này",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            onReprocessClick()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = "Xóa khỏi danh sách",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Outlined.DeleteOutline,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            onDeleteClick()
+                        }
+                    )
+                }
+            }
         }
     }
 }
 
 /**
  * Floating iOS quick-action dialog opened when tapping a recently cleaned file:
- * shows saved storage path, fix breakdown, and lets user open, re-process, or delete from history.
+ * shows saved storage path, fix breakdown, and lets user open, learn errors, re-process, or delete.
  */
 @Composable
 private fun HistoryQuickActionDialog(
     item: CleanedFileHistory,
     onOpenClick: () -> Unit,
+    onLearnErrorsClick: () -> Unit,
     onReprocessClick: () -> Unit,
     onDeleteClick: () -> Unit,
     onDismiss: () -> Unit
@@ -897,6 +1158,34 @@ private fun HistoryQuickActionDialog(
                     )
                 }
             )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            OutlinedButton(
+                onClick = onLearnErrorsClick,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp)
+                    .testTag("history_dialog_learn_errors_button"),
+                shape = RoundedCornerShape(50),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Psychology,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Ghi nhớ lỗi (Lưu vào thư viện)",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
 
             Spacer(modifier = Modifier.height(8.dp))
 

@@ -228,6 +228,43 @@ fun ReviewScreen(
                             SummaryStatItem("Chính tả", acceptedCount, MaterialTheme.colorScheme.secondary)
                         }
 
+                        if (snapshot.stats.mergedParagraphs > 0 || snapshot.stats.imagesOptimized > 0) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                if (snapshot.stats.mergedParagraphs > 0) {
+                                    Surface(
+                                        shape = RoundedCornerShape(50),
+                                        color = MaterialTheme.colorScheme.primaryContainer
+                                    ) {
+                                        Text(
+                                            text = "Đã nối ${snapshot.stats.mergedParagraphs} đoạn ngắt dòng lỗi",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                                        )
+                                    }
+                                }
+                                if (snapshot.stats.imagesOptimized > 0) {
+                                    Surface(
+                                        shape = RoundedCornerShape(50),
+                                        color = MaterialTheme.colorScheme.secondaryContainer
+                                    ) {
+                                        Text(
+                                            text = "Tối ưu ${snapshot.stats.imagesOptimized} ảnh EPUB",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
                         val ctx = snapshot.bookContext
                         if (ctx != null && ctx.properNouns.isNotEmpty()) {
                             Spacer(modifier = Modifier.height(10.dp))

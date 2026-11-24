@@ -30,9 +30,11 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.example.data.ErrorMemoryManager
 import com.example.pipeline.FilePathResolver
 import com.example.pipeline.ProcessingPhase
 import com.example.ui.MainViewModel
+import com.example.ui.components.CustomReplaceDialog
 import com.example.ui.components.EpubMetadataEditorDialog
 import com.example.ui.components.SettingsDialog
 import com.example.ui.screens.MainScreen
@@ -113,6 +115,13 @@ private fun EpubCleanNavHost(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     val recentFiles by viewModel.recentFiles.collectAsStateWithLifecycle()
+    val activeDraft by viewModel.activeDraftSummary.collectAsStateWithLifecycle()
+    val isResumingDraft by viewModel.isResumingDraft.collectAsStateWithLifecycle()
+    val autoSaveDraft by viewModel.autoSaveDraft.collectAsStateWithLifecycle()
+    val customReplaceRules by viewModel.customReplaceRules.collectAsStateWithLifecycle()
+    val errorMemoryAutoApply by viewModel.errorMemoryAutoApply.collectAsStateWithLifecycle()
+    val errorMemoryRuleCount by viewModel.errorMemoryRuleCount.collectAsStateWithLifecycle()
+    val statusToastMessage by viewModel.statusToastMessage.collectAsStateWithLifecycle()
     val hasAllFilesAccess by viewModel.hasAllFilesAccess.collectAsStateWithLifecycle()
     val snapshot by viewModel.processingSnapshot.collectAsStateWithLifecycle()
     val saveUiState by viewModel.saveUiState.collectAsStateWithLifecycle()
@@ -124,12 +133,21 @@ private fun EpubCleanNavHost(
     val customSaveFolderLabel by viewModel.customSaveFolderLabel.collectAsStateWithLifecycle()
     val manualEditorState by viewModel.manualEditorState.collectAsStateWithLifecycle()
 
+    LaunchedEffect(statusToastMessage) {
+        val msg = statusToastMessage
+        if (!msg.isNullOrBlank()) {
+            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+            viewModel.clearStatusToast()
+        }
+    }
+
     val currentBackStackEntry by navController.currentBackStackEntryAsState()
     LaunchedEffect(currentBackStackEntry?.destination?.route) {
         onForceLightBarsChanged(currentBackStackEntry?.destination?.route == ROUTE_MANUAL_EDITOR)
     }
 
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showSettingsCustomReplaceDialog by remember { mutableStateOf(false) }
     var showReviewMetadataDialog by remember { mutableStateOf(false) }
     var coverPickerForReview by remember { mutableStateOf(false) }
 
@@ -171,6 +189,26 @@ private fun EpubCleanNavHost(
         onResult = { treeUri ->
             if (treeUri != null) {
                 viewModel.onSaveFolderPicked(treeUri)
+            }
+        }
+    )
+
+    // Upgrade 1.3: SAF Export Error Memory Library (`EpubCleanAI_ErrorLib.json`)
+    val exportErrorLibLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json"),
+        onResult = { uri ->
+            if (uri != null) {
+                viewModel.exportErrorMemoryLibrary(uri)
+            }
+        }
+    )
+
+    // Upgrade 1.3: SAF Import & Merge Error Memory Library (`.json`)
+    val importErrorLibLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri ->
+            if (uri != null) {
+                viewModel.importErrorMemoryLibrary(uri)
             }
         }
     )
@@ -239,6 +277,8 @@ private fun EpubCleanNavHost(
         composable(ROUTE_HOME) {
             MainScreen(
                 recentFiles = recentFiles,
+                activeDraft = activeDraft,
+                isResumingDraft = isResumingDraft,
                 hasAllFilesAccess = hasAllFilesAccess,
                 cleaningOptions = cleaningOptions,
                 isLoadingMetadata = isLoadingMetadata,
@@ -253,6 +293,14 @@ private fun EpubCleanNavHost(
                         )
                     )
                 },
+                onResumeDraftClick = {
+                    viewModel.resumeSavedDraft {
+                        navController.navigate(ROUTE_MANUAL_EDITOR) {
+                            launchSingleTop = true
+                        }
+                    }
+                },
+                onDiscardDraftClick = { viewModel.discardSavedDraft() },
                 onRequestStoragePermission = ::requestStorageAccess,
                 onOpenSettingsClick = { showSettingsDialog = true },
                 onUpdateCleaningOptions = { viewModel.updateCleaningOptions(it) },
@@ -261,6 +309,9 @@ private fun EpubCleanNavHost(
                 },
                 onReprocessHistoryFile = { entry ->
                     viewModel.reprocessHistoryItem(entry)
+                },
+                onLearnErrorsFromHistory = { entry ->
+                    viewModel.learnErrorsFromHistory(entry)
                 },
                 onDeleteHistoryFile = { id -> viewModel.deleteHistoryItem(id) },
                 onClearAllHistory = { viewModel.clearAllHistory() },
@@ -316,25 +367,40 @@ private fun EpubCleanNavHost(
                 snapshot = snapshot,
                 saveUiState = saveUiState,
                 customSaveFolderLabel = customSaveFolderLabel,
+                autoSaveDraft = autoSaveDraft,
+                customReplaceRules = customReplaceRules,
                 onSelectChapter = { chapIdx, paraIdx ->
                     viewModel.selectManualChapter(chapIdx, paraIdx)
+                },
+                onActiveParagraphChanged = { paraIdx ->
+                    viewModel.setActiveParagraphIndex(paraIdx)
                 },
                 onToggleEditMode = { viewModel.toggleManualEditMode() },
                 onToggleCompareMode = { viewModel.toggleManualCompareMode() },
                 onAdjustFontSize = { delta -> viewModel.adjustManualFontSize(delta) },
+                onSelectReadingMode = { mode -> viewModel.setManualReadingMode(mode) },
                 onUpdateParagraph = { chapIdx, paraIdx, text ->
                     viewModel.updateManualParagraph(chapIdx, paraIdx, text)
                 },
                 onUndoEdit = { viewModel.undoManualEdit() },
+                onSetSkipUndoConfirm = { skip -> viewModel.setSkipUndoConfirm(skip) },
                 onAddManualToc = { chapIdx, paraIdx, title ->
                     viewModel.addManualTocBookmark(chapIdx, paraIdx, title)
                 },
-                onRemoveManualToc = { id -> viewModel.removeManualTocBookmark(id) },
+                onRenameTocItem = { id, newTitle -> viewModel.renameTocItem(id, newTitle) },
+                onDeleteTocItem = { id -> viewModel.deleteTocItem(id) },
+                onSplitChapterAtActiveParagraph = { viewModel.splitCurrentChapterAtActiveParagraph() },
+                onMergeChapterWithNext = { sourceIdx -> viewModel.mergeChapterWithNext(sourceIdx) },
                 onSearchQueryChange = { q -> viewModel.updateManualSearchQuery(q) },
                 onReplaceQueryChange = { r -> viewModel.updateManualReplaceQuery(r) },
                 onNavigateSearchMatch = { step -> viewModel.navigateSearchMatch(step) },
                 onReplaceCurrentMatch = { viewModel.replaceCurrentSearchMatch() },
                 onReplaceAllMatches = { viewModel.replaceAllSearchMatches() },
+                onSaveDraftClick = { viewModel.saveCurrentManualDraft(showFeedback = true) },
+                onAutoSaveDraft = { viewModel.saveCurrentManualDraft(showFeedback = false) },
+                onAddCustomReplaceRule = { find, repl -> viewModel.addCustomReplaceRule(find, repl) },
+                onDeleteCustomReplaceRule = { id -> viewModel.deleteCustomReplaceRule(id) },
+                onApplyAllCustomReplaceRules = { viewModel.applyAllCustomReplaceRulesToBook() },
                 onClearFeedback = { viewModel.clearManualFeedbackMessage() },
                 onPickSaveFolderClick = { saveFolderPickerLauncher.launch(null) },
                 onSaveWithMode = { mode -> viewModel.saveFromManualEditor(mode) },
@@ -349,12 +415,38 @@ private fun EpubCleanNavHost(
         }
     }
 
-    // Floating iOS Settings Dialog (Light/Dark Mode + App Info)
+    // Floating iOS Settings Dialog (Light/Dark Mode + Auto-Save Draft + Custom Replace + Error Memory + v1.3 Info)
     SettingsDialog(
         visible = showSettingsDialog,
         isDarkMode = isDarkMode,
+        autoSaveDraft = autoSaveDraft,
+        customReplaceCount = customReplaceRules.size,
+        errorMemoryAutoApply = errorMemoryAutoApply,
+        errorMemoryRuleCount = errorMemoryRuleCount,
         onToggleDarkMode = { enabled -> viewModel.setDarkMode(enabled) },
+        onToggleAutoSaveDraft = { enabled -> viewModel.setAutoSaveDraft(enabled) },
+        onOpenCustomReplaceClick = {
+            showSettingsDialog = false
+            showSettingsCustomReplaceDialog = true
+        },
+        onToggleErrorMemoryAutoApply = { enabled -> viewModel.setErrorMemoryAutoApply(enabled) },
+        onExportErrorMemoryClick = {
+            exportErrorLibLauncher.launch(ErrorMemoryManager.DEFAULT_EXPORT_FILENAME)
+        },
+        onImportErrorMemoryClick = {
+            importErrorLibLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+        },
         onDismiss = { showSettingsDialog = false }
+    )
+
+    // Personal Quick-Replace Dictionary Dialog opened from Settings
+    CustomReplaceDialog(
+        visible = showSettingsCustomReplaceDialog,
+        rules = customReplaceRules,
+        canApplyToBook = false,
+        onAddRule = { find, repl -> viewModel.addCustomReplaceRule(find, repl) },
+        onDeleteRule = { id -> viewModel.deleteCustomReplaceRule(id) },
+        onDismiss = { showSettingsCustomReplaceDialog = false }
     )
 
     // Floating iOS Metadata & Cover Editor Dialog immediately on file import

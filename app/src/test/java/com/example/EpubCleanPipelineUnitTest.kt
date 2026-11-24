@@ -626,4 +626,367 @@ class EpubCleanPipelineUnitTest {
             tempRoot.deleteRecursively()
         }
     }
+
+    @Test
+    fun textDiffHelper_highlightsExactChangedWordsFast() {
+        val original = "Củ  a  tâm lí học có nhi ều điểm đặc biệt."
+        val current = "Của tâm lí học có nhiều điểm đặc biệt."
+
+        val diff = com.example.pipeline.TextDiffHelper.computeWordDiffRanges(original, current)
+        assertTrue(diff.hasDifferences)
+
+        val origMarked = diff.originalChangedSpans.map { original.substring(it.start, it.end) }
+        val currMarked = diff.currentChangedSpans.map { current.substring(it.start, it.end) }
+
+        assertEquals(listOf("Củ  a", "nhi ều"), origMarked)
+        assertEquals(listOf("Của", "nhiều"), currMarked)
+
+        // Identical text produces zero diff spans
+        val identical = com.example.pipeline.TextDiffHelper.computeWordDiffRanges(current, current)
+        assertFalse(identical.hasDifferences)
+        assertTrue(identical.originalChangedSpans.isEmpty())
+        assertTrue(identical.currentChangedSpans.isEmpty())
+    }
+
+    @Test
+    fun tocGenerator_renamesAndDeletesEntriesSyncedToEpub() {
+        val tempRoot = java.nio.file.Files.createTempDirectory("epubclean_toc_edit_test_").toFile()
+        try {
+            val textDir = File(tempRoot, "stage/OEBPS/Text").apply { mkdirs() }
+            val c1 = File(textDir, "chapter_0001.xhtml").apply {
+                writeText(EpubWorkspaceManager.buildValidXhtmlDocument("Chương 1", "<h1>Chương 1</h1><p>A</p>"))
+            }
+            val c2 = File(textDir, "chapter_0002.xhtml").apply {
+                writeText(EpubWorkspaceManager.buildValidXhtmlDocument("Chương 2", "<h1>Chương 2</h1><p>B</p>"))
+            }
+            val c3 = File(textDir, "chapter_0003.xhtml").apply {
+                writeText(EpubWorkspaceManager.buildValidXhtmlDocument("Chương 3", "<h1>Chương 3</h1><p>C</p>"))
+            }
+
+            val workspace = EpubWorkspaceManager.preparePdfWorkspace(
+                bookTitle = "Test TOC Edit",
+                sessionDir = tempRoot,
+                chapters = listOf(
+                    ChapterDescriptor("chap_1", "chapter_0001.xhtml", "Chương 1", c1.absolutePath),
+                    ChapterDescriptor("chap_2", "chapter_0002.xhtml", "Chương 2", c2.absolutePath),
+                    ChapterDescriptor("chap_3", "chapter_0003.xhtml", "Chương 3", c3.absolutePath)
+                )
+            )
+
+            var editable = TocGenerator.buildEditableTocItems(workspace, regenerateToc = true)
+            assertEquals(3, editable.size)
+
+            // Rename chapter 1 and delete chapter 2
+            editable = TocGenerator.renameEntry(editable, editable[0].id, "Chương 1: Khởi Đầu Mới")
+            editable = TocGenerator.deleteEntry(editable, editable[1].id)
+
+            val finalEntries = TocGenerator.toTocEntries(editable)
+            assertEquals(listOf("Chương 1: Khởi Đầu Mới", "Chương 3"), finalEntries.map { it.title })
+
+            val epub = EpubWorkspaceManager.packStandardEpub(
+                workspace = workspace,
+                regenerateToc = true,
+                customTocEntries = finalEntries
+            )
+            ZipFile(epub).use { zip ->
+                val nav = zip.getInputStream(zip.getEntry("OEBPS/nav.xhtml")).bufferedReader().readText()
+                val ncx = zip.getInputStream(zip.getEntry("OEBPS/toc.ncx")).bufferedReader().readText()
+                assertTrue(nav.contains("Chương 1: Khởi Đầu Mới"))
+                assertFalse(nav.contains("Chương 2"))
+                assertTrue(nav.contains("Chương 3"))
+                assertTrue(ncx.contains("Chương 1: Khởi Đầu Mới"))
+                assertFalse(ncx.contains("Chương 2"))
+            }
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun paragraphMerger_mergesBrokenMidSentenceLinesAndProtectsHeadingsAndDialogue() {
+        val html = """
+            <html><body>
+                <h2>Chương 1</h2>
+                <p>hôm nay trời rất đẹp</p>
+                <p>Anh bước ra khỏi căn nhà nhỏ bên sườn đồi</p>
+                <p>và nhìn về phía chân trời xa xăm</p>
+                <p>, nơi những đám mây đang trôi lặng lẽ.</p>
+                <p>Cô ấy hỏi:</p>
+                <p>– Anh đang nghĩ gì vậy?</p>
+                <p>– Tôi đang nghĩ về quá khứ</p>
+                <p>của chúng ta năm xưa.</p>
+                <p>Đoạn văn đã kết thúc trọn vẹn.</p>
+                <p>Đoạn tiếp theo bắt đầu câu mới.</p>
+            </body></html>
+        """.trimIndent()
+
+        val doc = Jsoup.parse(html)
+        val result = com.example.pipeline.ParagraphMerger.mergeBrokenParagraphs(doc)
+
+        // Expected merges:
+        // 1. "Anh bước..." + "và nhìn..." + ", nơi..." (2 merges)
+        // 2. "– Tôi đang nghĩ về quá khứ" + "của chúng ta năm xưa." (1 merge)
+        // Total = 3 merges; h2 must NOT merge with "hôm nay..."; "Cô ấy hỏi:" must NOT merge with "– Anh..."
+        assertEquals(3, result.mergedCount)
+        assertEquals("Chương 1", doc.selectFirst("h2")?.text())
+        val paragraphs = doc.select("p").map { it.text() }
+        assertEquals(
+            listOf(
+                "hôm nay trời rất đẹp",
+                "Anh bước ra khỏi căn nhà nhỏ bên sườn đồi và nhìn về phía chân trời xa xăm, nơi những đám mây đang trôi lặng lẽ.",
+                "Cô ấy hỏi:",
+                "– Anh đang nghĩ gì vậy?",
+                "– Tôi đang nghĩ về quá khứ của chúng ta năm xưa.",
+                "Đoạn văn đã kết thúc trọn vẹn.",
+                "Đoạn tiếp theo bắt đầu câu mới."
+            ),
+            paragraphs
+        )
+    }
+
+    @Test
+    fun customReplaceManager_batchAppliesMultipleRulesAcrossChapters() {
+        val rules = listOf(
+            com.example.data.CustomReplaceRule(id = "r1", findText = "Iàm", replaceText = "làm"),
+            com.example.data.CustomReplaceRule(id = "r2", findText = "rn", replaceText = "m"),
+            com.example.data.CustomReplaceRule(id = "r3", findText = "Lý Tiêu", replaceText = "Lý Tiêu Dao")
+        )
+        val chapters = listOf(
+            com.example.pipeline.ManualChapterContent(
+                chapterIndex = 0,
+                fileName = "chapter_0001.xhtml",
+                title = "Chương 1",
+                filePath = "",
+                originalParagraphs = listOf("Lý Tiêu đang Iàm việc trong rnoột căn phòng."),
+                currentParagraphs = listOf("Lý Tiêu đang Iàm việc trong rnột căn phòng.")
+            ),
+            com.example.pipeline.ManualChapterContent(
+                chapterIndex = 1,
+                fileName = "chapter_0002.xhtml",
+                title = "Chương 2",
+                filePath = "",
+                originalParagraphs = listOf("Không nên Iàm thế nữa."),
+                currentParagraphs = listOf("Không nên Iàm thế nữa.")
+            )
+        )
+
+        val (updated, count) = com.example.data.CustomReplaceManager.applyRulesToChapters(chapters, rules)
+        assertEquals(4, count)
+        assertEquals(
+            "Lý Tiêu Dao đang làm việc trong một căn phòng.",
+            updated[0].currentParagraphs[0]
+        )
+        assertEquals(
+            "Không nên làm thế nữa.",
+            updated[1].currentParagraphs[0]
+        )
+    }
+
+    @Test
+    fun imageOptimizer_removesBrokenImageTagsAndComputesSafeDownsampling() {
+        // 1. Verify RAM-safe downsampling & aspect ratio scaling math
+        assertEquals(1, com.example.pipeline.ImageOptimizer.calculateInSampleSize(1200, 800, 1200))
+        assertEquals(2, com.example.pipeline.ImageOptimizer.calculateInSampleSize(2400, 1600, 1200))
+        assertEquals(4, com.example.pipeline.ImageOptimizer.calculateInSampleSize(4800, 3200, 1200))
+        assertEquals(1200 to 900, com.example.pipeline.ImageOptimizer.computeScaledDimensions(2400, 1800, 1200))
+        assertEquals(800 to 600, com.example.pipeline.ImageOptimizer.computeScaledDimensions(800, 600, 1200))
+
+        // 2. Verify broken <img> tags & 0-byte tracker files are stripped cleanly from XHTML
+        val tempRoot = java.nio.file.Files.createTempDirectory("epubclean_img_opt_").toFile()
+        try {
+            val textDir = File(tempRoot, "stage/OEBPS/Text").apply { mkdirs() }
+            val imagesDir = File(tempRoot, "stage/OEBPS/Images").apply { mkdirs() }
+
+            // Create 1 valid non-empty SVG and 1 corrupted 0-byte tracker image
+            File(imagesDir, "valid_art.svg").writeText("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>")
+            File(imagesDir, "empty_tracker.jpg").writeBytes(ByteArray(0))
+
+            val c1 = File(textDir, "chapter_0001.xhtml").apply {
+                writeText(
+                    EpubWorkspaceManager.buildValidXhtmlDocument(
+                        "Chương 1",
+                        """
+                        <h1>Chương 1</h1>
+                        <p>Ảnh hợp lệ: <img src="../Images/valid_art.svg" alt="ok" /></p>
+                        <p>Ảnh hỏng: <img src="../Images/missing_file.jpg" alt="broken" /></p>
+                        <p>Tracker rỗng: <img src="../Images/empty_tracker.jpg" alt="tracker" /></p>
+                        """.trimIndent()
+                    ),
+                    Charsets.UTF_8
+                )
+            }
+
+            val workspace = EpubWorkspaceManager.preparePdfWorkspace(
+                bookTitle = "Test Image Opt",
+                sessionDir = tempRoot,
+                chapters = listOf(
+                    ChapterDescriptor("chap_1", "chapter_0001.xhtml", "Chương 1", c1.absolutePath)
+                )
+            ).copy(imageRelativePaths = listOf("Images/valid_art.svg", "Images/empty_tracker.jpg"))
+
+            val opt = com.example.pipeline.ImageOptimizer.optimizeWorkspaceImages(workspace)
+            assertTrue("Expected broken/empty images stripped", opt.brokenOrTinyTagsRemoved >= 3)
+            assertEquals(listOf("Images/valid_art.svg"), opt.updatedImageRelativePaths)
+            assertFalse("Empty tracker file should be deleted", File(imagesDir, "empty_tracker.jpg").exists())
+
+            val updatedDoc = Jsoup.parse(c1, "UTF-8")
+            assertEquals(1, updatedDoc.select("img").size)
+            assertEquals("../Images/valid_art.svg", updatedDoc.selectFirst("img")?.attr("src"))
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun errorMemoryManager_extractsAll5CategoriesFiltersUnsafeAndAppliesCaseInsensitive() {
+        val pairs = listOf(
+            // Group 1: Whitespace split / slide (1-4 words & multi-fragment English)
+            com.example.data.ParagraphDiffPair(
+                beforeText = "Anh ấy có cóm ột khái niệm i den fi ni ty rất rõ.",
+                afterText = "Anh ấy có có một khái niệm identity rất rõ."
+            ),
+            // Group 2: OCR character misrecognition
+            com.example.data.ParagraphDiffPair(
+                beforeText = "Chúng ta cần Iàm rnột việc để ta ra kết quả.",
+                afterText = "Chúng ta cần làm một việc để tạo ra kết quả."
+            ),
+            // Group 3: Diacritics / tone typing errors
+            com.example.data.ParagraphDiffPair(
+                beforeText = "Cô ấy muồn ăn nựa quạ chuối chín.",
+                afterText = "Cô ấy muốn ăn nửa quả chuối chín."
+            ),
+            // Group 4: Proper nouns / terminology
+            com.example.data.ParagraphDiffPair(
+                beforeText = "Nhân vật Lý Tiêu bước vào đại điện.",
+                afterText = "Nhân vật Lý Tiêu Dao bước vào đại điện."
+            ),
+            // Group 5: Junk / URL / website / signature full deletion (5..150 chars)
+            com.example.data.ParagraphDiffPair(
+                beforeText = "Nguồn sưu tầm độc quyền tại WebTruyenVip.Com - Chúc vui vẻ!",
+                afterText = ""
+            ),
+            // Safety filter: Long sentence rewrite (> 4 words) MUST be rejected
+            com.example.data.ParagraphDiffPair(
+                beforeText = "Một hai ba bốn năm sáu bảy tám chín mười",
+                afterText = "Câu văn đã được viết lại hoàn toàn khác hẳn"
+            ),
+            // Safety filter: Single character edit MUST be rejected
+            com.example.data.ParagraphDiffPair(
+                beforeText = "a",
+                afterText = "b"
+            )
+        )
+
+        val rules = com.example.data.ErrorMemoryManager.extractRulesFromPairs(pairs)
+        val map = rules.associateBy { it.wrongText }
+
+        assertEquals("có một", map["cóm ột"]?.correctText)
+        assertEquals(com.example.data.ErrorMemoryCategory.WHITESPACE_SPLIT, map["cóm ột"]?.category)
+
+        assertEquals("identity", map["i den fi ni ty"]?.correctText)
+        assertEquals(com.example.data.ErrorMemoryCategory.WHITESPACE_SPLIT, map["i den fi ni ty"]?.category)
+        assertEquals("làm", map["Iàm"]?.correctText)
+        assertEquals("một", map["rnột"]?.correctText)
+        assertEquals("tạo", map["ta"]?.correctText)
+        assertEquals("muốn", map["muồn"]?.correctText)
+        assertEquals("nửa", map["nựa"]?.correctText)
+        assertEquals("quả", map["quạ"]?.correctText)
+        assertEquals("Lý Tiêu Dao", map["Lý Tiêu"]?.correctText)
+        assertEquals(com.example.data.ErrorMemoryCategory.PROPER_NOUN_TERM, map["Lý Tiêu"]?.category)
+
+        val junkRule = rules.firstOrNull { it.category == com.example.data.ErrorMemoryCategory.JUNK_DELETION }
+        assertNotNull("Expected Group 5 junk deletion rule", junkRule)
+        assertEquals("", junkRule!!.correctText)
+
+        // Ensure long rewrite & single-char edit were rejected
+        assertFalse(rules.any { it.wrongText.contains("Một hai ba bốn năm") })
+        assertFalse(rules.any { it.wrongText == "a" })
+
+        // Test prioritized application (case-insensitive junk removal + vocab correction)
+        val rawParagraph = "nguồn sưu tầm độc quyền tại webtruyenvip.com - chúc vui vẻ! Lý Tiêu muồn Iàm rnột quạ chuối."
+        val applied = com.example.data.ErrorMemoryManager.applyRulesToText(rawParagraph, rules)
+        assertEquals("Lý Tiêu Dao muốn làm một quả chuối.", applied.cleanedText)
+        assertTrue(applied.junkDeletionCount >= 1)
+        assertTrue(applied.vocabFixCount >= 5)
+
+        // Test non-destructive merge + JSON round-trip
+        val json = com.example.data.ErrorMemoryManager.serializeRulesToJson(rules)
+        val parsed = com.example.data.ErrorMemoryManager.parseRulesFromJson(json)
+        assertEquals(rules.size, parsed.size)
+
+        val extraRule = com.example.data.ErrorMemoryRule(
+            wrongText = "đặc biêt",
+            correctText = "đặc biệt",
+            category = com.example.data.ErrorMemoryCategory.TONE_TYPO
+        )
+        val merged = com.example.data.ErrorMemoryManager.mergeUniqueRules(rules, parsed + extraRule)
+        assertEquals(1, merged.addedRules.size)
+        assertEquals(rules.size + 1, merged.allRules.size)
+    }
+
+    @Test
+    fun tocGenerator_updatesTocAccuratelyAfterChapterSplitAndMerge() {
+        val initialToc = listOf(
+            com.example.pipeline.EditableTocItem(
+                id = "c1",
+                title = "Chương 1",
+                href = "Text/chapter_0001.xhtml",
+                chapterIndex = 0,
+                chapterFileName = "chapter_0001.xhtml",
+                paragraphIndex = 0,
+                anchorId = null,
+                isManualBookmark = false
+            ),
+            com.example.pipeline.EditableTocItem(
+                id = "bm1",
+                title = "Đánh dấu giữa chương 1",
+                href = "Text/chapter_0001.xhtml#manual_toc_1",
+                chapterIndex = 0,
+                chapterFileName = "chapter_0001.xhtml",
+                paragraphIndex = 6,
+                anchorId = "manual_toc_1",
+                isManualBookmark = true
+            ),
+            com.example.pipeline.EditableTocItem(
+                id = "c2",
+                title = "Chương 2",
+                href = "Text/chapter_0002.xhtml",
+                chapterIndex = 1,
+                chapterFileName = "chapter_0002.xhtml",
+                paragraphIndex = 0,
+                anchorId = null,
+                isManualBookmark = false
+            )
+        )
+
+        // 1. Split Chapter 1 at paragraph index 4 -> new chapter inserted at index 1, bm1 moves to index 1 para 2, c2 shifts to index 2
+        val afterSplit = TocGenerator.updateTocAfterChapterSplit(
+            entries = initialToc,
+            splitChapterIndex = 0,
+            newChapterFileName = "chapter_split_2.xhtml",
+            newChapterTitle = "Chương 1B",
+            splitParagraphIndex = 4
+        )
+        assertEquals(listOf("Chương 1", "Chương 1B", "Đánh dấu giữa chương 1", "Chương 2"), afterSplit.map { it.title })
+        val movedBm = afterSplit.first { it.id == "bm1" }
+        assertEquals(1, movedBm.chapterIndex)
+        assertEquals(2, movedBm.paragraphIndex)
+        assertEquals("chapter_split_2.xhtml", movedBm.chapterFileName)
+        assertEquals(2, afterSplit.first { it.id == "c2" }.chapterIndex)
+
+        // 2. Merge Chapter 1 (index 0, 4 paragraphs) into Chương 1B (index 1) -> Chương 1 entry removed, Chương 1B at index 0, bm1 shifted to para 6, c2 back to index 1
+        val afterMerge = TocGenerator.updateTocAfterChapterMerge(
+            entries = afterSplit,
+            sourceChapterIndex = 0,
+            targetChapterIndex = 1,
+            targetChapterFileName = "chapter_split_2.xhtml",
+            sourceParagraphCount = 4
+        )
+        assertEquals(listOf("Chương 1B", "Đánh dấu giữa chương 1", "Chương 2"), afterMerge.map { it.title })
+        assertEquals(0, afterMerge.first { it.title == "Chương 1B" }.chapterIndex)
+        val mergedBm = afterMerge.first { it.id == "bm1" }
+        assertEquals(0, mergedBm.chapterIndex)
+        assertEquals(6, mergedBm.paragraphIndex)
+        assertEquals(1, afterMerge.first { it.id == "c2" }.chapterIndex)
+    }
 }

@@ -95,7 +95,9 @@ object TocGenerator {
 
     /**
      * Decides final TOC entries for packaging:
-     * - If [regenerateToc] is false and original TOC has >= 2 mapped entries -> preserves original TOC.
+     * - If [customTocEntries] is provided (e.g. edited/renamed/deleted inside ManualEditorScreen TOC),
+     *   writes that exact list into both `nav.xhtml` and `toc.ncx`.
+     * - Otherwise, if [regenerateToc] is false and original TOC has >= 2 mapped entries -> preserves original TOC.
      * - Otherwise -> scans staged chapter XHTML headings to generate a clean new TOC.
      * - Merges any [manualEntries] added from ManualEditorScreen right after their parent chapter
      *   in deterministic reading order with `#anchorId` fragment hrefs.
@@ -103,8 +105,12 @@ object TocGenerator {
     fun resolveEntriesForPackaging(
         workspace: PreparedWorkspace,
         regenerateToc: Boolean,
-        manualEntries: List<ManualTocEntry> = emptyList()
+        manualEntries: List<ManualTocEntry> = emptyList(),
+        customTocEntries: List<TocEntry>? = null
     ): List<TocEntry> {
+        if (customTocEntries != null) {
+            return customTocEntries.filter { it.title.isNotBlank() && it.href.isNotBlank() }
+        }
         val original = workspace.tocInspection?.originalEntries.orEmpty()
         val baseEntries = if (!regenerateToc && original.size >= 2) {
             original
@@ -112,6 +118,246 @@ object TocGenerator {
             generateEntriesFromChapters(workspace.chapters)
         }
         return mergeManualEntries(baseEntries, manualEntries)
+    }
+
+    /**
+     * Builds the initial in-memory editable TOC list for ManualEditorScreen so users can
+     * jump to entries, add manual bookmarks, rename any entry, or delete any entry.
+     */
+    fun buildEditableTocItems(
+        workspace: PreparedWorkspace,
+        regenerateToc: Boolean,
+        manualEntries: List<ManualTocEntry> = emptyList()
+    ): List<EditableTocItem> {
+        val baseEntries = resolveEntriesForPackaging(
+            workspace = workspace,
+            regenerateToc = regenerateToc,
+            manualEntries = manualEntries
+        )
+        val chapterIndexByFile = workspace.chapters
+            .mapIndexed { idx, chap -> chap.fileName to idx }
+            .toMap()
+        val manualByHref = manualEntries.associateBy { "Text/${it.chapterFileName}#${it.anchorId}" }
+
+        return baseEntries.mapIndexed { idx, entry ->
+            val manual = manualByHref[entry.href]
+            val fileName = entry.href.substringAfterLast('/').substringBefore('#')
+            val chapterIndex = manual?.chapterIndex
+                ?: chapterIndexByFile[fileName]
+                ?: idx.coerceIn(0, (workspace.chapters.lastIndex).coerceAtLeast(0))
+            EditableTocItem(
+                id = manual?.id ?: "toc_item_${idx}_${fileName}",
+                title = entry.title,
+                href = entry.href,
+                chapterIndex = chapterIndex,
+                chapterFileName = fileName.ifBlank {
+                    workspace.chapters.getOrNull(chapterIndex)?.fileName.orEmpty()
+                },
+                paragraphIndex = manual?.paragraphIndex ?: 0,
+                anchorId = manual?.anchorId,
+                isManualBookmark = manual != null
+            )
+        }
+    }
+
+    /**
+     * Renames a TOC entry in-memory (works for both standard chapter entries and manual bookmarks).
+     */
+    fun renameEntry(
+        entries: List<EditableTocItem>,
+        entryId: String,
+        newTitle: String
+    ): List<EditableTocItem> {
+        val cleaned = newTitle.trim().take(120)
+        if (cleaned.isEmpty()) return entries
+        return entries.map { item ->
+            if (item.id == entryId) item.copy(title = cleaned) else item
+        }
+    }
+
+    /**
+     * Deletes a TOC entry from the editable TOC list so it will be excluded from `nav.xhtml` & `toc.ncx`.
+     */
+    fun deleteEntry(
+        entries: List<EditableTocItem>,
+        entryId: String
+    ): List<EditableTocItem> {
+        return entries.filterNot { it.id == entryId }
+    }
+
+    /**
+     * Inserts a new manual TOC bookmark into the editable TOC list right after its parent chapter
+     * (and after any earlier manual bookmarks in the same chapter).
+     */
+    fun insertManualEntry(
+        entries: List<EditableTocItem>,
+        manualEntry: ManualTocEntry
+    ): List<EditableTocItem> {
+        val cleanTitle = manualEntry.title.trim().take(120)
+        if (cleanTitle.isEmpty()) return entries
+
+        val newItem = EditableTocItem(
+            id = manualEntry.id,
+            title = cleanTitle,
+            href = "Text/${manualEntry.chapterFileName}#${manualEntry.anchorId}",
+            chapterIndex = manualEntry.chapterIndex,
+            chapterFileName = manualEntry.chapterFileName,
+            paragraphIndex = manualEntry.paragraphIndex,
+            anchorId = manualEntry.anchorId,
+            isManualBookmark = true
+        )
+
+        val mutable = entries.toMutableList()
+        var insertAt = mutable.indexOfLast {
+            it.chapterIndex == manualEntry.chapterIndex &&
+                (!it.isManualBookmark || it.paragraphIndex <= manualEntry.paragraphIndex)
+        }
+        if (insertAt < 0) {
+            insertAt = mutable.indexOfLast { it.chapterIndex < manualEntry.chapterIndex }
+        }
+        if (insertAt >= 0) {
+            mutable.add(insertAt + 1, newItem)
+        } else {
+            mutable.add(newItem)
+        }
+        return mutable
+    }
+
+    /**
+     * Upgrade 1.3: Updates the editable TOC list immediately after splitting chapter `splitChapterIndex`
+     * at `splitParagraphIndex` into a brand-new chapter (`newChapterFileName`, `newChapterTitle`)
+     * placed right after `splitChapterIndex`.
+     */
+    fun updateTocAfterChapterSplit(
+        entries: List<EditableTocItem>,
+        splitChapterIndex: Int,
+        newChapterFileName: String,
+        newChapterTitle: String,
+        splitParagraphIndex: Int
+    ): List<EditableTocItem> {
+        val remapped = entries.map { item ->
+            when {
+                item.chapterIndex > splitChapterIndex -> {
+                    item.copy(chapterIndex = item.chapterIndex + 1)
+                }
+
+                item.chapterIndex == splitChapterIndex &&
+                    item.isManualBookmark &&
+                    item.paragraphIndex >= splitParagraphIndex -> {
+                    val newParaIdx = (item.paragraphIndex - splitParagraphIndex).coerceAtLeast(0)
+                    val newHref = if (!item.anchorId.isNullOrBlank()) {
+                        "Text/$newChapterFileName#${item.anchorId}"
+                    } else {
+                        "Text/$newChapterFileName"
+                    }
+                    item.copy(
+                        chapterIndex = splitChapterIndex + 1,
+                        chapterFileName = newChapterFileName,
+                        paragraphIndex = newParaIdx,
+                        href = newHref
+                    )
+                }
+
+                else -> item
+            }
+        }.toMutableList()
+
+        val newChapterItem = EditableTocItem(
+            id = "toc_split_${System.currentTimeMillis()}_$newChapterFileName",
+            title = newChapterTitle.trim().take(120).ifBlank { "Chương ${splitChapterIndex + 2}" },
+            href = "Text/$newChapterFileName",
+            chapterIndex = splitChapterIndex + 1,
+            chapterFileName = newChapterFileName,
+            paragraphIndex = 0,
+            anchorId = null,
+            isManualBookmark = false
+        )
+
+        val insertAfter = remapped.indexOfLast { it.chapterIndex == splitChapterIndex }
+        if (insertAfter >= 0) {
+            remapped.add(insertAfter + 1, newChapterItem)
+        } else {
+            val beforeNext = remapped.indexOfFirst { it.chapterIndex > splitChapterIndex }
+            if (beforeNext >= 0) {
+                remapped.add(beforeNext, newChapterItem)
+            } else {
+                remapped.add(newChapterItem)
+            }
+        }
+        return remapped
+    }
+
+    /**
+     * Upgrade 1.3: Updates the editable TOC list immediately after merging chapter `sourceChapterIndex`
+     * into the chapter directly below it (`targetChapterIndex = sourceChapterIndex + 1`).
+     * The merged chapter keeps `targetChapterFileName` at index `sourceChapterIndex`, removes the
+     * redundant source chapter TOC entry, shifts manual bookmarks cleanly, and decrements indices above.
+     */
+    fun updateTocAfterChapterMerge(
+        entries: List<EditableTocItem>,
+        sourceChapterIndex: Int,
+        targetChapterIndex: Int,
+        targetChapterFileName: String,
+        sourceParagraphCount: Int
+    ): List<EditableTocItem> {
+        val result = ArrayList<EditableTocItem>(entries.size)
+        for (item in entries) {
+            when {
+                // Drop the source chapter's top-level TOC entry since it was merged into the chapter below
+                item.chapterIndex == sourceChapterIndex && !item.isManualBookmark -> {
+                    continue
+                }
+
+                // Manual bookmarks from source chapter now sit at the top of the merged chapter
+                item.chapterIndex == sourceChapterIndex && item.isManualBookmark -> {
+                    val newHref = if (!item.anchorId.isNullOrBlank()) {
+                        "Text/$targetChapterFileName#${item.anchorId}"
+                    } else {
+                        "Text/$targetChapterFileName"
+                    }
+                    result.add(
+                        item.copy(
+                            chapterIndex = sourceChapterIndex,
+                            chapterFileName = targetChapterFileName,
+                            href = newHref
+                        )
+                    )
+                }
+
+                // Target chapter (below) becomes the merged chapter at index `sourceChapterIndex`
+                item.chapterIndex == targetChapterIndex -> {
+                    val shiftedPara = if (item.isManualBookmark) {
+                        item.paragraphIndex + sourceParagraphCount
+                    } else {
+                        0
+                    }
+                    result.add(
+                        item.copy(
+                            chapterIndex = sourceChapterIndex,
+                            chapterFileName = targetChapterFileName,
+                            paragraphIndex = shiftedPara
+                        )
+                    )
+                }
+
+                // Chapters after target shift up by 1
+                item.chapterIndex > targetChapterIndex -> {
+                    result.add(item.copy(chapterIndex = item.chapterIndex - 1))
+                }
+
+                else -> result.add(item)
+            }
+        }
+        return result
+    }
+
+    /**
+     * Converts editable TOC items back into EPUB [TocEntry] records for `nav.xhtml` & `toc.ncx`.
+     */
+    fun toTocEntries(editableItems: List<EditableTocItem>): List<TocEntry> {
+        return editableItems
+            .filter { it.title.isNotBlank() && it.href.isNotBlank() }
+            .map { TocEntry(title = it.title.trim(), href = it.href) }
     }
 
     /**
