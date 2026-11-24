@@ -25,6 +25,8 @@ class EpubCleanPipeline(
         val stepStates = PipelineStep.entries.associateWith { StepState.PENDING }.toMutableMap()
         var stats = RealtimeStats()
         var bookContext: BookContext? = null
+        var tocInspection: TocInspectionResult? = null
+        var defaultRegenerateToc = false
         val diffs = mutableListOf<DiffEntry>()
 
         fun emit(
@@ -47,6 +49,8 @@ class EpubCleanPipeline(
                 diffs = diffs.toList(),
                 workspace = workspace,
                 metadata = metadata ?: workspace?.metadata,
+                tocInspection = tocInspection ?: workspace?.tocInspection,
+                regenerateToc = defaultRegenerateToc,
                 errorMessage = error
             )
             onUpdate(snap)
@@ -106,12 +110,14 @@ class EpubCleanPipeline(
             }
         }
 
-        // Attach edited Metadata & Cover onto workspace
+        // Attach edited Metadata & Cover onto workspace and capture smart TOC inspection result
         val workspace = rawWorkspace.copy(
             bookTitle = metadata?.title?.ifBlank { rawWorkspace.bookTitle } ?: rawWorkspace.bookTitle,
             bookAuthor = metadata?.creator?.ifBlank { rawWorkspace.bookAuthor } ?: rawWorkspace.bookAuthor,
             metadata = metadata
         )
+        tocInspection = workspace.tocInspection
+        defaultRegenerateToc = workspace.tocInspection?.shouldRegenerateByDefault ?: false
 
         // Remove raw input copy immediately to keep disk/RAM minimal
         rawInputFile.delete()
@@ -138,7 +144,7 @@ class EpubCleanPipeline(
         )
 
         // ------------------------------------------------------------------
-        // BƯỚC 1: Dọn sạch rác & Liên kết thừa (tuần tự từng chương)
+        // BƯỚC 1: Dọn sạch quảng cáo rác (AdCleaner) & Liên kết thừa (tuần tự từng chương)
         // ------------------------------------------------------------------
         stepStates[PipelineStep.STEP_1_CLEAN_JUNK] = StepState.RUNNING
         if (options.cleanLinks) {
@@ -146,22 +152,23 @@ class EpubCleanPipeline(
                 coroutineContext.ensureActive()
                 val file = File(chapter.filePath)
                 val doc = parseXhtml(file)
-                val result = TextCleaningEngine.cleanJunkAndLinks(doc)
+                val adResult = AdCleaner.cleanDocument(doc)
+                val linkResult = TextCleaningEngine.cleanJunkAndLinks(doc)
                 saveXhtml(file, chapter.title, doc)
 
                 stats = stats.copy(
-                    junkLinksRemoved = stats.junkLinksRemoved + result.junkRemovedCount,
+                    junkLinksRemoved = stats.junkLinksRemoved + adResult.removedCount + linkResult.junkRemovedCount,
                     processedChapters = idx + 1
                 )
                 val frac = 0.20f + ((idx + 1).toFloat() / totalChapters) * 0.16f
                 emit(
                     PipelineStep.STEP_1_CLEAN_JUNK,
                     frac,
-                    "Đang dọn liên kết rác & chữ ký nguồn (${idx + 1}/$totalChapters chương)…"
+                    "Đang dọn quảng cáo rác & liên kết thừa (${idx + 1}/$totalChapters chương)…"
                 )
             }
         } else {
-            emit(PipelineStep.STEP_1_CLEAN_JUNK, 0.36f, "Bỏ qua dọn link theo tùy chọn.")
+            emit(PipelineStep.STEP_1_CLEAN_JUNK, 0.36f, "Bỏ qua dọn link & quảng cáo theo tùy chọn.")
         }
         stepStates[PipelineStep.STEP_1_CLEAN_JUNK] = StepState.COMPLETED
 
@@ -264,11 +271,11 @@ class EpubCleanPipeline(
         stepStates[PipelineStep.STEP_3_NORMALIZE_WHITESPACE] = StepState.COMPLETED
 
         // ------------------------------------------------------------------
-        // BƯỚC 4: Sửa từ tiếng Anh bị tách (EnglishWordFixer) + Hiệu đính tiếng Việt + Đóng gói EPUB
+        // BƯỚC 4: Ghép từ tiếng Anh + Hiệu đính tiếng Việt + Chuẩn hóa dấu câu (PunctuationFixer) + Đóng gói EPUB
         // ------------------------------------------------------------------
         stepStates[PipelineStep.STEP_4_AI_PROOFREAD_PACK] = StepState.RUNNING
 
-        if (options.fixSpelling || options.optimizeContent) {
+        if (options.fixSpelling || options.fixWhitespace || options.optimizeContent) {
             workspace.chapters.forEachIndexed { chapIdx, chapter ->
                 coroutineContext.ensureActive()
                 val file = File(chapter.filePath)
@@ -282,11 +289,13 @@ class EpubCleanPipeline(
                     val step4Reasons = linkedSetOf<String>()
 
                     // 4A. Sửa từ tiếng Anh bị tách khoảng trắng / lỗi OCR (en_words.txt + Levenshtein <= 2)
-                    val enRes = englishWordFixer.fixText(working, activeContext.properNouns)
-                    if (enRes.fixCount > 0 && enRes.cleanedText != working) {
-                        working = enRes.cleanedText
-                        step4Reasons.add("Ghép từ tiếng Anh")
-                        stats = stats.copy(spellingFixes = stats.spellingFixes + enRes.fixCount)
+                    if (options.fixSpelling || options.optimizeContent) {
+                        val enRes = englishWordFixer.fixText(working, activeContext.properNouns)
+                        if (enRes.fixCount > 0 && enRes.cleanedText != working) {
+                            working = enRes.cleanedText
+                            step4Reasons.add("Ghép từ tiếng Anh")
+                            stats = stats.copy(spellingFixes = stats.spellingFixes + enRes.fixCount)
+                        }
                     }
 
                     // 4B. Hiệu đính chính tả & dấu tiếng Việt
@@ -299,11 +308,21 @@ class EpubCleanPipeline(
                         }
                     }
 
+                    // 4C. Chuẩn hóa dấu câu Việt – Anh (PunctuationFixer) sau khi sửa khoảng trắng & chính tả
+                    if (options.fixWhitespace || options.fixSpelling || options.optimizeContent) {
+                        val punctRes = PunctuationFixer.fixParagraph(working)
+                        if (punctRes.fixCount > 0 && punctRes.cleanedText != working) {
+                            working = punctRes.cleanedText
+                            step4Reasons.add("Chuẩn hóa dấu câu")
+                            stats = stats.copy(whitespaceFixes = stats.whitespaceFixes + punctRes.fixCount)
+                        }
+                    }
+
                     if (working != beforeStep4) {
                         el.text(working)
                         chapterModified = true
                         val combinedReason = step4Reasons.joinToString(" · ")
-                            .ifBlank { "Hiệu đính chính tả" }
+                            .ifBlank { "Hiệu đính chính tả & dấu câu" }
                         val key = "${chapter.fileName}#$pIdx"
                         val existingIdx = diffIndexByKey[key]
                         if (existingIdx != null) {
@@ -338,7 +357,7 @@ class EpubCleanPipeline(
                 emit(
                     PipelineStep.STEP_4_AI_PROOFREAD_PACK,
                     frac,
-                    "Đang hiệu đính tiếng Việt & từ tiếng Anh (${chapIdx + 1}/$totalChapters chương)…"
+                    "Đang hiệu đính chính tả & dấu câu (${chapIdx + 1}/$totalChapters chương)…"
                 )
             }
         }
@@ -346,9 +365,9 @@ class EpubCleanPipeline(
         emit(
             PipelineStep.STEP_4_AI_PROOFREAD_PACK,
             0.96f,
-            "Đang ghi Metadata, ảnh bìa & đóng gói EPUB chuẩn…"
+            "Đang ghi Metadata, mục lục, ảnh bìa & đóng gói EPUB chuẩn…"
         )
-        EpubWorkspaceManager.packStandardEpub(workspace)
+        EpubWorkspaceManager.packStandardEpub(workspace, regenerateToc = defaultRegenerateToc)
         stepStates[PipelineStep.STEP_4_AI_PROOFREAD_PACK] = StepState.COMPLETED
 
         emit(
@@ -361,11 +380,13 @@ class EpubCleanPipeline(
     }
 
     /**
-     * Re-applies user's accept/reject diff selections on the Review screen and repacks the EPUB cleanly.
+     * Re-applies user's accept/reject diff selections and TOC regeneration toggle on Review screen,
+     * then repacks the EPUB cleanly.
      */
     suspend fun rebuildEpubWithSelectedDiffs(
         workspace: PreparedWorkspace,
-        diffs: List<DiffEntry>
+        diffs: List<DiffEntry>,
+        regenerateToc: Boolean = workspace.tocInspection?.shouldRegenerateByDefault ?: true
     ): File = withContext(Dispatchers.IO) {
         val rejectedByChapter = diffs.filter { !it.accepted }.groupBy { it.chapterFileName }
         if (rejectedByChapter.isNotEmpty()) {
@@ -385,7 +406,7 @@ class EpubCleanPipeline(
                 saveXhtml(file, chapter.title, doc)
             }
         }
-        EpubWorkspaceManager.packStandardEpub(workspace)
+        EpubWorkspaceManager.packStandardEpub(workspace, regenerateToc = regenerateToc)
     }
 
     private fun collectLightweightContextSample(chapters: List<ChapterDescriptor>): String {

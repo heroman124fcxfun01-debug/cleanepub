@@ -112,6 +112,7 @@ private fun EpubCleanNavHost(
     val cleaningOptions by viewModel.cleaningOptions.collectAsStateWithLifecycle()
     val isLoadingMetadata by viewModel.isLoadingMetadata.collectAsStateWithLifecycle()
     val pendingImport by viewModel.pendingImport.collectAsStateWithLifecycle()
+    val customSaveFolderLabel by viewModel.customSaveFolderLabel.collectAsStateWithLifecycle()
 
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showReviewMetadataDialog by remember { mutableStateOf(false) }
@@ -145,6 +146,16 @@ private fun EpubCleanNavHost(
         onResult = { uri ->
             if (uri != null) {
                 viewModel.onCoverImagePicked(uri, forReviewScreen = coverPickerForReview)
+            }
+        }
+    )
+
+    // System Folder Picker (SAF OpenDocumentTree) for re-selecting output save folder
+    val saveFolderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+        onResult = { treeUri ->
+            if (treeUri != null) {
+                viewModel.onSaveFolderPicked(treeUri)
             }
         }
     )
@@ -262,9 +273,12 @@ private fun EpubCleanNavHost(
             ReviewScreen(
                 snapshot = snapshot,
                 saveUiState = saveUiState,
+                customSaveFolderLabel = customSaveFolderLabel,
+                onToggleRegenerateToc = { enabled -> viewModel.setRegenerateToc(enabled) },
                 onToggleDiff = { diffId -> viewModel.toggleDiffAccepted(diffId) },
                 onSetAllDiffs = { accepted -> viewModel.setAllDiffsAccepted(accepted) },
                 onEditMetadataClick = { showReviewMetadataDialog = true },
+                onPickSaveFolderClick = { saveFolderPickerLauncher.launch(null) },
                 onSaveWithMode = { mode -> viewModel.saveProcessedBook(mode) },
                 onOpenSavedFile = { absPath, uriStr -> openEpubExternally(absPath, uriStr) },
                 onFinishToHome = {

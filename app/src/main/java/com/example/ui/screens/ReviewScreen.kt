@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,6 +27,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBackIos
+import androidx.compose.material.icons.automirrored.rounded.FormatListBulleted
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Edit
@@ -49,33 +51,49 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.pipeline.DiffEntry
 import com.example.pipeline.ProcessingSnapshot
 import com.example.pipeline.SaveMode
+import com.example.pipeline.TocInspectionResult
 import com.example.ui.SaveUiState
 import com.example.ui.components.IosCard
 import com.example.ui.components.IosHairlineDivider
 import com.example.ui.components.IosPrimaryButton
-import com.example.ui.components.IosSaveActionSheet
 import com.example.ui.components.IosSaveSuccessDialog
 import com.example.ui.components.IosSectionHeader
+import com.example.ui.components.SaveDialog
+import com.example.ui.theme.IosGreen
+import com.example.ui.theme.IosOrange
+import com.example.ui.theme.IosPillBorderBottomLight
+import com.example.ui.theme.IosPillBottomDark
+import com.example.ui.theme.IosPillBottomLight
+import com.example.ui.theme.IosPillTopDark
+import com.example.ui.theme.IosPillTopLight
 import com.example.ui.theme.JetBrainsMonoFamily
+import com.example.ui.theme.LocalIsDarkTheme
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ReviewScreen(
     snapshot: ProcessingSnapshot,
     saveUiState: SaveUiState,
+    customSaveFolderLabel: String?,
+    onToggleRegenerateToc: (Boolean) -> Unit,
     onToggleDiff: (String) -> Unit,
     onSetAllDiffs: (Boolean) -> Unit,
     onEditMetadataClick: () -> Unit,
+    onPickSaveFolderClick: () -> Unit,
     onSaveWithMode: (SaveMode) -> Unit,
     onOpenSavedFile: (absolutePath: String?, uriString: String?) -> Unit,
     onFinishToHome: () -> Unit,
@@ -85,7 +103,7 @@ fun ReviewScreen(
         onFinishToHome()
     }
 
-    var showActionSheet by remember { mutableStateOf(false) }
+    var showSaveDialog by remember { mutableStateOf(false) }
     var expandProperNouns by remember { mutableStateOf(false) }
 
     val acceptedCount = remember(snapshot.diffs) { snapshot.diffs.count { it.accepted } }
@@ -103,7 +121,7 @@ fun ReviewScreen(
                 .fillMaxSize()
                 .statusBarsPadding()
         ) {
-            // Top Bar (iOS minimalist + oval Metadata Edit button)
+            // Top Bar (iOS minimalist + compact Metadata Edit button)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -113,26 +131,31 @@ fun ReviewScreen(
                 IconButton(
                     onClick = onFinishToHome,
                     modifier = Modifier
-                        .size(48.dp)
+                        .size(44.dp)
                         .testTag("review_back_button")
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Rounded.ArrowBackIos,
                         contentDescription = stringResource(R.string.cd_back),
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = stringResource(R.string.review_title),
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onBackground
+                        fontSize = 18.sp,
+                        lineHeight = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         text = snapshot.metadata?.title?.ifBlank { snapshot.sourceFile?.displayName.orEmpty() }
                             ?: snapshot.sourceFile?.displayName.orEmpty(),
-                        style = MaterialTheme.typography.bodySmall,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -143,13 +166,13 @@ fun ReviewScreen(
                         shape = RoundedCornerShape(50),
                         color = MaterialTheme.colorScheme.primaryContainer,
                         modifier = Modifier
-                            .padding(end = 8.dp)
+                            .padding(end = 6.dp)
                             .clip(RoundedCornerShape(50))
                             .testTag("review_edit_metadata_button")
                             .clickable(onClick = onEditMetadataClick)
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
@@ -157,60 +180,73 @@ fun ReviewScreen(
                                 imageVector = Icons.Rounded.Edit,
                                 contentDescription = "Sửa Metadata",
                                 tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(15.dp)
+                                modifier = Modifier.size(14.dp)
                             )
                             Text(
                                 text = "Metadata",
-                                style = MaterialTheme.typography.labelMedium,
+                                fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1
                             )
                         }
                     }
                 }
             }
 
-            // Scrollable Diff List & Summary
+            // Scrollable Content: TOC 3D Pill AT THE VERY TOP -> Summary Stats -> Diffs
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Summary Card
+                // 1. TOPMOST ITEM: Compact 3D Pill "Làm lại mục lục" Toggle
+                item(key = "toc_regenerate_toggle") {
+                    RegenerateToc3DPill(
+                        tocInspection = snapshot.tocInspection,
+                        regenerateToc = snapshot.regenerateToc,
+                        onToggle = onToggleRegenerateToc
+                    )
+                }
+
+                // 2. Summary Stats Card
                 item(key = "review_summary") {
-                    IosCard(contentPadding = PaddingValues(16.dp)) {
+                    IosCard(contentPadding = PaddingValues(14.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            SummaryStatItem("Link rác", snapshot.stats.junkLinksRemoved, MaterialTheme.colorScheme.tertiary)
-                            SummaryStatItem("Khoảng trắng", snapshot.stats.whitespaceFixes, MaterialTheme.colorScheme.primary)
+                            SummaryStatItem("Rác & Link", snapshot.stats.junkLinksRemoved, MaterialTheme.colorScheme.tertiary)
+                            SummaryStatItem("Trắng & Dấu", snapshot.stats.whitespaceFixes, MaterialTheme.colorScheme.primary)
                             SummaryStatItem("Chính tả", acceptedCount, MaterialTheme.colorScheme.secondary)
                         }
 
                         val ctx = snapshot.bookContext
                         if (ctx != null && ctx.properNouns.isNotEmpty()) {
-                            Spacer(modifier = Modifier.height(12.dp))
+                            Spacer(modifier = Modifier.height(10.dp))
                             IosHairlineDivider()
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable { expandProperNouns = !expandProperNouns }
-                                    .padding(top = 10.dp),
+                                    .padding(top = 8.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
                                     text = "${ctx.genre} · ${ctx.properNouns.size} tên riêng được bảo vệ",
-                                    style = MaterialTheme.typography.bodySmall,
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f)
                                 )
                                 Icon(
                                     imageVector = if (expandProperNouns) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(17.dp)
                                 )
                             }
                             if (expandProperNouns) {
@@ -226,9 +262,9 @@ fun ReviewScreen(
                                         ) {
                                             Text(
                                                 text = noun,
-                                                style = MaterialTheme.typography.labelSmall,
+                                                fontSize = 11.sp,
                                                 color = MaterialTheme.colorScheme.onSurface,
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
                                             )
                                         }
                                     }
@@ -247,24 +283,25 @@ fun ReviewScreen(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
                                     text = saveUiState.message,
-                                    style = MaterialTheme.typography.bodySmall,
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp,
                                     color = MaterialTheme.colorScheme.error,
                                     modifier = Modifier.weight(1f)
                                 )
                                 TextButton(onClick = onDismissSaveError) {
-                                    Text("Đóng", color = MaterialTheme.colorScheme.error)
+                                    Text("Đóng", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
                                 }
                             }
                         }
                     }
                 }
 
-                // Diffs Header
+                // 3. Diffs Section Header
                 item(key = "diffs_header") {
                     IosSectionHeader(
                         title = "${stringResource(R.string.review_section_diffs)} (${snapshot.diffs.size})",
@@ -283,10 +320,10 @@ fun ReviewScreen(
                                         } else {
                                             stringResource(R.string.review_select_all)
                                         },
-                                        style = MaterialTheme.typography.labelMedium,
+                                        fontSize = 11.sp,
                                         color = MaterialTheme.colorScheme.primary,
                                         fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                                     )
                                 }
                             }
@@ -296,14 +333,14 @@ fun ReviewScreen(
 
                 if (snapshot.diffs.isEmpty()) {
                     item(key = "no_diffs") {
-                        IosCard(contentPadding = PaddingValues(22.dp)) {
+                        IosCard(contentPadding = PaddingValues(18.dp)) {
                             Column(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .size(50.dp)
+                                        .size(44.dp)
                                         .clip(CircleShape)
                                         .background(MaterialTheme.colorScheme.secondaryContainer),
                                     contentAlignment = Alignment.Center
@@ -312,19 +349,21 @@ fun ReviewScreen(
                                         imageVector = Icons.Rounded.CheckCircle,
                                         contentDescription = null,
                                         tint = MaterialTheme.colorScheme.secondary,
-                                        modifier = Modifier.size(28.dp)
+                                        modifier = Modifier.size(24.dp)
                                     )
                                 }
-                                Spacer(modifier = Modifier.height(12.dp))
+                                Spacer(modifier = Modifier.height(10.dp))
                                 Text(
                                     text = stringResource(R.string.review_no_ai_changes_title),
-                                    style = MaterialTheme.typography.titleMedium,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
-                                Spacer(modifier = Modifier.height(6.dp))
+                                Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     text = stringResource(R.string.review_no_ai_changes_desc),
-                                    style = MaterialTheme.typography.bodySmall,
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
@@ -342,10 +381,10 @@ fun ReviewScreen(
                     }
                 }
 
-                item { Spacer(modifier = Modifier.height(12.dp)) }
+                item { Spacer(modifier = Modifier.height(10.dp)) }
             }
 
-            // Pinned Bottom Bar with Oval Save CTA
+            // Pinned Bottom Bar with 3D Pill Save CTA
             Surface(
                 color = MaterialTheme.colorScheme.surface,
                 modifier = Modifier.fillMaxWidth()
@@ -355,7 +394,7 @@ fun ReviewScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                            .padding(horizontal = 16.dp, vertical = 10.dp)
                     ) {
                         val isSaving = saveUiState is SaveUiState.Saving
                         IosPrimaryButton(
@@ -365,12 +404,13 @@ fun ReviewScreen(
                                 stringResource(R.string.review_btn_save)
                             },
                             enabled = !isSaving,
-                            onClick = { showActionSheet = true },
+                            height = 48.dp,
+                            onClick = { showSaveDialog = true },
                             modifier = Modifier.testTag("save_epub_button"),
                             leadingIcon = {
                                 if (isSaving) {
                                     CircularProgressIndicator(
-                                        modifier = Modifier.size(18.dp),
+                                        modifier = Modifier.size(16.dp),
                                         strokeWidth = 2.dp,
                                         color = Color.White
                                     )
@@ -378,7 +418,8 @@ fun ReviewScreen(
                                     Icon(
                                         imageVector = Icons.Rounded.Save,
                                         contentDescription = null,
-                                        modifier = Modifier.size(19.dp)
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
                                     )
                                 }
                             }
@@ -389,17 +430,19 @@ fun ReviewScreen(
         }
     }
 
-    // Floating iOS Rounded-Square Save Dialog (Replace Original vs Keep Original _clean.epub)
+    // Compact Floating Save Dialog with tappable folder picker + 2 clean single-line 3D buttons
     val sourceFile = snapshot.sourceFile
     if (sourceFile != null) {
-        IosSaveActionSheet(
-            visible = showActionSheet,
-            sourceFile = sourceFile,
+        val displayFolder = customSaveFolderLabel ?: sourceFile.displayParentFolder
+        SaveDialog(
+            visible = showSaveDialog,
+            displayFolderPath = displayFolder,
+            onPickFolderClick = onPickSaveFolderClick,
             onSelectMode = { mode ->
-                showActionSheet = false
+                showSaveDialog = false
                 onSaveWithMode(mode)
             },
-            onDismiss = { showActionSheet = false }
+            onDismiss = { showSaveDialog = false }
         )
     }
 
@@ -418,20 +461,147 @@ fun ReviewScreen(
     }
 }
 
+/**
+ * Compact 3D Pill placed at the VERY TOP of ReviewScreen for Smart TOC Regeneration:
+ * - Left: "Làm lại mục lục" (13.sp SemiBold) + status ("Hiện có: X mục (Đủ)" / "Chưa có / Thiếu mục lục", 11.sp)
+ * - Right: Compact Switch
+ */
+@Composable
+private fun RegenerateToc3DPill(
+    tocInspection: TocInspectionResult?,
+    regenerateToc: Boolean,
+    onToggle: (Boolean) -> Unit
+) {
+    val isDark = LocalIsDarkTheme.current
+    val pillShape = RoundedCornerShape(50)
+    val hasSufficient = tocInspection?.hasSufficientToc == true
+    val statusText = tocInspection?.statusSummary ?: "Chưa có / Thiếu mục lục"
+    val statusColor = if (hasSufficient) IosGreen else IosOrange
+
+    val surfaceBrush = Brush.verticalGradient(
+        colors = if (isDark) {
+            listOf(IosPillTopDark, IosPillBottomDark)
+        } else {
+            listOf(IosPillTopLight, IosPillBottomLight)
+        }
+    )
+
+    val bevelBorderBrush = Brush.verticalGradient(
+        colors = if (isDark) {
+            listOf(
+                Color.White.copy(alpha = 0.22f),
+                if (regenerateToc) MaterialTheme.colorScheme.primary.copy(alpha = 0.30f) else Color.White.copy(alpha = 0.05f)
+            )
+        } else {
+            listOf(
+                Color.White.copy(alpha = 0.96f),
+                if (regenerateToc) MaterialTheme.colorScheme.primary.copy(alpha = 0.28f) else IosPillBorderBottomLight
+            )
+        }
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .shadow(
+                elevation = 5.dp,
+                shape = pillShape,
+                ambientColor = Color.Black.copy(alpha = 0.08f),
+                spotColor = Color.Black.copy(alpha = 0.14f)
+            )
+            .clip(pillShape)
+            .background(brush = surfaceBrush)
+            .border(
+                width = 1.dp,
+                brush = bevelBorderBrush,
+                shape = pillShape
+            )
+            .clickable { onToggle(!regenerateToc) }
+            .testTag("review_toc_toggle_pill")
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (hasSufficient) MaterialTheme.colorScheme.secondaryContainer
+                        else MaterialTheme.colorScheme.tertiaryContainer
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.FormatListBulleted,
+                    contentDescription = null,
+                    tint = statusColor,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Làm lại mục lục",
+                    fontSize = 13.sp,
+                    lineHeight = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = statusText,
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = statusColor,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(modifier = Modifier.width(6.dp))
+
+            Switch(
+                checked = regenerateToc,
+                onCheckedChange = onToggle,
+                modifier = Modifier
+                    .scale(0.80f)
+                    .testTag("review_toc_switch"),
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = MaterialTheme.colorScheme.secondary,
+                    uncheckedThumbColor = Color.White,
+                    uncheckedTrackColor = MaterialTheme.colorScheme.outline,
+                    uncheckedBorderColor = Color.Transparent
+                )
+            )
+        }
+    }
+}
+
 @Composable
 private fun SummaryStatItem(label: String, value: Int, accent: Color) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = value.toString(),
-            style = MaterialTheme.typography.titleLarge.copy(
-                fontFamily = JetBrainsMonoFamily
-            ),
+            fontSize = 17.sp,
+            lineHeight = 21.sp,
+            fontFamily = JetBrainsMonoFamily,
             color = accent,
             fontWeight = FontWeight.Bold
         )
         Text(
             text = label,
-            style = MaterialTheme.typography.labelSmall,
+            fontSize = 11.sp,
+            lineHeight = 14.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
@@ -442,8 +612,7 @@ private fun DiffComparisonCard(
     diff: DiffEntry,
     onToggle: () -> Unit
 ) {
-    IosCard(contentPadding = PaddingValues(14.dp)) {
-        // Card header: Chapter + oval reason pill + accept switch
+    IosCard(contentPadding = PaddingValues(12.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -451,30 +620,34 @@ private fun DiffComparisonCard(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = diff.chapterTitle,
-                    style = MaterialTheme.typography.labelMedium,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
                     color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(3.dp))
                 Surface(
                     shape = RoundedCornerShape(50),
                     color = MaterialTheme.colorScheme.primaryContainer
                 ) {
                     Text(
                         text = diff.reason,
-                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 10.sp,
+                        lineHeight = 13.sp,
                         color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                     )
                 }
             }
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(6.dp))
             Switch(
                 checked = diff.accepted,
                 onCheckedChange = { onToggle() },
-                modifier = Modifier.testTag("diff_card_toggle"),
+                modifier = Modifier
+                    .scale(0.82f)
+                    .testTag("diff_card_toggle"),
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White,
                     checkedTrackColor = MaterialTheme.colorScheme.secondary,
@@ -485,26 +658,27 @@ private fun DiffComparisonCard(
             )
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         // BEFORE Block
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
+                .clip(RoundedCornerShape(12.dp))
                 .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f))
-                .padding(10.dp)
+                .padding(9.dp)
         ) {
             Text(
                 text = stringResource(R.string.review_label_before),
-                style = MaterialTheme.typography.labelSmall,
+                fontSize = 10.sp,
                 color = MaterialTheme.colorScheme.error,
                 fontWeight = FontWeight.Bold
             )
-            Spacer(modifier = Modifier.height(3.dp))
+            Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = diff.beforeText,
-                style = MaterialTheme.typography.bodyMedium,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
                 color = MaterialTheme.colorScheme.onSurface
             )
         }
@@ -512,14 +686,14 @@ private fun DiffComparisonCard(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 4.dp),
+                .padding(vertical = 3.dp),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = Icons.Rounded.ArrowDownward,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(16.dp)
+                modifier = Modifier.size(14.dp)
             )
         }
 
@@ -527,16 +701,16 @@ private fun DiffComparisonCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
+                .clip(RoundedCornerShape(12.dp))
                 .background(
                     if (diff.accepted) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.8f)
                     else MaterialTheme.colorScheme.surfaceVariant
                 )
-                .padding(10.dp)
+                .padding(9.dp)
         ) {
             Text(
                 text = stringResource(R.string.review_label_after),
-                style = MaterialTheme.typography.labelSmall,
+                fontSize = 10.sp,
                 color = if (diff.accepted) {
                     MaterialTheme.colorScheme.onSecondaryContainer
                 } else {
@@ -544,10 +718,11 @@ private fun DiffComparisonCard(
                 },
                 fontWeight = FontWeight.Bold
             )
-            Spacer(modifier = Modifier.height(3.dp))
+            Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = diff.afterText,
-                style = MaterialTheme.typography.bodyMedium,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
                 color = if (diff.accepted) {
                     MaterialTheme.colorScheme.onSurface
                 } else {

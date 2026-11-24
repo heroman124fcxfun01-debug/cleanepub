@@ -98,7 +98,8 @@ data class PreparedWorkspace(
     val bookAuthor: String,
     val chapters: List<ChapterDescriptor>,
     val imageRelativePaths: List<String>,
-    val metadata: EpubMetadata? = null
+    val metadata: EpubMetadata? = null,
+    val tocInspection: TocInspectionResult? = null
 )
 
 sealed interface SaveResult {
@@ -133,5 +134,7 @@ data class ProcessingSnapshot(
     val diffs: List<DiffEntry> = emptyList(),
     val workspace: PreparedWorkspace? = null,
     val metadata: EpubMetadata? = null,
+    val tocInspection: TocInspectionResult? = null,
+    val regenerateToc: Boolean = false,
     val errorMessage: String? = null
 )

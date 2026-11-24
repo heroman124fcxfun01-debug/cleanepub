@@ -145,6 +145,7 @@ object EpubWorkspaceManager {
 
         // 4. Normalize each chapter into OEBPS/Text/chapter_XXXX.xhtml (dropping old CSS/fonts)
         val chapters = mutableListOf<ChapterDescriptor>()
+        val originalFileToStagedName = HashMap<String, String>(orderedChapterFiles.size * 2)
         orderedChapterFiles.forEachIndexed { idx, srcChapter ->
             val doc = Jsoup.parse(srcChapter, "UTF-8")
             doc.outputSettings()
@@ -169,6 +170,11 @@ object EpubWorkspaceManager {
             val stagedFile = File(textDir, fileName)
             stagedFile.writeText(buildValidXhtmlDocument(chapTitle, doc.body().html()), Charsets.UTF_8)
 
+            runCatching { srcChapter.canonicalPath }.getOrNull()?.let { canonical ->
+                originalFileToStagedName[canonical] = fileName
+            }
+            originalFileToStagedName.putIfAbsent(srcChapter.name.lowercase(), fileName)
+
             chapters.add(
                 ChapterDescriptor(
                     id = "chap_${idx + 1}",
@@ -178,6 +184,15 @@ object EpubWorkspaceManager {
                 )
             )
         }
+
+        // 5. Smartly inspect original EPUB TOC before deleting unpackedDir
+        val tocInspection = TocGenerator.inspectOriginalToc(
+            unpackedDir = unpackedDir,
+            opfFile = opfFile,
+            fileType = InputFileType.EPUB,
+            detectedChapterCount = chapters.size,
+            originalFileToStagedName = originalFileToStagedName
+        )
 
         // Free unpacked copy immediately to keep disk/cache lean
         unpackedDir.deleteRecursively()
@@ -193,7 +208,8 @@ object EpubWorkspaceManager {
             bookTitle = bookTitle,
             bookAuthor = bookAuthor,
             chapters = chapters,
-            imageRelativePaths = imageRelativePaths
+            imageRelativePaths = imageRelativePaths,
+            tocInspection = tocInspection
         )
     }
 
@@ -207,6 +223,14 @@ object EpubWorkspaceManager {
         File(stylesDir, "style.css").writeText(TextCleaningEngine.UNIFIED_STYLE_CSS, Charsets.UTF_8)
         val tempOutputEpub = File(sessionDir, "cleaned_output.epub")
 
+        val pdfTocInspection = TocGenerator.inspectOriginalToc(
+            unpackedDir = null,
+            opfFile = null,
+            fileType = InputFileType.PDF,
+            detectedChapterCount = chapters.size,
+            originalFileToStagedName = emptyMap()
+        )
+
         return PreparedWorkspace(
             sessionDirPath = sessionDir.absolutePath,
             stageDirPath = stageDir.absolutePath,
@@ -214,7 +238,8 @@ object EpubWorkspaceManager {
             bookTitle = bookTitle,
             bookAuthor = "EpubCleanAI",
             chapters = chapters,
-            imageRelativePaths = emptyList()
+            imageRelativePaths = emptyList(),
+            tocInspection = pdfTocInspection
         )
     }
 
@@ -225,7 +250,10 @@ object EpubWorkspaceManager {
      * 3. `OEBPS/content.opf`, `OEBPS/toc.ncx`, `OEBPS/nav.xhtml`
      * 4. `OEBPS/Styles/style.css`, XHTML chapters in `OEBPS/Text`, and images in `OEBPS/Images`
      */
-    fun packStandardEpub(workspace: PreparedWorkspace): File {
+    fun packStandardEpub(
+        workspace: PreparedWorkspace,
+        regenerateToc: Boolean = workspace.tocInspection?.shouldRegenerateByDefault ?: true
+    ): File {
         val stageDir = File(workspace.stageDirPath)
         val metaInfDir = File(stageDir, "META-INF").apply { mkdirs() }
         val oebpsDir = File(stageDir, "OEBPS").apply { mkdirs() }
@@ -256,55 +284,14 @@ object EpubWorkspaceManager {
             Charsets.UTF_8
         )
 
-        // OEBPS/nav.xhtml (EPUB 3 navigation)
-        val navItems = workspace.chapters.joinToString("\n") { chap ->
-            """      <li><a href="Text/${chap.fileName}">${escapeXml(chap.title)}</a></li>"""
-        }
+        // OEBPS/nav.xhtml & OEBPS/toc.ncx via TocGenerator (preserve original TOC or regenerate smartly)
+        val tocEntries = TocGenerator.resolveEntriesForPackaging(workspace, regenerateToc)
         File(oebpsDir, "nav.xhtml").writeText(
-            """<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${escapeXml(bookLang)}" lang="${escapeXml(bookLang)}">
-<head>
-  <meta charset="UTF-8" />
-  <title>Mục lục</title>
-  <link rel="stylesheet" type="text/css" href="Styles/style.css" />
-</head>
-<body>
-  <nav epub:type="toc" id="toc">
-    <h1>Mục lục</h1>
-    <ol>
-$navItems
-    </ol>
-  </nav>
-</body>
-</html>
-""",
+            TocGenerator.buildNavXhtml(tocEntries, bookLang),
             Charsets.UTF_8
         )
-
-        // OEBPS/toc.ncx (EPUB 2 compatibility)
-        val navPoints = workspace.chapters.mapIndexed { idx, chap ->
-            """    <navPoint id="navPoint-${idx + 1}" playOrder="${idx + 1}">
-      <navLabel><text>${escapeXml(chap.title)}</text></navLabel>
-      <content src="Text/${chap.fileName}" />
-    </navPoint>"""
-        }.joinToString("\n")
-
         File(oebpsDir, "toc.ncx").writeText(
-            """<?xml version="1.0" encoding="UTF-8"?>
-<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
-  <head>
-    <meta name="dtb:uid" content="${escapeXml(bookUuid)}" />
-    <meta name="dtb:depth" content="1" />
-    <meta name="dtb:totalPageCount" content="0" />
-    <meta name="dtb:maxPageNumber" content="0" />
-  </head>
-  <docTitle><text>${escapeXml(bookTitle)}</text></docTitle>
-  <navMap>
-$navPoints
-  </navMap>
-</ncx>
-""",
+            TocGenerator.buildTocNcx(tocEntries, bookUuid, bookTitle),
             Charsets.UTF_8
         )
 

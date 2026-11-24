@@ -74,6 +74,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pendingImport = MutableStateFlow<PendingImportMetadata?>(null)
     val pendingImport: StateFlow<PendingImportMetadata?> = _pendingImport.asStateFlow()
 
+    private val _customSaveTreeUri = MutableStateFlow<Uri?>(null)
+    private val _customSaveFolderLabel = MutableStateFlow<String?>(null)
+    val customSaveFolderLabel: StateFlow<String?> = _customSaveFolderLabel.asStateFlow()
+
     fun setDarkMode(enabled: Boolean) {
         themePreferences.setDarkMode(enabled)
         _isDarkMode.value = enabled
@@ -186,6 +190,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startProcessing(source: SourceFileInfo, metadata: EpubMetadata? = null) {
         _saveUiState.value = SaveUiState.Idle
+        _customSaveTreeUri.value = null
+        _customSaveFolderLabel.value = null
         EpubCleanForegroundService.start(
             context = appContext,
             source = source,
@@ -206,7 +212,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun resetProcessingSession() {
         _saveUiState.value = SaveUiState.Idle
+        _customSaveTreeUri.value = null
+        _customSaveFolderLabel.value = null
         ProcessingStateHolder.reset()
+    }
+
+    fun setRegenerateToc(enabled: Boolean) {
+        ProcessingStateHolder.setRegenerateToc(enabled)
+    }
+
+    fun onSaveFolderPicked(treeUri: Uri) {
+        try {
+            appContext.contentResolver.takePersistableUriPermission(
+                treeUri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (_: Exception) {
+            // Some providers do not support persistable grants; session access still works.
+        }
+        _customSaveTreeUri.value = treeUri
+        _customSaveFolderLabel.value = FilePathResolver.resolveTreeUriDisplayPath(treeUri)
     }
 
     fun toggleDiffAccepted(diffId: String) {
@@ -226,14 +252,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _saveUiState.value = SaveUiState.Saving
             try {
                 val pipeline = EpubCleanPipeline(appContext)
-                val finalTempEpub = pipeline.rebuildEpubWithSelectedDiffs(workspace, snapshot.diffs)
+                val finalTempEpub = pipeline.rebuildEpubWithSelectedDiffs(
+                    workspace = workspace,
+                    diffs = snapshot.diffs,
+                    regenerateToc = snapshot.regenerateToc
+                )
 
                 val result = withContext(Dispatchers.IO) {
                     FilePathResolver.saveCleanedEpub(
                         context = appContext,
                         tempEpubFile = finalTempEpub,
                         source = source,
-                        mode = mode
+                        mode = mode,
+                        customTreeUri = _customSaveTreeUri.value
                     )
                 }
 

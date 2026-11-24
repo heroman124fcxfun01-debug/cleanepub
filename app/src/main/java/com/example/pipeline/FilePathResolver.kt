@@ -134,11 +134,47 @@ object FilePathResolver {
         return destFile
     }
 
+    fun resolveTreeUriDisplayPath(treeUri: Uri): String {
+        val rawDocId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull()
+        if (rawDocId.isNullOrBlank()) return "Thư mục đã chọn"
+        val split = rawDocId.split(":")
+        val volume = split.firstOrNull().orEmpty()
+        val relPath = split.getOrNull(1).orEmpty().trimStart('/')
+        return when {
+            volume.equals("primary", ignoreCase = true) -> {
+                if (relPath.isBlank()) "/Bộ nhớ trong" else "/$relPath"
+            }
+            relPath.isBlank() -> "/$volume"
+            else -> "/$volume/$relPath"
+        }
+    }
+
+    fun resolveTreeUriToAbsoluteDir(treeUri: Uri): File? {
+        val rawDocId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull()
+            ?: return null
+        val split = rawDocId.split(":")
+        val volume = split.firstOrNull().orEmpty()
+        val relPath = split.getOrNull(1).orEmpty().trimStart('/')
+        val candidate = when {
+            volume.equals("primary", ignoreCase = true) -> {
+                val root = Environment.getExternalStorageDirectory()
+                if (relPath.isBlank()) root else File(root, relPath)
+            }
+            volume.isNotBlank() -> {
+                val root = File("/storage/$volume")
+                if (relPath.isBlank()) root else File(root, relPath)
+            }
+            else -> null
+        }
+        return candidate?.takeIf { it.exists() && it.isDirectory }
+    }
+
     fun saveCleanedEpub(
         context: Context,
         tempEpubFile: File,
         source: SourceFileInfo,
-        mode: SaveMode
+        mode: SaveMode,
+        customTreeUri: Uri? = null
     ): SaveResult {
         if (!tempEpubFile.exists() || tempEpubFile.length() == 0L) {
             return SaveResult.Failure("Tệp EPUB đầu ra không tồn tại hoặc rỗng.")
@@ -147,12 +183,70 @@ object FilePathResolver {
         return try {
             when (mode) {
                 SaveMode.REPLACE_ORIGINAL -> saveReplaceOriginal(context, tempEpubFile, source)
-                SaveMode.KEEP_ORIGINAL -> saveKeepOriginal(context, tempEpubFile, source)
+                SaveMode.KEEP_ORIGINAL -> {
+                    if (customTreeUri != null) {
+                        saveKeepOriginalToCustomFolder(context, tempEpubFile, source, customTreeUri)
+                    } else {
+                        saveKeepOriginal(context, tempEpubFile, source)
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed saving EPUB", e)
             SaveResult.Failure(e.localizedMessage ?: "Không thể ghi tệp vào bộ nhớ.")
         }
+    }
+
+    private fun saveKeepOriginalToCustomFolder(
+        context: Context,
+        tempEpubFile: File,
+        source: SourceFileInfo,
+        treeUri: Uri
+    ): SaveResult {
+        val outputName = source.cleanCopyFileName
+
+        // 1. Direct filesystem fast-path if tree resolves to a writable folder
+        val resolvedDir = resolveTreeUriToAbsoluteDir(treeUri)
+        if (resolvedDir != null && resolvedDir.canWrite()) {
+            val targetFile = resolveUniqueFile(resolvedDir, outputName)
+            FileInputStream(tempEpubFile).use { input ->
+                FileOutputStream(targetFile).use { output ->
+                    input.copyTo(output, bufferSize = 32 * 1024)
+                }
+            }
+            return SaveResult.Success(
+                outputFileName = targetFile.name,
+                outputDisplayPath = formatFriendlyPath(targetFile.absolutePath),
+                savedAbsolutePath = targetFile.absolutePath,
+                savedUriString = Uri.fromFile(targetFile).toString(),
+                mode = SaveMode.KEEP_ORIGINAL
+            )
+        }
+
+        // 2. Standard Android SAF DocumentTree write (works on any folder/SD card)
+        val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
+        val parentDocUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, treeDocId)
+        val createdUri = DocumentsContract.createDocument(
+            context.contentResolver,
+            parentDocUri,
+            "application/epub+zip",
+            outputName
+        ) ?: throw IllegalStateException("Không thể tạo tệp mới trong thư mục đã chọn.")
+
+        context.contentResolver.openOutputStream(createdUri, "wt")?.use { out ->
+            FileInputStream(tempEpubFile).use { input ->
+                input.copyTo(out, bufferSize = 32 * 1024)
+            }
+        } ?: throw IllegalStateException("Không thể ghi dữ liệu vào thư mục đã chọn.")
+
+        val friendlyDir = resolveTreeUriDisplayPath(treeUri)
+        return SaveResult.Success(
+            outputFileName = outputName,
+            outputDisplayPath = "$friendlyDir/$outputName",
+            savedAbsolutePath = null,
+            savedUriString = createdUri.toString(),
+            mode = SaveMode.KEEP_ORIGINAL
+        )
     }
 
     private fun saveReplaceOriginal(
@@ -404,9 +498,9 @@ object FilePathResolver {
         context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
             if (it.moveToFirst()) name = it.getString(0)
         }
-        if (name.isNullOrBlank()) return null
+        val safeName = name?.takeIf { it.isNotBlank() } ?: return null
         val dlDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val candidate = File(dlDir, name!!)
+        val candidate = File(dlDir, safeName)
         return if (candidate.exists()) candidate.absolutePath else null
     }
 }

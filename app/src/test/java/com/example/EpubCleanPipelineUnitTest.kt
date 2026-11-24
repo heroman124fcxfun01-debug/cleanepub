@@ -1,13 +1,19 @@
 package com.example
 
+import com.example.pipeline.AdCleaner
+import com.example.pipeline.ChapterDescriptor
 import com.example.pipeline.EnglishDictionary
 import com.example.pipeline.EnglishWordFixer
 import com.example.pipeline.EpubMetadata
 import com.example.pipeline.EpubMetadataEditor
 import com.example.pipeline.EpubWorkspaceManager
+import com.example.pipeline.InputFileType
 import com.example.pipeline.OfflineVietnameseDict
+import com.example.pipeline.PunctuationFixer
 import com.example.pipeline.TextCleaner
 import com.example.pipeline.TextCleaningEngine
+import com.example.pipeline.TocGenerator
+import com.example.pipeline.VietnameseSyllableFixer
 import org.jsoup.Jsoup
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -348,5 +354,196 @@ class EpubCleanPipelineUnitTest {
         } finally {
             tempRoot.deleteRecursively()
         }
+    }
+
+    @Test
+    fun adCleaner_removesPromoSpamDecorativeLinesHiddenAndBannerBlocks() {
+        val html = """
+            <html><body>
+                <h1>Chương 1: Khởi đầu</h1>
+                <p>Tải ebook miễn phí tại truyenfull.vn</p>
+                <p>Đọc truyện nhanh nhất tại webtruyen.com</p>
+                <p>Chúc các bạn đọc truyện vui vẻ!</p>
+                <p>Nguồn sưu tầm: Thư viện Ebook</p>
+                <p>Bản quyền thuộc về Nhóm Dịch ABC</p>
+                <p>Theo dõi fanpage để cập nhật chương mới</p>
+                <p>Ủng hộ nhóm dịch qua ví điện tử</p>
+                <p>Mọi chi tiết xin liên hệ admin@ebook.vn</p>
+                <p>*********</p>
+                <p>=========</p>
+                <p>---------</p>
+                <p>~~~~~~~~~</p>
+                <div style="display: none;">Quảng cáo ẩn trong mã nguồn</div>
+                <div class="ad-banner"><img src="images/promo_banner.jpg" alt="banner" /></div>
+                <p><img src="images/story_illustration.jpg" alt="Minh họa nhân vật" /></p>
+                <p>Ánh nắng buổi sớm chiếu qua khung cửa sổ nhỏ. (Đọc truyện nhanh nhất tại sachhay.vn)</p>
+            </body></html>
+        """.trimIndent()
+
+        val doc = Jsoup.parse(html)
+        val result = AdCleaner.cleanDocument(doc)
+
+        assertTrue("Expected at least 14 junk blocks removed, got ${result.removedCount}", result.removedCount >= 14)
+        val bodyText = doc.body().text()
+        assertFalse(bodyText.contains("Tải ebook miễn phí", ignoreCase = true))
+        assertFalse(bodyText.contains("Đọc truyện nhanh nhất", ignoreCase = true))
+        assertFalse(bodyText.contains("Chúc các bạn đọc truyện vui vẻ", ignoreCase = true))
+        assertFalse(bodyText.contains("Nguồn sưu tầm", ignoreCase = true))
+        assertFalse(bodyText.contains("Bản quyền thuộc về", ignoreCase = true))
+        assertFalse(bodyText.contains("Theo dõi fanpage", ignoreCase = true))
+        assertFalse(bodyText.contains("Ủng hộ nhóm dịch", ignoreCase = true))
+        assertFalse(bodyText.contains("Mọi chi tiết xin liên hệ", ignoreCase = true))
+        assertFalse(bodyText.contains("*****"))
+        assertFalse(bodyText.contains("====="))
+        assertFalse(bodyText.contains("-----"))
+        assertFalse(bodyText.contains("~~~~~"))
+        assertFalse(bodyText.contains("Quảng cáo ẩn"))
+
+        // Real story text and real story illustration must be preserved
+        assertTrue(bodyText.contains("Ánh nắng buổi sớm chiếu qua khung cửa sổ nhỏ."))
+        assertEquals(1, doc.select("img[src=images/story_illustration.jpg]").size)
+        assertEquals(0, doc.select("img[src=images/promo_banner.jpg]").size)
+    }
+
+    @Test
+    fun punctuationFixer_normalizesSpacesDuplicatesBracketsAndCapitalizationSafely() {
+        // 1. Space before punctuation + missing space after punctuation + auto-capitalize after . ? !
+        val res1 = PunctuationFixer.fixParagraph("Xin chào ,thế giới .hôm nay trời đẹp quá !bạn khỏe không ?rất khỏe ;cảm ơn :nhiều .")
+        assertEquals("Xin chào, thế giới. Hôm nay trời đẹp quá! Bạn khỏe không? Rất khỏe; cảm ơn: nhiều.", res1.cleanedText)
+        assertTrue(res1.fixCount > 0)
+
+        // 2. Brackets & curly quotes inner spaces
+        val res2 = PunctuationFixer.fixParagraph("Cô nói “ xin chào ( bạn cũ ) và [ mọi người ] ” rất nhẹ nhàng.")
+        assertEquals("Cô nói “xin chào (bạn cũ) và [mọi người]” rất nhẹ nhàng.", res2.cleanedText)
+
+        // 3. Duplicate punctuation collapse while preserving ellipsis "..."
+        val res3 = PunctuationFixer.fixParagraph("Thật vậy sao?? Tuyệt vời!! Anh bước đi,, rồi dừng lại.. và... im lặng.")
+        assertEquals("Thật vậy sao? Tuyệt vời! Anh bước đi, rồi dừng lại. Và... im lặng.", res3.cleanedText)
+
+        // 4. Protect decimal numbers (3.14) and abbreviations (TP.HCM, PGS.TS, v.v.)
+        val res4 = PunctuationFixer.fixParagraph("Tại TP.HCM, PGS.TS An đo được giá trị 3.14 và 2.50 trong thí nghiệm v.v.")
+        assertEquals("Tại TP.HCM, PGS.TS An đo được giá trị 3.14 và 2.50 trong thí nghiệm v.v.", res4.cleanedText)
+        assertEquals(0, res4.fixCount)
+    }
+
+    @Test
+    fun tocGenerator_detectsSufficientVsMissingTocAndPreservesOrRegenerates() {
+        val tempRoot = java.nio.file.Files.createTempDirectory("epubclean_toc_test_").toFile()
+        try {
+            // Case 1: PDF -> always missing TOC -> regenerate by default ON
+            val pdfInspection = TocGenerator.inspectOriginalToc(
+                unpackedDir = null,
+                opfFile = null,
+                fileType = InputFileType.PDF,
+                detectedChapterCount = 3,
+                originalFileToStagedName = emptyMap()
+            )
+            assertFalse(pdfInspection.hasSufficientToc)
+            assertTrue(pdfInspection.shouldRegenerateByDefault)
+            assertEquals("Chưa có / Thiếu mục lục", pdfInspection.statusSummary)
+
+            // Case 2: EPUB with sufficient toc.ncx (3 entries for 3 chapters) -> default OFF & preserves original titles
+            val unpacked = File(tempRoot, "unpacked").apply { mkdirs() }
+            val oebps = File(unpacked, "OEBPS").apply { mkdirs() }
+            val textSrc = File(oebps, "Text").apply { mkdirs() }
+            val src1 = File(textSrc, "c1.xhtml").apply { writeText("<html><body><h1>Chương 1 Mới</h1></body></html>") }
+            val src2 = File(textSrc, "c2.xhtml").apply { writeText("<html><body><h1>Chương 2 Mới</h1></body></html>") }
+            val src3 = File(textSrc, "c3.xhtml").apply { writeText("<html><body><h1>Chương 3 Mới</h1></body></html>") }
+
+            File(oebps, "toc.ncx").writeText(
+                """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+                  <navMap>
+                    <navPoint id="np1" playOrder="1"><navLabel><text>Mở đầu Gốc</text></navLabel><content src="Text/c1.xhtml"/></navPoint>
+                    <navPoint id="np2" playOrder="2"><navLabel><text>Giữa truyện Gốc</text></navLabel><content src="Text/c2.xhtml"/></navPoint>
+                    <navPoint id="np3" playOrder="3"><navLabel><text>Kết thúc Gốc</text></navLabel><content src="Text/c3.xhtml"/></navPoint>
+                  </navMap>
+                </ncx>
+                """.trimIndent()
+            )
+
+            val map = mapOf(
+                src1.canonicalPath to "chapter_0001.xhtml",
+                src2.canonicalPath to "chapter_0002.xhtml",
+                src3.canonicalPath to "chapter_0003.xhtml"
+            )
+
+            val epubInspection = TocGenerator.inspectOriginalToc(
+                unpackedDir = unpacked,
+                opfFile = null,
+                fileType = InputFileType.EPUB,
+                detectedChapterCount = 3,
+                originalFileToStagedName = map
+            )
+            assertTrue(epubInspection.hasSufficientToc)
+            assertFalse(epubInspection.shouldRegenerateByDefault)
+            assertEquals(3, epubInspection.existingEntryCount)
+            assertEquals("Hiện có: 3 mục (Đủ)", epubInspection.statusSummary)
+
+            // Build staged workspace and verify preserve (regenerateToc=false) vs regenerate (regenerateToc=true)
+            val stagedWorkspace = EpubWorkspaceManager.preparePdfWorkspace(
+                bookTitle = "Test Book",
+                sessionDir = File(tempRoot, "session").apply { mkdirs() },
+                chapters = listOf(
+                    ChapterDescriptor("c1", "chapter_0001.xhtml", "Chương 1", src1.absolutePath),
+                    ChapterDescriptor("c2", "chapter_0002.xhtml", "Chương 2", src2.absolutePath),
+                    ChapterDescriptor("c3", "chapter_0003.xhtml", "Chương 3", src3.absolutePath)
+                )
+            ).copy(tocInspection = epubInspection)
+
+            val preservedEntries = TocGenerator.resolveEntriesForPackaging(stagedWorkspace, regenerateToc = false)
+            assertEquals(listOf("Mở đầu Gốc", "Giữa truyện Gốc", "Kết thúc Gốc"), preservedEntries.map { it.title })
+
+            val regeneratedEntries = TocGenerator.resolveEntriesForPackaging(stagedWorkspace, regenerateToc = true)
+            assertEquals(listOf("Chương 1 Mới", "Chương 2 Mới", "Chương 3 Mới"), regeneratedEntries.map { it.title })
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun vietnameseSyllableFixer_fixesRealBookParagraphWithViterbiDpAndPerformance() {
+        // Verify 4-tier Unigram + Bigram frequency scores
+        assertEquals(OfflineVietnameseDict.SCORE_COMMON, OfflineVietnameseDict.getSyllableScore("có"))
+        assertEquals(OfflineVietnameseDict.SCORE_COMMON, OfflineVietnameseDict.getSyllableScore("một"))
+        assertEquals(OfflineVietnameseDict.SCORE_COMMON, OfflineVietnameseDict.getSyllableScore("nhiều"))
+        assertEquals(OfflineVietnameseDict.SCORE_COMMON, OfflineVietnameseDict.getSyllableScore("điểm"))
+        assertEquals(OfflineVietnameseDict.SCORE_COMMON, OfflineVietnameseDict.getSyllableScore("nữa"))
+        assertEquals(OfflineVietnameseDict.SCORE_COMMON, OfflineVietnameseDict.getSyllableScore("những"))
+
+        assertEquals(OfflineVietnameseDict.BIGRAM_BONUS, OfflineVietnameseDict.getBigramBonus("có", "một"))
+        assertEquals(OfflineVietnameseDict.BIGRAM_BONUS, OfflineVietnameseDict.getBigramBonus("hơn", "nữa"))
+        assertEquals(OfflineVietnameseDict.BIGRAM_BONUS, OfflineVietnameseDict.getBigramBonus("đặc", "điểm"))
+
+        assertEquals(OfflineVietnameseDict.SCORE_INVALID_GHOST, OfflineVietnameseDict.getSyllableScore("cóm"))
+        assertEquals(OfflineVietnameseDict.SCORE_INVALID_GHOST, OfflineVietnameseDict.getSyllableScore("ột"))
+        assertEquals(OfflineVietnameseDict.SCORE_INVALID_GHOST, OfflineVietnameseDict.getSyllableScore("ều"))
+        assertEquals(OfflineVietnameseDict.SCORE_INVALID_GHOST, OfflineVietnameseDict.getSyllableScore("ểm"))
+        assertEquals(OfflineVietnameseDict.SCORE_INVALID_GHOST, OfflineVietnameseDict.getSyllableScore("ững"))
+
+        val fixer = VietnameseSyllableFixer(OfflineVietnameseDict)
+
+        // Exact book paragraph requested by user (must match 100%)
+        val input = "cóm ột vài khía cạnh của đặc tính có xu hướng không thay đổi theo thời gian – giống như việc xác định ai cao, ai thấp vậy. Nhưng dù cho có nhi ều hơn nữ anh ững phẩm chất và đặc đi ểm cố định"
+        val expected = "có một vài khía cạnh của đặc tính có xu hướng không thay đổi theo thời gian – giống như việc xác định ai cao, ai thấp vậy. Nhưng dù cho có nhiều hơn nữa những phẩm chất và đặc điểm cố định"
+
+        val result = fixer.fixText(input)
+        assertEquals(expected, result.cleanedText)
+        assertEquals(4, result.fixCount)
+
+        // Capitalized leading case preservation ("Cóm ột" -> "Có một")
+        assertEquals("Có một vài khía cạnh.", fixer.fix("Cóm ột vài khía cạnh."))
+
+        // Performance check: ~2,300-word chapter (50x paragraphs) must run well under 50ms
+        val chapterParagraphs = List(50) { input }
+        // Warm up JIT once
+        fixer.fix(input)
+        val startNs = System.nanoTime()
+        for (p in chapterParagraphs) {
+            fixer.fix(p)
+        }
+        val elapsedMs = (System.nanoTime() - startNs) / 1_000_000.0
+        assertTrue("Expected full chapter processing < 50ms, took ${elapsedMs}ms", elapsedMs < 50.0)
     }
 }

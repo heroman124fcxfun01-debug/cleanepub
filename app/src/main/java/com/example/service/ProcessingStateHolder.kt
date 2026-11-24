@@ -58,6 +58,12 @@ object ProcessingStateHolder {
         }
     }
 
+    fun setRegenerateToc(enabled: Boolean) {
+        _snapshot.update { current ->
+            current.copy(regenerateToc = enabled)
+        }
+    }
+
     fun reset() {
         pendingMetadata = null
         _snapshot.value = ProcessingSnapshot()
