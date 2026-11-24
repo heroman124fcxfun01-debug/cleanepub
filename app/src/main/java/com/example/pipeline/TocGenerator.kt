@@ -97,16 +97,71 @@ object TocGenerator {
      * Decides final TOC entries for packaging:
      * - If [regenerateToc] is false and original TOC has >= 2 mapped entries -> preserves original TOC.
      * - Otherwise -> scans staged chapter XHTML headings to generate a clean new TOC.
+     * - Merges any [manualEntries] added from ManualEditorScreen right after their parent chapter
+     *   in deterministic reading order with `#anchorId` fragment hrefs.
      */
     fun resolveEntriesForPackaging(
         workspace: PreparedWorkspace,
-        regenerateToc: Boolean
+        regenerateToc: Boolean,
+        manualEntries: List<ManualTocEntry> = emptyList()
     ): List<TocEntry> {
         val original = workspace.tocInspection?.originalEntries.orEmpty()
-        if (!regenerateToc && original.size >= 2) {
-            return original
+        val baseEntries = if (!regenerateToc && original.size >= 2) {
+            original
+        } else {
+            generateEntriesFromChapters(workspace.chapters)
         }
-        return generateEntriesFromChapters(workspace.chapters)
+        return mergeManualEntries(baseEntries, manualEntries)
+    }
+
+    /**
+     * Merges manual bookmark TOC entries into base TOC entries without duplicates, placing each
+     * manual bookmark directly after its parent chapter entry (sorted by paragraphIndex).
+     */
+    fun mergeManualEntries(
+        baseEntries: List<TocEntry>,
+        manualEntries: List<ManualTocEntry>
+    ): List<TocEntry> {
+        if (manualEntries.isEmpty()) return baseEntries
+
+        val sortedManuals = manualEntries
+            .filter { it.title.isNotBlank() && it.chapterFileName.isNotBlank() && it.anchorId.isNotBlank() }
+            .sortedWith(compareBy<ManualTocEntry> { it.chapterIndex }.thenBy { it.paragraphIndex })
+
+        if (sortedManuals.isEmpty()) return baseEntries
+
+        val manualsByChapterFile = sortedManuals.groupBy { it.chapterFileName }
+        val consumedChapters = HashSet<String>()
+        val merged = mutableListOf<TocEntry>()
+        val seenHrefs = HashSet<String>()
+
+        for (entry in baseEntries) {
+            if (seenHrefs.add(entry.href)) {
+                merged.add(entry)
+            }
+            val chapterFileName = entry.href.substringAfterLast('/').substringBefore('#')
+            if (chapterFileName.isNotBlank() && consumedChapters.add(chapterFileName)) {
+                val chapterBookmarks = manualsByChapterFile[chapterFileName].orEmpty()
+                for (bm in chapterBookmarks) {
+                    val bmHref = "Text/${bm.chapterFileName}#${bm.anchorId}"
+                    if (seenHrefs.add(bmHref)) {
+                        merged.add(TocEntry(title = bm.title.trim(), href = bmHref))
+                    }
+                }
+            }
+        }
+
+        // Append any manual bookmarks whose chapter wasn't listed in baseEntries
+        for (bm in sortedManuals) {
+            if (bm.chapterFileName !in consumedChapters) {
+                val bmHref = "Text/${bm.chapterFileName}#${bm.anchorId}"
+                if (seenHrefs.add(bmHref)) {
+                    merged.add(TocEntry(title = bm.title.trim(), href = bmHref))
+                }
+            }
+        }
+
+        return merged
     }
 
     /**

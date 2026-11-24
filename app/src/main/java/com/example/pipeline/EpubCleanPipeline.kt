@@ -409,6 +409,142 @@ class EpubCleanPipeline(
         EpubWorkspaceManager.packStandardEpub(workspace, regenerateToc = regenerateToc)
     }
 
+    /**
+     * Loads both `originalParagraphs` (from pre-clean snapshot) and `currentParagraphs`
+     * (either cleaned with user's Review diff choices or original) for every chapter
+     * so ManualEditorScreen can support editing and 2-half Split-Screen Comparison.
+     */
+    suspend fun loadManualChapters(
+        workspace: PreparedWorkspace,
+        diffs: List<DiffEntry>,
+        mode: ManualEditorMode
+    ): List<ManualChapterContent> = withContext(Dispatchers.IO) {
+        val originalDir = workspace.originalTextDirPath?.let { File(it) }
+        val rejectedByChapter = diffs.filter { !it.accepted }.groupBy { it.chapterFileName }
+
+        workspace.chapters.mapIndexed { idx, chapter ->
+            val stagedFile = File(chapter.filePath)
+            val originalFile = originalDir?.let { File(it, chapter.fileName) }
+                ?.takeIf { it.exists() }
+                ?: stagedFile
+
+            val origParagraphs = if (originalFile.exists()) {
+                extractDisplayParagraphs(parseXhtml(originalFile))
+            } else {
+                emptyList()
+            }
+
+            val cleanedParagraphs = if (stagedFile.exists()) {
+                val doc = parseXhtml(stagedFile)
+                val editable = TextCleaningEngine.extractEditableParagraphs(doc)
+                val rejected = rejectedByChapter[chapter.fileName].orEmpty()
+                for (entry in rejected) {
+                    val el = editable.getOrNull(entry.paragraphIndex)
+                    if (el != null) {
+                        el.text(entry.beforeText)
+                    }
+                }
+                extractDisplayParagraphs(doc)
+            } else {
+                origParagraphs
+            }
+
+            val safeOrig = if (origParagraphs.isEmpty() && cleanedParagraphs.isNotEmpty()) {
+                cleanedParagraphs
+            } else {
+                origParagraphs
+            }
+
+            val chosenCurrent = when (mode) {
+                ManualEditorMode.KEEP_CLEANED -> cleanedParagraphs.ifEmpty { safeOrig }
+                ManualEditorMode.KEEP_ORIGINAL -> safeOrig.ifEmpty { cleanedParagraphs }
+            }
+
+            ManualChapterContent(
+                chapterIndex = idx,
+                fileName = chapter.fileName,
+                title = chapter.title.ifBlank { "Chương ${idx + 1}" },
+                filePath = chapter.filePath,
+                originalParagraphs = safeOrig,
+                currentParagraphs = chosenCurrent
+            )
+        }
+    }
+
+    /**
+     * Writes user's manual paragraph edits + manual TOC `#anchorId` attributes back into staged
+     * XHTML chapters (preserving images and chapter headings), then repacks the EPUB.
+     */
+    suspend fun writeManualEditsAndPackEpub(
+        workspace: PreparedWorkspace,
+        chapters: List<ManualChapterContent>,
+        manualTocEntries: List<ManualTocEntry>,
+        regenerateToc: Boolean = workspace.tocInspection?.shouldRegenerateByDefault ?: true
+    ): File = withContext(Dispatchers.IO) {
+        val anchorsByChapter = manualTocEntries.groupBy { it.chapterFileName }
+
+        for (chapter in chapters) {
+            val file = File(chapter.filePath)
+            if (!file.exists()) continue
+            val doc = parseXhtml(file)
+            val editableElements = TextCleaningEngine.extractEditableParagraphs(doc)
+            val chapterAnchors = anchorsByChapter[chapter.fileName]
+                .orEmpty()
+                .associateBy { it.paragraphIndex }
+
+            val newParagraphs = chapter.currentParagraphs
+            if (editableElements.size == newParagraphs.size) {
+                // Fast in-place update: preserves exact tag hierarchy (h1/h2/h3/p) and surrounding images
+                editableElements.forEachIndexed { pIdx, el ->
+                    val updatedText = newParagraphs[pIdx]
+                    el.text(updatedText)
+                    val anchor = chapterAnchors[pIdx]
+                    if (anchor != null) {
+                        el.attr("id", anchor.anchorId)
+                    }
+                }
+            } else {
+                // Paragraph count changed (e.g. user chose "Giữ nguyên" after Step 1 stripped ad blocks):
+                // Preserve any existing images, then write clean heading + paragraphs with anchors.
+                val preservedImages = doc.body().select("img").map { it.outerHtml() }
+                val body = doc.body()
+                body.empty()
+                newParagraphs.forEachIndexed { pIdx, text ->
+                    val trimmed = text.trim()
+                    if (trimmed.isNotEmpty()) {
+                        val tag = if (pIdx == 0 && trimmed.length <= 120) "h2" else "p"
+                        val el = body.appendElement(tag).text(trimmed)
+                        val anchor = chapterAnchors[pIdx]
+                        if (anchor != null) {
+                            el.attr("id", anchor.anchorId)
+                        }
+                    }
+                }
+                for (imgHtml in preservedImages) {
+                    body.append(imgHtml)
+                }
+            }
+
+            saveXhtml(file, chapter.title, doc)
+        }
+
+        EpubWorkspaceManager.packStandardEpub(
+            workspace = workspace,
+            regenerateToc = regenerateToc,
+            manualTocEntries = manualTocEntries
+        )
+    }
+
+    private fun extractDisplayParagraphs(doc: Document): List<String> {
+        val editable = TextCleaningEngine.extractEditableParagraphs(doc)
+            .map { it.text().trim() }
+            .filter { it.isNotEmpty() }
+        if (editable.isNotEmpty()) return editable
+
+        val fallback = doc.body().text().trim()
+        return if (fallback.isNotEmpty()) listOf(fallback) else emptyList()
+    }
+
     private fun collectLightweightContextSample(chapters: List<ChapterDescriptor>): String {
         if (chapters.isEmpty()) return ""
         val step = (chapters.size / 6).coerceAtLeast(1)

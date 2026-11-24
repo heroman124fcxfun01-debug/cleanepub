@@ -242,7 +242,7 @@ fun SettingsDialog(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "v1.0 Offline",
+                                text = "v1.1 Offline",
                                 fontSize = 11.sp,
                                 lineHeight = 14.sp,
                                 color = MaterialTheme.colorScheme.primary,
@@ -296,7 +296,7 @@ fun SettingsDialog(
                     }
 
                     Text(
-                        text = "Công cụ làm sạch định dạng, chuẩn hóa khoảng trắng, sửa lỗi tách chữ Việt – Anh và biên tập Metadata/Bìa sách hoàn toàn trên thiết bị, không cần mạng.",
+                        text = "Công cụ làm sạch EPUB/PDF, sửa tách chữ Việt – Anh, biên tập Metadata/Bìa sách và đọc – sửa thủ công nền Sepia có so sánh song song 2 nửa màn hình hoàn toàn ngoại tuyến.",
                         fontSize = 12.sp,
                         lineHeight = 17.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant

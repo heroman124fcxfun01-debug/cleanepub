@@ -41,6 +41,7 @@ object EpubWorkspaceManager {
         val unpackedDir = File(sessionDir, "unpacked").apply { mkdirs() }
         val stageDir = File(sessionDir, "stage").apply { mkdirs() }
         val textDir = File(stageDir, "OEBPS/Text").apply { mkdirs() }
+        val originalTextDir = File(sessionDir, "original_text").apply { mkdirs() }
         val stylesDir = File(stageDir, "OEBPS/Styles").apply { mkdirs() }
         val imagesDir = File(stageDir, "OEBPS/Images").apply { mkdirs() }
 
@@ -168,7 +169,9 @@ object EpubWorkspaceManager {
             val chapTitle = TextCleaningEngine.extractTitleFromDocument(doc, "Chương ${idx + 1}")
             val fileName = "chapter_%04d.xhtml".format(idx + 1)
             val stagedFile = File(textDir, fileName)
-            stagedFile.writeText(buildValidXhtmlDocument(chapTitle, doc.body().html()), Charsets.UTF_8)
+            val initialXhtml = buildValidXhtmlDocument(chapTitle, doc.body().html())
+            stagedFile.writeText(initialXhtml, Charsets.UTF_8)
+            File(originalTextDir, fileName).writeText(initialXhtml, Charsets.UTF_8)
 
             runCatching { srcChapter.canonicalPath }.getOrNull()?.let { canonical ->
                 originalFileToStagedName[canonical] = fileName
@@ -209,7 +212,8 @@ object EpubWorkspaceManager {
             bookAuthor = bookAuthor,
             chapters = chapters,
             imageRelativePaths = imageRelativePaths,
-            tocInspection = tocInspection
+            tocInspection = tocInspection,
+            originalTextDirPath = originalTextDir.absolutePath
         )
     }
 
@@ -220,6 +224,13 @@ object EpubWorkspaceManager {
     ): PreparedWorkspace {
         val stageDir = File(sessionDir, "stage").apply { mkdirs() }
         val stylesDir = File(stageDir, "OEBPS/Styles").apply { mkdirs() }
+        val originalTextDir = File(sessionDir, "original_text").apply { mkdirs() }
+        for (chapter in chapters) {
+            val src = File(chapter.filePath)
+            if (src.exists()) {
+                src.copyTo(File(originalTextDir, chapter.fileName), overwrite = true)
+            }
+        }
         File(stylesDir, "style.css").writeText(TextCleaningEngine.UNIFIED_STYLE_CSS, Charsets.UTF_8)
         val tempOutputEpub = File(sessionDir, "cleaned_output.epub")
 
@@ -239,7 +250,8 @@ object EpubWorkspaceManager {
             bookAuthor = "EpubCleanAI",
             chapters = chapters,
             imageRelativePaths = emptyList(),
-            tocInspection = pdfTocInspection
+            tocInspection = pdfTocInspection,
+            originalTextDirPath = originalTextDir.absolutePath
         )
     }
 
@@ -252,7 +264,8 @@ object EpubWorkspaceManager {
      */
     fun packStandardEpub(
         workspace: PreparedWorkspace,
-        regenerateToc: Boolean = workspace.tocInspection?.shouldRegenerateByDefault ?: true
+        regenerateToc: Boolean = workspace.tocInspection?.shouldRegenerateByDefault ?: true,
+        manualTocEntries: List<ManualTocEntry> = emptyList()
     ): File {
         val stageDir = File(workspace.stageDirPath)
         val metaInfDir = File(stageDir, "META-INF").apply { mkdirs() }
@@ -284,8 +297,12 @@ object EpubWorkspaceManager {
             Charsets.UTF_8
         )
 
-        // OEBPS/nav.xhtml & OEBPS/toc.ncx via TocGenerator (preserve original TOC or regenerate smartly)
-        val tocEntries = TocGenerator.resolveEntriesForPackaging(workspace, regenerateToc)
+        // OEBPS/nav.xhtml & OEBPS/toc.ncx via TocGenerator (preserve original TOC or regenerate smartly + manual bookmarks)
+        val tocEntries = TocGenerator.resolveEntriesForPackaging(
+            workspace = workspace,
+            regenerateToc = regenerateToc,
+            manualEntries = manualTocEntries
+        )
         File(oebpsDir, "nav.xhtml").writeText(
             TocGenerator.buildNavXhtml(tocEntries, bookLang),
             Charsets.UTF_8

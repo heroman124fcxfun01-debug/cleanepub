@@ -545,4 +545,85 @@ class EpubCleanPipelineUnitTest {
         val elapsedMs = (System.nanoTime() - startNs) / 1_000_000.0
         assertTrue("Expected full chapter processing < 500ms on CI, took ${elapsedMs}ms", elapsedMs < 500.0)
     }
+
+    @Test
+    fun tocGenerator_mergesManualBookmarksAndPacksWithOriginalSnapshot() {
+        val tempRoot = java.nio.file.Files.createTempDirectory("epubclean_manual_toc_test_").toFile()
+        try {
+            val textDir = File(tempRoot, "stage/OEBPS/Text").apply { mkdirs() }
+            val c1 = File(textDir, "chapter_0001.xhtml").apply {
+                writeText(
+                    EpubWorkspaceManager.buildValidXhtmlDocument(
+                        "Chương 1",
+                        "<h1>Chương 1</h1><p>Đoạn mở đầu.</p><p>Mục nhỏ đặc biệt cần đánh dấu.</p>"
+                    ),
+                    Charsets.UTF_8
+                )
+            }
+            val c2 = File(textDir, "chapter_0002.xhtml").apply {
+                writeText(
+                    EpubWorkspaceManager.buildValidXhtmlDocument(
+                        "Chương 2",
+                        "<h1>Chương 2</h1><p>Nội dung chương hai.</p>"
+                    ),
+                    Charsets.UTF_8
+                )
+            }
+
+            val workspace = EpubWorkspaceManager.preparePdfWorkspace(
+                bookTitle = "Sách Thử Nghiệm 1.1",
+                sessionDir = tempRoot,
+                chapters = listOf(
+                    ChapterDescriptor("chap_1", "chapter_0001.xhtml", "Chương 1", c1.absolutePath),
+                    ChapterDescriptor("chap_2", "chapter_0002.xhtml", "Chương 2", c2.absolutePath)
+                )
+            )
+
+            // Verify pre-clean original_text snapshot was created for Split-Screen Comparison
+            val originalDirPath = workspace.originalTextDirPath
+            assertNotNull("Expected originalTextDirPath to be populated", originalDirPath)
+            assertTrue(File(originalDirPath!!, "chapter_0001.xhtml").exists())
+            assertTrue(File(originalDirPath, "chapter_0002.xhtml").exists())
+
+            val manualBookmarks = listOf(
+                com.example.pipeline.ManualTocEntry(
+                    id = "bm_1",
+                    title = "Mục nhỏ đặc biệt",
+                    chapterIndex = 0,
+                    chapterFileName = "chapter_0001.xhtml",
+                    paragraphIndex = 2,
+                    anchorId = "manual_toc_1"
+                )
+            )
+
+            val resolved = TocGenerator.resolveEntriesForPackaging(
+                workspace = workspace,
+                regenerateToc = true,
+                manualEntries = manualBookmarks
+            )
+            assertEquals(
+                listOf("Chương 1", "Mục nhỏ đặc biệt", "Chương 2"),
+                resolved.map { it.title }
+            )
+            assertEquals(
+                listOf("Text/chapter_0001.xhtml", "Text/chapter_0001.xhtml#manual_toc_1", "Text/chapter_0002.xhtml"),
+                resolved.map { it.href }
+            )
+
+            val epub = EpubWorkspaceManager.packStandardEpub(
+                workspace = workspace,
+                regenerateToc = true,
+                manualTocEntries = manualBookmarks
+            )
+            ZipFile(epub).use { zip ->
+                val nav = zip.getInputStream(zip.getEntry("OEBPS/nav.xhtml")).bufferedReader().readText()
+                val ncx = zip.getInputStream(zip.getEntry("OEBPS/toc.ncx")).bufferedReader().readText()
+                assertTrue(nav.contains("href=\"Text/chapter_0001.xhtml#manual_toc_1\""))
+                assertTrue(nav.contains("Mục nhỏ đặc biệt"))
+                assertTrue(ncx.contains("src=\"Text/chapter_0001.xhtml#manual_toc_1\""))
+            }
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
 }

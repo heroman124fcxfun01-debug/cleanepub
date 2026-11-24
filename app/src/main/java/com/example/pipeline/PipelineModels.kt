@@ -99,7 +99,38 @@ data class PreparedWorkspace(
     val chapters: List<ChapterDescriptor>,
     val imageRelativePaths: List<String>,
     val metadata: EpubMetadata? = null,
-    val tocInspection: TocInspectionResult? = null
+    val tocInspection: TocInspectionResult? = null,
+    val originalTextDirPath: String? = null
+)
+
+enum class ManualEditorMode {
+    KEEP_CLEANED,
+    KEEP_ORIGINAL
+}
+
+data class ManualTocEntry(
+    val id: String,
+    val title: String,
+    val chapterIndex: Int,
+    val chapterFileName: String,
+    val paragraphIndex: Int,
+    val anchorId: String
+)
+
+data class ManualChapterContent(
+    val chapterIndex: Int,
+    val fileName: String,
+    val title: String,
+    val filePath: String,
+    val originalParagraphs: List<String>,
+    val currentParagraphs: List<String>
+)
+
+data class ManualSearchMatch(
+    val chapterIndex: Int,
+    val paragraphIndex: Int,
+    val startOffset: Int,
+    val endOffset: Int
 )
 
 sealed interface SaveResult {

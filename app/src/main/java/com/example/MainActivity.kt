@@ -28,6 +28,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.pipeline.FilePathResolver
 import com.example.pipeline.ProcessingPhase
@@ -35,6 +36,7 @@ import com.example.ui.MainViewModel
 import com.example.ui.components.EpubMetadataEditorDialog
 import com.example.ui.components.SettingsDialog
 import com.example.ui.screens.MainScreen
+import com.example.ui.screens.ManualEditorScreen
 import com.example.ui.screens.ProcessingScreen
 import com.example.ui.screens.ReviewScreen
 import com.example.ui.theme.EpubCleanAITheme
@@ -43,6 +45,7 @@ import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 const val ROUTE_HOME = "home"
 const val ROUTE_PROCESSING = "processing"
 const val ROUTE_REVIEW = "review"
+const val ROUTE_MANUAL_EDITOR = "manual_editor"
 
 class MainActivity : ComponentActivity() {
 
@@ -66,10 +69,12 @@ class MainActivity : ComponentActivity() {
         setContent {
             val viewModel: MainViewModel = viewModel()
             val isDarkMode by viewModel.isDarkMode.collectAsStateWithLifecycle()
+            var forceLightSystemBars by remember { mutableStateOf(false) }
 
-            LaunchedEffect(isDarkMode) {
+            LaunchedEffect(isDarkMode, forceLightSystemBars) {
+                val useDarkBars = isDarkMode && !forceLightSystemBars
                 enableEdgeToEdge(
-                    statusBarStyle = if (isDarkMode) {
+                    statusBarStyle = if (useDarkBars) {
                         SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
                     } else {
                         SystemBarStyle.light(
@@ -77,7 +82,7 @@ class MainActivity : ComponentActivity() {
                             android.graphics.Color.TRANSPARENT
                         )
                     },
-                    navigationBarStyle = if (isDarkMode) {
+                    navigationBarStyle = if (useDarkBars) {
                         SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
                     } else {
                         SystemBarStyle.light(
@@ -89,7 +94,10 @@ class MainActivity : ComponentActivity() {
             }
 
             EpubCleanAITheme(darkTheme = isDarkMode) {
-                EpubCleanNavHost(viewModel = viewModel)
+                EpubCleanNavHost(
+                    viewModel = viewModel,
+                    onForceLightBarsChanged = { forceLightSystemBars = it }
+                )
             }
         }
     }
@@ -97,7 +105,8 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun EpubCleanNavHost(
-    viewModel: MainViewModel
+    viewModel: MainViewModel,
+    onForceLightBarsChanged: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
     val navController = rememberNavController()
@@ -113,6 +122,12 @@ private fun EpubCleanNavHost(
     val isLoadingMetadata by viewModel.isLoadingMetadata.collectAsStateWithLifecycle()
     val pendingImport by viewModel.pendingImport.collectAsStateWithLifecycle()
     val customSaveFolderLabel by viewModel.customSaveFolderLabel.collectAsStateWithLifecycle()
+    val manualEditorState by viewModel.manualEditorState.collectAsStateWithLifecycle()
+
+    val currentBackStackEntry by navController.currentBackStackEntryAsState()
+    LaunchedEffect(currentBackStackEntry?.destination?.route) {
+        onForceLightBarsChanged(currentBackStackEntry?.destination?.route == ROUTE_MANUAL_EDITOR)
+    }
 
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showReviewMetadataDialog by remember { mutableStateOf(false) }
@@ -280,7 +295,51 @@ private fun EpubCleanNavHost(
                 onEditMetadataClick = { showReviewMetadataDialog = true },
                 onPickSaveFolderClick = { saveFolderPickerLauncher.launch(null) },
                 onSaveWithMode = { mode -> viewModel.saveProcessedBook(mode) },
+                onContinueEdit = { mode ->
+                    viewModel.openManualEditor(mode)
+                    navController.navigate(ROUTE_MANUAL_EDITOR) {
+                        launchSingleTop = true
+                    }
+                },
                 onOpenSavedFile = { absPath, uriStr -> openEpubExternally(absPath, uriStr) },
+                onFinishToHome = {
+                    viewModel.resetProcessingSession()
+                    navController.popBackStack(ROUTE_HOME, inclusive = false)
+                },
+                onDismissSaveError = { viewModel.dismissSaveState() }
+            )
+        }
+
+        composable(ROUTE_MANUAL_EDITOR) {
+            ManualEditorScreen(
+                editorState = manualEditorState,
+                snapshot = snapshot,
+                saveUiState = saveUiState,
+                customSaveFolderLabel = customSaveFolderLabel,
+                onSelectChapter = { chapIdx, paraIdx ->
+                    viewModel.selectManualChapter(chapIdx, paraIdx)
+                },
+                onToggleEditMode = { viewModel.toggleManualEditMode() },
+                onToggleCompareMode = { viewModel.toggleManualCompareMode() },
+                onAdjustFontSize = { delta -> viewModel.adjustManualFontSize(delta) },
+                onUpdateParagraph = { chapIdx, paraIdx, text ->
+                    viewModel.updateManualParagraph(chapIdx, paraIdx, text)
+                },
+                onUndoEdit = { viewModel.undoManualEdit() },
+                onAddManualToc = { chapIdx, paraIdx, title ->
+                    viewModel.addManualTocBookmark(chapIdx, paraIdx, title)
+                },
+                onRemoveManualToc = { id -> viewModel.removeManualTocBookmark(id) },
+                onSearchQueryChange = { q -> viewModel.updateManualSearchQuery(q) },
+                onReplaceQueryChange = { r -> viewModel.updateManualReplaceQuery(r) },
+                onNavigateSearchMatch = { step -> viewModel.navigateSearchMatch(step) },
+                onReplaceCurrentMatch = { viewModel.replaceCurrentSearchMatch() },
+                onReplaceAllMatches = { viewModel.replaceAllSearchMatches() },
+                onClearFeedback = { viewModel.clearManualFeedbackMessage() },
+                onPickSaveFolderClick = { saveFolderPickerLauncher.launch(null) },
+                onSaveWithMode = { mode -> viewModel.saveFromManualEditor(mode) },
+                onOpenSavedFile = { absPath, uriStr -> openEpubExternally(absPath, uriStr) },
+                onBackToReview = { navController.popBackStack() },
                 onFinishToHome = {
                     viewModel.resetProcessingSession()
                     navController.popBackStack(ROUTE_HOME, inclusive = false)

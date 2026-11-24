@@ -29,10 +29,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBackIos
 import androidx.compose.material.icons.automirrored.rounded.FormatListBulleted
 import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -63,11 +66,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.pipeline.DiffEntry
+import com.example.pipeline.ManualEditorMode
 import com.example.pipeline.ProcessingSnapshot
 import com.example.pipeline.SaveMode
 import com.example.pipeline.TocInspectionResult
 import com.example.ui.SaveUiState
 import com.example.ui.components.IosCard
+import com.example.ui.components.IosFloatingDialog
 import com.example.ui.components.IosHairlineDivider
 import com.example.ui.components.IosPrimaryButton
 import com.example.ui.components.IosSaveSuccessDialog
@@ -95,6 +100,7 @@ fun ReviewScreen(
     onEditMetadataClick: () -> Unit,
     onPickSaveFolderClick: () -> Unit,
     onSaveWithMode: (SaveMode) -> Unit,
+    onContinueEdit: (ManualEditorMode) -> Unit,
     onOpenSavedFile: (absolutePath: String?, uriString: String?) -> Unit,
     onFinishToHome: () -> Unit,
     onDismissSaveError: () -> Unit
@@ -104,6 +110,7 @@ fun ReviewScreen(
     }
 
     var showSaveDialog by remember { mutableStateOf(false) }
+    var showContinueEditDialog by remember { mutableStateOf(false) }
     var expandProperNouns by remember { mutableStateOf(false) }
 
     val acceptedCount = remember(snapshot.diffs) { snapshot.diffs.count { it.accepted } }
@@ -384,29 +391,31 @@ fun ReviewScreen(
                 item { Spacer(modifier = Modifier.height(10.dp)) }
             }
 
-            // Pinned Bottom Bar with 3D Pill Save CTA
+            // Pinned Bottom Bar: 2 horizontal 3D pill buttons (Lưu | Sửa tiếp)
             Surface(
                 color = MaterialTheme.colorScheme.surface,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.navigationBarsPadding()) {
                     IosHairlineDivider()
-                    Box(
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 10.dp)
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         val isSaving = saveUiState is SaveUiState.Saving
+
+                        // Left: Lưu (3D Glossy Blue Pill)
                         IosPrimaryButton(
-                            text = if (isSaving) {
-                                stringResource(R.string.review_saving)
-                            } else {
-                                stringResource(R.string.review_btn_save)
-                            },
+                            text = if (isSaving) "Đang lưu…" else "Lưu",
                             enabled = !isSaving,
-                            height = 48.dp,
+                            height = 46.dp,
                             onClick = { showSaveDialog = true },
-                            modifier = Modifier.testTag("save_epub_button"),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("save_epub_button"),
                             leadingIcon = {
                                 if (isSaving) {
                                     CircularProgressIndicator(
@@ -419,15 +428,36 @@ fun ReviewScreen(
                                         imageVector = Icons.Rounded.Save,
                                         contentDescription = null,
                                         tint = Color.White,
-                                        modifier = Modifier.size(18.dp)
+                                        modifier = Modifier.size(17.dp)
                                     )
                                 }
                             }
+                        )
+
+                        // Right: Sửa tiếp (3D Frosted/Elevated Pill)
+                        ContinueEdit3DPillButton(
+                            text = "Sửa tiếp",
+                            enabled = !isSaving && snapshot.workspace != null,
+                            onClick = { showContinueEditDialog = true },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("continue_edit_button")
                         )
                     }
                 }
             }
         }
+    }
+
+    // Floating iOS Confirmation Dialog when clicking "Sửa tiếp"
+    if (showContinueEditDialog) {
+        ContinueEditModeDialog(
+            onSelectMode = { mode ->
+                showContinueEditDialog = false
+                onContinueEdit(mode)
+            },
+            onDismiss = { showContinueEditDialog = false }
+        )
     }
 
     // Compact Floating Save Dialog with tappable folder picker + 2 clean single-line 3D buttons
@@ -458,6 +488,241 @@ fun ReviewScreen(
             },
             onDone = onFinishToHome
         )
+    }
+}
+
+@Composable
+private fun ContinueEdit3DPillButton(
+    text: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isDark = LocalIsDarkTheme.current
+    val pillShape = RoundedCornerShape(50)
+
+    val bgBrush = Brush.verticalGradient(
+        colors = if (isDark) {
+            listOf(Color(0xFF3A3A3E), Color(0xFF28282B))
+        } else {
+            listOf(Color(0xFFFFFFFF), Color(0xFFECEEF3))
+        }
+    )
+
+    val borderBrush = Brush.verticalGradient(
+        colors = if (isDark) {
+            listOf(Color.White.copy(alpha = 0.24f), Color.White.copy(alpha = 0.06f))
+        } else {
+            listOf(Color.White.copy(alpha = 0.96f), IosPillBorderBottomLight)
+        }
+    )
+
+    Box(
+        modifier = modifier
+            .height(46.dp)
+            .shadow(
+                elevation = if (enabled) 6.dp else 1.dp,
+                shape = pillShape,
+                ambientColor = Color.Black.copy(alpha = 0.10f),
+                spotColor = Color.Black.copy(alpha = 0.16f)
+            )
+            .clip(pillShape)
+            .background(brush = bgBrush)
+            .border(width = 1.dp, brush = borderBrush, shape = pillShape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 14.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.EditNote,
+                contentDescription = null,
+                tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = text,
+                fontSize = 15.sp,
+                lineHeight = 19.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+/**
+ * Floating iOS Rounded-Square Confirmation Dialog for "Sửa tiếp":
+ * 1. Giữ những gì đã sửa (cleaned paragraphs + original kept in parallel for comparison)
+ * 2. Giữ nguyên (original uncleaned paragraphs + original kept in parallel)
+ */
+@Composable
+private fun ContinueEditModeDialog(
+    onSelectMode: (ManualEditorMode) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val pillShape = RoundedCornerShape(50)
+
+    IosFloatingDialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "Chọn phiên bản để sửa tiếp",
+                fontSize = 17.sp,
+                lineHeight = 21.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = "Bản gốc luôn được lưu song song để bạn bật So sánh 2 nửa màn hình bất cứ lúc nào.",
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Option 1: Giữ những gì đã sửa
+            Surface(
+                shape = pillShape,
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(pillShape)
+                    .clickable { onSelectMode(ManualEditorMode.KEEP_CLEANED) }
+                    .testTag("continue_edit_keep_cleaned")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.AutoFixHigh,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Giữ những gì đã sửa",
+                            fontSize = 14.sp,
+                            lineHeight = 18.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "Mở nội dung đã được bộ lọc làm sạch",
+                            fontSize = 11.sp,
+                            lineHeight = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Option 2: Giữ nguyên
+            Surface(
+                shape = pillShape,
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(pillShape)
+                    .clickable { onSelectMode(ManualEditorMode.KEEP_ORIGINAL) }
+                    .testTag("continue_edit_keep_original")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.History,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Giữ nguyên",
+                            fontSize = 14.sp,
+                            lineHeight = 18.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "Mở nội dung gốc ban đầu chưa qua bộ lọc",
+                            fontSize = 11.sp,
+                            lineHeight = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("continue_edit_cancel")
+            ) {
+                Text(
+                    text = "Hủy",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }
 
