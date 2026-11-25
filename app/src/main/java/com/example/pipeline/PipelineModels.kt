@@ -62,6 +62,10 @@ data class RealtimeStats(
     val spellingFixes: Int = 0,
     val mergedParagraphs: Int = 0,
     val imagesOptimized: Int = 0,
+    val headersFootersRemoved: Int = 0,
+    val footnotesRemoved: Int = 0,
+    val unicodeSanitized: Int = 0,
+    val dialoguesFormatted: Int = 0,
     val totalChapters: Int = 0,
     val processedChapters: Int = 0
 )

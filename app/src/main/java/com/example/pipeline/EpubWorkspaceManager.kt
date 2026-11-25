@@ -326,6 +326,14 @@ object EpubWorkspaceManager {
             imageRelativePaths = workspace.imageRelativePaths
         )
 
+        // Mandatory Upgrade 1.4 strict XHTML validation & auto-repair for EVERY chapter before ZIP packing
+        // (covers both automatic scan exports and manual editor exports to eliminate XML Parsing Error)
+        EpubXmlValidator.validateWorkspaceXhtmlFiles(
+            stageDir = stageDir,
+            chapters = workspace.chapters,
+            language = bookLang
+        )
+
         // Write final ZIP archive with uncompressed `mimetype` strictly first
         val outEpub = File(workspace.tempOutputEpubPath)
         if (outEpub.exists()) outEpub.delete()

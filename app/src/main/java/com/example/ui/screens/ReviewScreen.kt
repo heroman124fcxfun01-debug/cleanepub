@@ -228,12 +228,29 @@ fun ReviewScreen(
                             SummaryStatItem("Chính tả", acceptedCount, MaterialTheme.colorScheme.secondary)
                         }
 
-                        if (snapshot.stats.mergedParagraphs > 0 || snapshot.stats.imagesOptimized > 0) {
+                        if (snapshot.stats.mergedParagraphs > 0 ||
+                            snapshot.stats.imagesOptimized > 0 ||
+                            snapshot.stats.footnotesRemoved > 0
+                        ) {
                             Spacer(modifier = Modifier.height(8.dp))
                             FlowRow(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
+                                if (snapshot.stats.footnotesRemoved > 0) {
+                                    Surface(
+                                        shape = RoundedCornerShape(50),
+                                        color = MaterialTheme.colorScheme.tertiaryContainer
+                                    ) {
+                                        Text(
+                                            text = "Đã dọn ${snapshot.stats.footnotesRemoved} chú thích rác",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.tertiary,
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                                        )
+                                    }
+                                }
                                 if (snapshot.stats.mergedParagraphs > 0) {
                                     Surface(
                                         shape = RoundedCornerShape(50),

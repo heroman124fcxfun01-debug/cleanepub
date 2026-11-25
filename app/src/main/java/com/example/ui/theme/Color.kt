@@ -2,12 +2,12 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// iOS 3D Soft-Embossed Light Palette
-val IosBackground = Color(0xFFEEF1F5)
+// iOS Minimalist / Apple Books Light Palette
+val IosBackground = Color(0xFFF2F2F7)
 val IosCardSurface = Color(0xFFFFFFFF)
-val IosSecondarySurface = Color(0xFFF4F6FA)
+val IosSecondarySurface = Color(0xFFE5E5EA)
 val IosPillTopLight = Color(0xFFFFFFFF)
-val IosPillBottomLight = Color(0xFFF4F6FA)
+val IosPillBottomLight = Color(0xFFF6F6FA)
 val IosPillBorderBottomLight = Color(0xFFD6DCE5)
 
 val IosBlue = Color(0xFF007AFF)
@@ -24,16 +24,16 @@ val IosOrangeSoft = Color(0xFFFFF4E5)
 val IosLabelPrimary = Color(0xFF1C1C1E)
 val IosLabelSecondary = Color(0xFF6E6E73)
 val IosLabelTertiary = Color(0xFF8E8E93)
-val IosSeparator = Color(0xFFE2E6EC)
-val IosHairline = Color(0xFFD8DEE6)
+val IosSeparator = Color(0xFFE5E5EA)
+val IosHairline = Color(0xFFD1D1D6)
 val IosScrim = Color(0x80000000)
 
-// iOS 3D Soft-Embossed Dark Palette
-val IosDarkBackground = Color(0xFF0F1115)
+// iOS Minimalist / Apple Books Dark Palette
+val IosDarkBackground = Color(0xFF000000)
 val IosDarkCardSurface = Color(0xFF1C1C1E)
-val IosDarkSecondarySurface = Color(0xFF26262A)
+val IosDarkSecondarySurface = Color(0xFF2C2C2E)
 val IosPillTopDark = Color(0xFF2C2C2E)
-val IosPillBottomDark = Color(0xFF1F1F22)
+val IosPillBottomDark = Color(0xFF1C1C1E)
 
 val IosDarkBlue = Color(0xFF0A84FF)
 val IosDarkBlueSoft = Color(0xFF152940)
@@ -45,5 +45,13 @@ val IosDarkOrange = Color(0xFFFF9F0A)
 val IosDarkOrangeSoft = Color(0xFF3A270C)
 val IosDarkLabelPrimary = Color(0xFFF5F5F7)
 val IosDarkLabelSecondary = Color(0xFF98989D)
-val IosDarkSeparator = Color(0xFF34343A)
-val IosDarkHairline = Color(0xFF2A2A30)
+val IosDarkSeparator = Color(0xFF2C2C2E)
+val IosDarkHairline = Color(0xFF3A3A3C)
+
+// Apple Books Minimalist Reader Paper Themes
+val ReaderBrownPaper = Color(0xFFE6D5B8)
+val ReaderBrownInk = Color(0xFF3B2F2F)
+val ReaderCreamPaper = Color(0xFFFAF3DD)
+val ReaderCreamInk = Color(0xFF2C2C2E)
+val ReaderWhitePaper = Color(0xFFFFFFFF)
+val ReaderWhiteInk = Color(0xFF1C1C1E)

@@ -1,6 +1,7 @@
 package com.example.pipeline
 
 import android.content.Context
+import com.example.data.CustomReplaceManager
 import com.example.data.ErrorMemoryManager
 import com.example.data.ParagraphDiffPair
 import kotlinx.coroutines.Dispatchers
@@ -146,7 +147,8 @@ class EpubCleanPipeline(
         )
 
         // ------------------------------------------------------------------
-        // BƯỚC 1: Áp dụng Thư viện Ghi nhớ Lỗi (ưu tiên trước) + Dọn quảng cáo rác & liên kết
+        // BƯỚC 1: Chuẩn hóa Unicode NFC & Dọn ký tự ẩn + Xóa số trang/Header-Footer lặp +
+        //         Thư viện Ghi nhớ Lỗi + Dọn quảng cáo rác & liên kết
         // ------------------------------------------------------------------
         stepStates[PipelineStep.STEP_1_CLEAN_JUNK] = StepState.RUNNING
         val errorMemoryManager = ErrorMemoryManager(context)
@@ -155,14 +157,101 @@ class EpubCleanPipeline(
         } else {
             emptyList()
         }
+        val customReplaceRules = CustomReplaceManager(context).getRules()
 
-        if (learnedRules.isNotEmpty() || options.cleanLinks) {
+        // Bước 1.0 (Upgrade 1.4): Chuẩn hóa toàn bộ văn bản về Unicode NFC & xóa ký tự ẩn/chết ngay từ đầu
+        emit(
+            PipelineStep.STEP_1_CLEAN_JUNK,
+            0.21f,
+            "Đang chuẩn hóa Unicode NFC & dọn ký tự ẩn ($totalChapters chương)…"
+        )
+        var totalUnicodeSanitized = 0
+        workspace.chapters.forEach { chapter ->
+            coroutineContext.ensureActive()
+            val file = File(chapter.filePath)
+            if (file.exists()) {
+                val doc = parseXhtml(file)
+                val unicodeRes = UnicodeSanitizer.sanitizeDocument(doc)
+                if (unicodeRes.modifiedNodes > 0) {
+                    totalUnicodeSanitized += unicodeRes.sanitizedChars
+                    saveXhtml(file, chapter.title, doc)
+                }
+            }
+        }
+        if (totalUnicodeSanitized > 0) {
+            stats = stats.copy(unicodeSanitized = stats.unicodeSanitized + totalUnicodeSanitized)
+        }
+
+        // Bước 1.1 (Upgrade 1.4): Quét thống kê Header/Footer lặp lại toàn sách (>= 3 lần) TRƯỚC ParagraphMerger
+        val shouldCleanHeaderFooter = options.cleanLinks || options.optimizeContent || options.fixWhitespace
+        val crossChapterRepeatedHeaders = if (shouldCleanHeaderFooter) {
+            emit(
+                PipelineStep.STEP_1_CLEAN_JUNK,
+                0.23f,
+                "Đang phát hiện số trang kẹt & tiêu đề đầu/cuối trang lặp lại…"
+            )
+            HeaderFooterCleaner.detectRepeatedHeadersAcrossChapters(workspace.chapters)
+        } else {
+            emptySet()
+        }
+
+        if (shouldCleanHeaderFooter || learnedRules.isNotEmpty() || customReplaceRules.isNotEmpty() || options.cleanLinks) {
             workspace.chapters.forEachIndexed { idx, chapter ->
                 coroutineContext.ensureActive()
                 val file = File(chapter.filePath)
                 val doc = parseXhtml(file)
                 var chapterJunkRemoved = 0
+                var chapterHeadersFootersRemoved = 0
+                var chapterFootnotesRemoved = 0
                 var chapterLearnedVocabFixes = 0
+
+                // Xóa số trang đứng độc lập & Header/Footer lặp lại trước khi nối đoạn
+                if (shouldCleanHeaderFooter) {
+                    val hfResult = HeaderFooterCleaner.cleanDocument(
+                        doc = doc,
+                        crossChapterRepeatedHeaders = crossChapterRepeatedHeaders
+                    )
+                    chapterHeadersFootersRemoved += hfResult.totalRemoved
+                    chapterJunkRemoved += hfResult.totalRemoved
+
+                    // Bước 1.2 (Upgrade 1.5): Dọn ký hiệu chú thích rác dính chữ ([1], [12], [a], (*), (**), [*])
+                    // chạy TRƯỚC nối đoạn (ParagraphMerger) và chuẩn hóa dấu câu (PunctuationFixer)
+                    val fnResult = FootnoteCleaner.cleanDocument(doc)
+                    chapterFootnotesRemoved += fnResult.removedCount
+                    chapterJunkRemoved += fnResult.removedCount
+                }
+
+                // Áp dụng Thư viện thay thế cá nhân (CustomReplaceManager) cho các lần quét sau (Upgrade 1.5)
+                if (customReplaceRules.isNotEmpty()) {
+                    val elements = TextCleaningEngine.extractEditableParagraphs(doc)
+                    elements.forEachIndexed { pIdx, el ->
+                        val beforeCustom = el.text()
+                        if (beforeCustom.isBlank()) return@forEachIndexed
+                        val (replaced, hits) = CustomReplaceManager.applyRulesToText(beforeCustom, customReplaceRules)
+                        if (hits > 0 && replaced != beforeCustom) {
+                            chapterLearnedVocabFixes += hits
+                            if (replaced.isBlank()) {
+                                el.remove()
+                            } else {
+                                el.text(replaced)
+                                if (diffs.size < MAX_PREVIEW_DIFFS) {
+                                    diffs.add(
+                                        DiffEntry(
+                                            id = "custom_${chapter.fileName}_${pIdx}_${diffs.size}",
+                                            chapterFileName = chapter.fileName,
+                                            chapterTitle = chapter.title,
+                                            paragraphIndex = pIdx,
+                                            beforeText = beforeCustom,
+                                            afterText = replaced,
+                                            reason = "Thư viện thay thế",
+                                            accepted = true
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Ưu tiên chạy qua Thư viện ghi nhớ lỗi trước (Upgrade 1.3)
                 if (learnedRules.isNotEmpty()) {
@@ -207,17 +296,19 @@ class EpubCleanPipeline(
 
                 stats = stats.copy(
                     junkLinksRemoved = stats.junkLinksRemoved + chapterJunkRemoved,
+                    headersFootersRemoved = stats.headersFootersRemoved + chapterHeadersFootersRemoved,
+                    footnotesRemoved = stats.footnotesRemoved + chapterFootnotesRemoved,
                     spellingFixes = stats.spellingFixes + chapterLearnedVocabFixes,
                     processedChapters = idx + 1
                 )
-                val frac = 0.20f + ((idx + 1).toFloat() / totalChapters) * 0.16f
+                val frac = 0.23f + ((idx + 1).toFloat() / totalChapters) * 0.13f
                 emit(
                     PipelineStep.STEP_1_CLEAN_JUNK,
                     frac,
-                    if (learnedRules.isNotEmpty()) {
-                        "Đang áp dụng Thư viện ghi nhớ lỗi & dọn rác (${idx + 1}/$totalChapters chương)…"
+                    if (learnedRules.isNotEmpty() || customReplaceRules.isNotEmpty()) {
+                        "Đang dọn chú thích, số trang, thư viện lỗi & rác (${idx + 1}/$totalChapters chương)…"
                     } else {
-                        "Đang dọn quảng cáo rác & liên kết thừa (${idx + 1}/$totalChapters chương)…"
+                        "Đang dọn chú thích dính chữ, số trang & rác (${idx + 1}/$totalChapters chương)…"
                     }
                 )
             }
@@ -265,7 +356,9 @@ class EpubCleanPipeline(
 
                 // Bước 3.0 (Upgrade 1.2): Tự động nối đoạn <p> bị ngắt dòng lỗi giữa câu
                 val mergeResult = ParagraphMerger.mergeBrokenParagraphs(doc)
-                var chapterWhitespaceFixes = mergeResult.mergedCount
+                // Bước 3.1 (Upgrade 1.4): Tách lời thoại dính chùm & chuẩn hóa gạch đầu dòng (— )
+                val dialogueResult = DialogueFormatter.formatDocument(doc)
+                var chapterWhitespaceFixes = mergeResult.mergedCount + dialogueResult.totalChanges
 
                 if (options.fixWhitespace) {
                     // Bước A: Gom khoảng trắng liên tiếp, xóa đoạn rỗng & chuẩn hóa dấu câu
@@ -317,13 +410,14 @@ class EpubCleanPipeline(
 
                 stats = stats.copy(
                     whitespaceFixes = stats.whitespaceFixes + chapterWhitespaceFixes,
-                    mergedParagraphs = stats.mergedParagraphs + mergeResult.mergedCount
+                    mergedParagraphs = stats.mergedParagraphs + mergeResult.mergedCount,
+                    dialoguesFormatted = stats.dialoguesFormatted + dialogueResult.totalChanges
                 )
                 val frac = 0.50f + ((idx + 1).toFloat() / totalChapters) * 0.14f
                 emit(
                     PipelineStep.STEP_3_NORMALIZE_WHITESPACE,
                     frac,
-                    "Đang nối đoạn lỗi & sửa khoảng trắng (${idx + 1}/$totalChapters)…"
+                    "Đang nối đoạn, tách lời thoại & sửa khoảng trắng (${idx + 1}/$totalChapters)…"
                 )
             }
         } else {
@@ -612,7 +706,7 @@ class EpubCleanPipeline(
             if (file.exists() && editableElements.size == newParagraphs.size) {
                 // Fast in-place update: preserves exact tag hierarchy (h1/h2/h3/p) and surrounding images
                 editableElements.forEachIndexed { pIdx, el ->
-                    val updatedText = newParagraphs[pIdx]
+                    val updatedText = UnicodeSanitizer.sanitizeText(newParagraphs[pIdx]).cleanedText
                     el.text(updatedText)
                     val anchor = chapterAnchors[pIdx]
                     if (anchor != null) {
@@ -625,7 +719,7 @@ class EpubCleanPipeline(
                 val body = doc.body()
                 body.empty()
                 newParagraphs.forEachIndexed { pIdx, text ->
-                    val trimmed = text.trim()
+                    val trimmed = UnicodeSanitizer.sanitizeText(text).cleanedText.trim()
                     if (trimmed.isNotEmpty()) {
                         val tag = if (pIdx == 0 && trimmed.length <= 120) "h2" else "p"
                         val el = body.appendElement(tag).text(trimmed)

@@ -1044,7 +1044,7 @@ private fun CompactAppInfoCard() {
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = "EpubCleanAI v1.3 • Từ điển Việt-Anh 100% Offline",
+                    text = "EpubCleanAI — Bản nâng cấp 1.5 (Offline)",
                     fontSize = 9.sp,
                     lineHeight = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

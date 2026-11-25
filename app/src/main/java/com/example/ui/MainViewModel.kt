@@ -935,6 +935,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    /**
+     * Upgrade 1.5: Creates and inserts a brand-new `.xhtml` chapter from the Manual Editor TOC
+     * panel, updates the TOC automatically, and jumps straight into the new chapter for writing.
+     */
+    fun addNewChapterInManualEditor(rawTitle: String) {
+        val cur = _manualEditorState.value
+        val nextIndex = cur.chapters.size
+        val cleanTitle = rawTitle.trim().take(120).ifBlank { "Chương ${nextIndex + 1}" }
+
+        pushUndoSnapshot(cur.chapters)
+        lastUndoChapterIdx = -1
+        lastUndoParaIdx = -1
+
+        val newFileName = "chapter_new_${System.currentTimeMillis()}_${nextIndex + 1}.xhtml"
+        val stageDirPath = processingSnapshot.value.workspace?.stageDirPath
+        val newFilePath = if (!stageDirPath.isNullOrBlank()) {
+            File(File(stageDirPath, "OEBPS/Text"), newFileName).absolutePath
+        } else {
+            ""
+        }
+
+        val initialParagraphs = listOf(cleanTitle, "")
+        val newChapter = ManualChapterContent(
+            chapterIndex = nextIndex,
+            fileName = newFileName,
+            title = cleanTitle,
+            filePath = newFilePath,
+            originalParagraphs = initialParagraphs,
+            currentParagraphs = initialParagraphs
+        )
+        val updatedChapters = cur.chapters + newChapter
+        val updatedEditableToc = TocGenerator.addNewChapterEntry(
+            entries = cur.editableTocItems,
+            newChapterIndex = nextIndex,
+            newChapterFileName = newFileName,
+            newChapterTitle = cleanTitle
+        )
+
+        _manualEditorState.value = cur.copy(
+            chapters = updatedChapters,
+            currentChapterIndex = nextIndex,
+            activeParagraphIndex = 1,
+            scrollTargetParagraphIndex = 0,
+            scrollRequestId = cur.scrollRequestId + 1L,
+            isEditMode = true,
+            editableTocItems = updatedEditableToc,
+            canUndo = manualUndoStack.isNotEmpty(),
+            manualEditCount = cur.manualEditCount + 1,
+            feedbackMessage = "Đã thêm chương mới: \"$cleanTitle\""
+        )
+    }
+
     fun addManualTocBookmark(chapterIndex: Int, paragraphIndex: Int, rawTitle: String) {
         val cur = _manualEditorState.value
         val chapter = cur.chapters.getOrNull(chapterIndex) ?: return
@@ -1158,12 +1210,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * and upserts the book into "Tất cả các file" with status `DRAFT` ("Bản nháp") at the top
      * without creating duplicates.
      */
-    fun saveCurrentManualDraft(showFeedback: Boolean = true) {
+    fun saveCurrentManualDraft(
+        showFeedback: Boolean = true,
+        onComplete: (() -> Unit)? = null
+    ) {
         val snapshot = processingSnapshot.value
-        val source = snapshot.sourceFile ?: return
-        val workspace = snapshot.workspace ?: return
+        val source = snapshot.sourceFile
+        val workspace = snapshot.workspace
         val editorState = _manualEditorState.value
-        if (editorState.chapters.isEmpty()) return
+        if (source == null || workspace == null || editorState.chapters.isEmpty()) {
+            onComplete?.invoke()
+            return
+        }
 
         val fileId = getOrCreateActiveFileId()
 
@@ -1223,7 +1281,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (updatedHistory != null) {
                 _recentFiles.value = updatedHistory
-                if (showFeedback) {
+                if (onComplete != null) {
+                    _statusToastMessage.value = "Đã lưu bản nháp và về màn hình chính"
+                } else if (showFeedback) {
                     _manualEditorState.value = _manualEditorState.value.copy(
                         feedbackMessage = "Đã lưu bản nháp"
                     )
@@ -1233,6 +1293,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     feedbackMessage = "Không thể lưu nháp lúc này"
                 )
             }
+            onComplete?.invoke()
         }
     }
 

@@ -299,6 +299,7 @@ fun ManualTocOverlayDialog(
     currentChapterIndex: Int,
     totalChapters: Int,
     onSelectTarget: (chapterIndex: Int, paragraphIndex: Int) -> Unit,
+    onAddNewChapter: (title: String) -> Unit,
     onRenameItem: (entryId: String, newTitle: String) -> Unit,
     onDeleteItem: (entryId: String) -> Unit,
     onMergeChapterWithNext: (chapterIndex: Int) -> Unit,
@@ -308,6 +309,7 @@ fun ManualTocOverlayDialog(
 
     var isTocEditMode by remember { mutableStateOf(false) }
     var renamingItem by remember { mutableStateOf<EditableTocItem?>(null) }
+    var showAddChapterDialog by remember { mutableStateOf(false) }
 
     IosFloatingDialog(onDismissRequest = onDismiss) {
         Column(
@@ -394,7 +396,41 @@ fun ManualTocOverlayDialog(
                 )
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Upgrade 1.5: Compact "+ Thêm chương" pill button at the top of the TOC panel
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Start,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = SepiaAccentSoft,
+                    border = BorderStroke(0.9.dp, SepiaAccent.copy(alpha = 0.45f)),
+                    modifier = Modifier
+                        .height(30.dp)
+                        .clip(RoundedCornerShape(50))
+                        .clickable { showAddChapterDialog = true }
+                        .testTag("toc_add_new_chapter_button")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "+ Thêm chương",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = SepiaAccent,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
             HorizontalDivider(thickness = 0.8.dp, color = SepiaBorder)
             Spacer(modifier = Modifier.height(8.dp))
 
@@ -544,6 +580,117 @@ fun ManualTocOverlayDialog(
             },
             onDismiss = { renamingItem = null }
         )
+    }
+
+    // Upgrade 1.5: Compact Add New Chapter dialog triggered from "+ Thêm chương" pill
+    if (showAddChapterDialog) {
+        AddNewChapterDialog(
+            suggestedTitle = "Chương ${totalChapters + 1}",
+            onConfirm = { newTitle ->
+                showAddChapterDialog = false
+                onAddNewChapter(newTitle)
+                onDismiss()
+            },
+            onDismiss = { showAddChapterDialog = false }
+        )
+    }
+}
+
+@Composable
+private fun AddNewChapterDialog(
+    suggestedTitle: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var titleText by remember(suggestedTitle) { mutableStateOf(suggestedTitle) }
+
+    IosFloatingDialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(SepiaBg)
+                .padding(18.dp)
+        ) {
+            Text(
+                text = "Thêm chương mới",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = SepiaInk,
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Nhập tên để tạo và chèn thêm một chương .xhtml mới vào sách.",
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+                color = SepiaInkMuted
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(SepiaCard)
+                    .border(1.dp, SepiaBorder, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            ) {
+                if (titleText.isEmpty()) {
+                    Text(
+                        text = "Ví dụ: Chương ngoại truyện…",
+                        fontSize = 13.sp,
+                        color = SepiaInkMuted.copy(alpha = 0.7f)
+                    )
+                }
+                BasicTextField(
+                    value = titleText,
+                    onValueChange = { titleText = it },
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = SepiaInk
+                    ),
+                    cursorBrush = SolidColor(SepiaAccent),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("toc_add_chapter_input")
+                )
+            }
+            Spacer(modifier = Modifier.height(14.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onDismiss) {
+                    Text(
+                        text = "Hủy",
+                        fontSize = 13.sp,
+                        color = SepiaInkMuted,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (titleText.isNotBlank()) SepiaAccent else SepiaBorder,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable(enabled = titleText.isNotBlank()) {
+                            onConfirm(titleText.trim())
+                        }
+                        .testTag("toc_add_chapter_confirm")
+                ) {
+                    Text(
+                        text = "Thêm chương",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
+            }
+        }
     }
 }
 

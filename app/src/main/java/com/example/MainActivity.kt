@@ -33,9 +33,12 @@ import androidx.navigation.compose.rememberNavController
 import com.example.data.ErrorMemoryManager
 import com.example.pipeline.FilePathResolver
 import com.example.pipeline.ProcessingPhase
+import com.example.ui.BookLibraryViewModel
 import com.example.ui.MainViewModel
 import com.example.ui.components.EpubMetadataEditorDialog
 import com.example.ui.components.SettingsDialog
+import com.example.ui.screens.BookLibraryScreen
+import com.example.ui.screens.BookReaderScreen
 import com.example.ui.screens.MainScreen
 import com.example.ui.screens.ManualEditorScreen
 import com.example.ui.screens.ProcessingScreen
@@ -44,6 +47,8 @@ import com.example.ui.theme.EpubCleanAITheme
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 
 const val ROUTE_HOME = "home"
+const val ROUTE_BOOK_LIBRARY = "book_library"
+const val ROUTE_BOOK_READER = "book_reader"
 const val ROUTE_PROCESSING = "processing"
 const val ROUTE_REVIEW = "review"
 const val ROUTE_MANUAL_EDITOR = "manual_editor"
@@ -69,6 +74,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val viewModel: MainViewModel = viewModel()
+            val libraryViewModel: BookLibraryViewModel = viewModel()
             val isDarkMode by viewModel.isDarkMode.collectAsStateWithLifecycle()
             var forceLightSystemBars by remember { mutableStateOf(false) }
 
@@ -97,6 +103,7 @@ class MainActivity : ComponentActivity() {
             EpubCleanAITheme(darkTheme = isDarkMode) {
                 EpubCleanNavHost(
                     viewModel = viewModel,
+                    libraryViewModel = libraryViewModel,
                     onForceLightBarsChanged = { forceLightSystemBars = it }
                 )
             }
@@ -107,6 +114,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun EpubCleanNavHost(
     viewModel: MainViewModel,
+    libraryViewModel: BookLibraryViewModel,
     onForceLightBarsChanged: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
@@ -131,6 +139,13 @@ private fun EpubCleanNavHost(
     val customSaveFolderLabel by viewModel.customSaveFolderLabel.collectAsStateWithLifecycle()
     val manualEditorState by viewModel.manualEditorState.collectAsStateWithLifecycle()
 
+    val libraryBooks by libraryViewModel.books.collectAsStateWithLifecycle()
+    val libraryCollections by libraryViewModel.collections.collectAsStateWithLifecycle()
+    val isImportingLibraryBook by libraryViewModel.isImporting.collectAsStateWithLifecycle()
+    val libraryToastMessage by libraryViewModel.statusMessage.collectAsStateWithLifecycle()
+    val bookReaderState by libraryViewModel.readerState.collectAsStateWithLifecycle()
+    val bookReaderPrefs by libraryViewModel.readerPrefs.collectAsStateWithLifecycle()
+
     LaunchedEffect(statusToastMessage) {
         val msg = statusToastMessage
         if (!msg.isNullOrBlank()) {
@@ -139,9 +154,18 @@ private fun EpubCleanNavHost(
         }
     }
 
+    LaunchedEffect(libraryToastMessage) {
+        val msg = libraryToastMessage
+        if (!msg.isNullOrBlank()) {
+            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            libraryViewModel.clearStatusMessage()
+        }
+    }
+
     val currentBackStackEntry by navController.currentBackStackEntryAsState()
     LaunchedEffect(currentBackStackEntry?.destination?.route) {
-        onForceLightBarsChanged(currentBackStackEntry?.destination?.route == ROUTE_MANUAL_EDITOR)
+        val route = currentBackStackEntry?.destination?.route
+        onForceLightBarsChanged(route == ROUTE_MANUAL_EDITOR || route == ROUTE_BOOK_READER)
     }
 
     var showSettingsDialog by remember { mutableStateOf(false) }
@@ -210,6 +234,16 @@ private fun EpubCleanNavHost(
         }
     )
 
+    // Direct offline import picker for Book Library (.epub / .pdf)
+    val libraryImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri ->
+            if (uri != null) {
+                libraryViewModel.importBookFromUri(uri)
+            }
+        }
+    )
+
     // System file picker for .epub and .pdf -> opens Metadata & Cover Editor before scanning
     val documentPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
@@ -274,11 +308,18 @@ private fun EpubCleanNavHost(
         composable(ROUTE_HOME) {
             MainScreen(
                 recentFiles = recentFiles,
+                libraryBookCount = libraryBooks.size,
                 isOpeningEditor = isResumingDraft,
                 hasAllFilesAccess = hasAllFilesAccess,
                 cleaningOptions = cleaningOptions,
                 isLoadingMetadata = isLoadingMetadata,
                 errorBanner = homeError,
+                onOpenLibraryClick = {
+                    libraryViewModel.refreshLibrary()
+                    navController.navigate(ROUTE_BOOK_LIBRARY) {
+                        launchSingleTop = true
+                    }
+                },
                 onSelectFileClick = {
                     documentPickerLauncher.launch(
                         arrayOf(
@@ -311,6 +352,63 @@ private fun EpubCleanNavHost(
                 onDeleteHistoryFile = { id -> viewModel.deleteHistoryItem(id) },
                 onClearAllHistory = { viewModel.clearAllHistory() },
                 onDismissError = { viewModel.clearHomeError() }
+            )
+        }
+
+        composable(ROUTE_BOOK_LIBRARY) {
+            BookLibraryScreen(
+                books = libraryBooks,
+                collections = libraryCollections,
+                isImporting = isImportingLibraryBook,
+                onBackClick = { navController.popBackStack() },
+                onImportBookClick = {
+                    libraryImportLauncher.launch(
+                        arrayOf(
+                            "application/epub+zip",
+                            "application/pdf",
+                            "application/octet-stream",
+                            "*/*"
+                        )
+                    )
+                },
+                onOpenBook = { book ->
+                    libraryViewModel.openBookForReading(book) {
+                        navController.navigate(ROUTE_BOOK_READER) {
+                            launchSingleTop = true
+                        }
+                    }
+                },
+                onDeleteBook = { bookId -> libraryViewModel.deleteBook(bookId) },
+                onCreateCollection = { name -> libraryViewModel.createCollection(name) },
+                onSetCollectionBooks = { colId, bookIds ->
+                    libraryViewModel.setCollectionBooks(colId, bookIds)
+                },
+                onAddBookToCollection = { colId, bookId ->
+                    libraryViewModel.addBookToCollection(colId, bookId)
+                },
+                onDeleteCollection = { colId -> libraryViewModel.deleteCollection(colId) }
+            )
+        }
+
+        composable(ROUTE_BOOK_READER) {
+            BookReaderScreen(
+                readerState = bookReaderState,
+                readerPrefs = bookReaderPrefs,
+                onBackClick = { chapIdx, paraIdx ->
+                    libraryViewModel.saveReadingProgress(chapIdx, paraIdx)
+                    navController.popBackStack()
+                },
+                onSelectChapter = { chapIdx, startPara, continueAudio ->
+                    libraryViewModel.selectChapter(chapIdx, startPara, continueAudio)
+                },
+                onConsumeAutoContinueAudio = { libraryViewModel.consumeAutoContinueAudioFlag() },
+                onSaveProgress = { chapIdx, paraIdx ->
+                    libraryViewModel.saveReadingProgress(chapIdx, paraIdx)
+                },
+                onAdjustFontSize = { delta -> libraryViewModel.adjustReaderFontSize(delta) },
+                onSelectPaperTheme = { theme -> libraryViewModel.selectReaderPaperTheme(theme) },
+                onCycleSpeechRate = { libraryViewModel.cycleSpeechRate() },
+                onCycleVoiceProfile = { libraryViewModel.cycleVoiceProfile() }
             )
         }
 
@@ -382,6 +480,7 @@ private fun EpubCleanNavHost(
                 onAddManualToc = { chapIdx, paraIdx, title ->
                     viewModel.addManualTocBookmark(chapIdx, paraIdx, title)
                 },
+                onAddNewChapter = { title -> viewModel.addNewChapterInManualEditor(title) },
                 onRenameTocItem = { id, newTitle -> viewModel.renameTocItem(id, newTitle) },
                 onDeleteTocItem = { id -> viewModel.deleteTocItem(id) },
                 onSplitChapterAtActiveParagraph = { viewModel.splitCurrentChapterAtActiveParagraph() },
@@ -401,6 +500,12 @@ private fun EpubCleanNavHost(
                 onSaveWithMode = { mode -> viewModel.saveFromManualEditor(mode) },
                 onOpenSavedFile = { absPath, uriStr -> openEpubExternally(absPath, uriStr) },
                 onBackToReview = { navController.popBackStack() },
+                onSaveDraftAndExitToHome = {
+                    viewModel.saveCurrentManualDraft(showFeedback = false) {
+                        viewModel.resetProcessingSession()
+                        navController.popBackStack(ROUTE_HOME, inclusive = false)
+                    }
+                },
                 onFinishToHome = {
                     viewModel.resetProcessingSession()
                     navController.popBackStack(ROUTE_HOME, inclusive = false)

@@ -1198,4 +1198,303 @@ class EpubCleanPipelineUnitTest {
         // No match
         assertTrue(com.example.data.CustomReplaceManager.filterRules(rules, "không tồn tại").isEmpty())
     }
+
+    @Test
+    fun unicodeSanitizer_normalizesNfcAndStripsInvisibleDeadChars() {
+        // NFD decomposed Vietnamese ("tiếng Việt") + zero-width/BOM/soft-hyphen/font-box/control chars
+        val nfdInput = "\uFEFFtie\u0302\u0301ng\u200B Vie\u0323\u0302t\u00AD\u200C\u200D\uFFFD □ ■\u0007 chuẩn"
+        val res = com.example.pipeline.UnicodeSanitizer.sanitizeText(nfdInput)
+
+        assertTrue(java.text.Normalizer.isNormalized(res.cleanedText, java.text.Normalizer.Form.NFC))
+        assertEquals("tiếng Việt   chuẩn", res.cleanedText)
+        assertFalse(res.cleanedText.contains('\u200B'))
+        assertFalse(res.cleanedText.contains('\uFEFF'))
+        assertFalse(res.cleanedText.contains('\u00AD'))
+        assertFalse(res.cleanedText.contains('\uFFFD'))
+        assertFalse(res.cleanedText.contains('□'))
+        assertFalse(res.cleanedText.contains('■'))
+        assertTrue(res.sanitizedCount >= 7)
+
+        // Document-level sanitization preserves tags & images while normalizing all text nodes
+        val doc = Jsoup.parse("<html><body><p>tie\u0302\u0301ng\u200B Vie\u0323\u0302t</p><p><img src=\"../Images/a.jpg\" alt=\"ok\" /></p></body></html>")
+        val docRes = com.example.pipeline.UnicodeSanitizer.sanitizeDocument(doc)
+        assertEquals(1, docRes.modifiedNodes)
+        assertEquals("tiếng Việt", doc.selectFirst("p")?.text())
+        assertEquals(1, doc.select("img").size)
+    }
+
+    @Test
+    fun headerFooterCleaner_removesStandalonePageNumbersAndRepeatedHeadersBeforeParagraphMerge() {
+        // Verify standalone page number detector
+        val pageNumbers = listOf("142", "- 85 -", "[ 85 ]", "Trang 142", "Page 142", "142 / 300")
+        for (pn in pageNumbers) {
+            assertTrue("Expected page number match: $pn", com.example.pipeline.HeaderFooterCleaner.isStandalonePageNumber(pn))
+        }
+        assertFalse(com.example.pipeline.HeaderFooterCleaner.isStandalonePageNumber("Năm 1998 trời rất đẹp."))
+        assertFalse(com.example.pipeline.HeaderFooterCleaner.isStandalonePageNumber("Chương 12"))
+
+        // Full chapter document with stuck page numbers, repeated running PDF header (>= 3x),
+        // protected heading, protected dialogue, and a sentence split across a page number!
+        val html = """
+            <html><body>
+                <h1>Chương 1: Khởi đầu</h1>
+                <p>TÂM LÝ HỌC ĐÁM ĐÔNG</p>
+                <p>Anh bước ra khỏi căn nhà nhỏ bên sườn đồi</p>
+                <p>- 85 -</p>
+                <p>TÂM LÝ HỌC ĐÁM ĐÔNG</p>
+                <p>và nhìn về phía chân trời xa xăm.</p>
+                <p>142</p>
+                <p>[ 85 ]</p>
+                <p>Trang 142</p>
+                <p>Page 142</p>
+                <p>142 / 300</p>
+                <p>TÂM LÝ HỌC ĐÁM ĐÔNG</p>
+                <p>— Tôi biết rồi.</p>
+                <p>— Tôi biết rồi.</p>
+                <p>— Tôi biết rồi.</p>
+            </body></html>
+        """.trimIndent()
+
+        val doc = Jsoup.parse(html)
+        val hfResult = com.example.pipeline.HeaderFooterCleaner.cleanDocument(doc)
+        assertEquals(6, hfResult.standalonePageNumbersRemoved)
+        assertEquals(3, hfResult.repeatedHeadersFootersRemoved)
+
+        // Running ParagraphMerger AFTER HeaderFooterCleaner now cleanly merges the sentence split by "- 85 -" & header!
+        val mergeResult = com.example.pipeline.ParagraphMerger.mergeBrokenParagraphs(doc)
+        assertEquals(1, mergeResult.mergedCount)
+        assertEquals("Chương 1: Khởi đầu", doc.selectFirst("h1")?.text())
+        assertEquals(
+            listOf(
+                "Anh bước ra khỏi căn nhà nhỏ bên sườn đồi và nhìn về phía chân trời xa xăm.",
+                "— Tôi biết rồi.",
+                "— Tôi biết rồi.",
+                "— Tôi biết rồi."
+            ),
+            doc.select("p").map { it.text() }
+        )
+    }
+
+    @Test
+    fun dialogueFormatter_splitsStuckDialogueAndNormalizesLeadingDashes() {
+        val html = """
+            <html><body>
+                <h2>Chương 3</h2>
+                <p>- "Cậu đi đâu đấy?" - "Tôi ra ngoài một lát." – "Nhớ về sớm nhé!"</p>
+                <p>-- Anh nói thật chứ?</p>
+                <p>_ Đương nhiên là thật rồi.</p>
+                <p>• Chúng ta cùng đi thôi.</p>
+                <p>– Không vấn đề gì.</p>
+                <p>—Chuẩn bị xong chưa?</p>
+                <p>-5 độ C là nhiệt độ thấp nhất trong năm, tài liệu Việt-Anh đã ghi rõ.</p>
+            </body></html>
+        """.trimIndent()
+
+        val doc = Jsoup.parse(html)
+        val res = com.example.pipeline.DialogueFormatter.formatDocument(doc)
+
+        assertEquals(2, res.splitCount)
+        assertTrue("Expected messy dashes normalized", res.normalizedDashCount >= 7)
+        assertEquals("Chương 3", doc.selectFirst("h2")?.text())
+        assertEquals(
+            listOf(
+                "— \"Cậu đi đâu đấy?\"",
+                "— \"Tôi ra ngoài một lát.\"",
+                "— \"Nhớ về sớm nhé!\"",
+                "— Anh nói thật chứ?",
+                "— Đương nhiên là thật rồi.",
+                "— Chúng ta cùng đi thôi.",
+                "— Không vấn đề gì.",
+                "— Chuẩn bị xong chưa?",
+                "-5 độ C là nhiệt độ thấp nhất trong năm, tài liệu Việt-Anh đã ghi rõ."
+            ),
+            doc.select("p").map { it.text() }
+        )
+    }
+
+    @Test
+    fun epubXmlValidator_repairsBrokenTagsEscapesEntitiesAndProducesWellFormedXml() {
+        val brokenHtml = """
+            <html>
+            <head><title>Chương 1 & Khởi đầu <Mới></title></head>
+            <body>
+                <h1>Chương 1 & Khởi đầu</h1>
+                <p 123bad="x">A & B < C và dòng ngắt<br>tiếp theo<hr><img src="../Images/pic.jpg"></p>
+                <p><span></span></p>
+                <p>Đoạn văn chưa đóng thẻ
+            </body>
+            </html>
+        """.trimIndent()
+
+        val validated = com.example.pipeline.EpubXmlValidator.validateAndRepairXhtml(
+            rawXhtml = brokenHtml,
+            fallbackTitle = "Chương 1"
+        )
+        assertTrue("Repaired XHTML must pass strict XML parser", validated.isWellFormedXml)
+        assertTrue(com.example.pipeline.EpubXmlValidator.isWellFormedXml(validated.validatedXhtml))
+        assertTrue(validated.validatedXhtml.contains("<br />") || validated.validatedXhtml.contains("<br/>"))
+        assertTrue(validated.validatedXhtml.contains("<hr />") || validated.validatedXhtml.contains("<hr/>"))
+        assertTrue(validated.validatedXhtml.contains("&amp;"))
+        assertTrue(validated.validatedXhtml.contains("&lt;"))
+        assertFalse(validated.validatedXhtml.contains("123bad"))
+        assertFalse(validated.validatedXhtml.contains("<span></span>"))
+
+        // Also verify packStandardEpub runs mandatory validation on raw malformed chapter files
+        val tempRoot = java.nio.file.Files.createTempDirectory("epubclean_xml_val_").toFile()
+        try {
+            val textDir = File(tempRoot, "stage/OEBPS/Text").apply { mkdirs() }
+            val chapFile = File(textDir, "chapter_0001.xhtml").apply {
+                writeText(brokenHtml, Charsets.UTF_8)
+            }
+            val workspace = EpubWorkspaceManager.preparePdfWorkspace(
+                bookTitle = "Sách XML Chuẩn",
+                sessionDir = tempRoot,
+                chapters = listOf(
+                    ChapterDescriptor("chap_1", "chapter_0001.xhtml", "Chương 1", chapFile.absolutePath)
+                )
+            )
+            val epub = EpubWorkspaceManager.packStandardEpub(workspace)
+            ZipFile(epub).use { zip ->
+                val packedChapter = zip.getInputStream(zip.getEntry("OEBPS/Text/chapter_0001.xhtml"))
+                    .bufferedReader().readText()
+                assertTrue(
+                    "Packed chapter XHTML inside EPUB must be strictly well-formed XML",
+                    com.example.pipeline.EpubXmlValidator.isWellFormedXml(packedChapter)
+                )
+                assertFalse(packedChapter.contains("123bad"))
+            }
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun footnoteCleaner_stripsGluedFootnotesAndProtectsYearsNumbersAndAuthorNotes() {
+        val raw = "Nền kinh tế[14] đang phát triển.[3] Nhiều vấn đề(*) và giải pháp(**) được nêu[*][a] năm [2025] cùng năm[2026]. [Ghi chú của tác giả] không bị xóa và [1] mục đầu dòng giữ nguyên."
+        val res = com.example.pipeline.FootnoteCleaner.cleanText(raw)
+
+        assertEquals(6, res.removedCount)
+        assertEquals(
+            "Nền kinh tế đang phát triển. Nhiều vấn đề và giải pháp được nêu năm [2025] cùng năm[2026]. [Ghi chú của tác giả] không bị xóa và [1] mục đầu dòng giữ nguyên.",
+            res.cleanedText
+        )
+
+        // Document-level cleanup also strips <sup>[12]</sup> while preserving math m<sup>2</sup> and images
+        val doc = Jsoup.parse(
+            """
+            <html><body>
+                <p>Khái niệm kinh tế<sup>[12]</sup> diện tích 50m<sup>2</sup> phát triển.[3]</p>
+                <p><img src="../Images/a.jpg" alt="ok" /></p>
+            </body></html>
+            """.trimIndent()
+        )
+        val docRes = com.example.pipeline.FootnoteCleaner.cleanDocument(doc)
+        assertEquals(2, docRes.removedCount)
+        assertEquals("Khái niệm kinh tế diện tích 50m2 phát triển.", doc.selectFirst("p")?.text())
+        assertEquals(1, doc.select("img").size)
+    }
+
+    @Test
+    fun customReplaceManager_extractsQuickRuleSuggestionForShortManualEdits() {
+        // Single-word Vietnamese tone fix expands cleanly to the full word ("muồn" -> "muốn")
+        val toneFix = com.example.data.CustomReplaceManager.extractQuickRuleSuggestion(
+            beforeParagraph = "Cô ấy muồn đi dạo vào buổi chiều.",
+            afterParagraph = "Cô ấy muốn đi dạo vào buổi chiều."
+        )
+        assertEquals("muồn" to "muốn", toneFix)
+
+        // Multi-word (1..3 words) proper noun expansion ("Lý Tiêu" -> "Lý Tiêu Dao")
+        val nameFix = com.example.data.CustomReplaceManager.extractQuickRuleSuggestion(
+            beforeParagraph = "Nhân vật Lý Tiêu bước vào đại điện.",
+            afterParagraph = "Nhân vật Lý Tiêu Dao bước vào đại điện."
+        )
+        assertEquals("Lý Tiêu" to "Lý Tiêu Dao", nameFix)
+
+        // Already saved rule is NOT re-suggested
+        val duplicate = com.example.data.CustomReplaceManager.extractQuickRuleSuggestion(
+            beforeParagraph = "Cô ấy muồn đi dạo.",
+            afterParagraph = "Cô ấy muốn đi dạo.",
+            existingRules = listOf(com.example.data.CustomReplaceRule(findText = "muồn", replaceText = "muốn"))
+        )
+        assertEquals(null, duplicate)
+
+        // Rewriting a long sentence (> 3 words) does NOT trigger a quick rule chip
+        val longRewrite = com.example.data.CustomReplaceManager.extractQuickRuleSuggestion(
+            beforeParagraph = "Hôm nay trời rất trong xanh và gió thổi mát rượi.",
+            afterParagraph = "Ngày mai trời có thể sẽ mưa to suốt cả buổi sáng."
+        )
+        assertEquals(null, longRewrite)
+    }
+
+    @Test
+    fun tocGenerator_addsNewChapterEntryToEditableToc() {
+        val initial = listOf(
+            com.example.pipeline.EditableTocItem(
+                id = "toc_1",
+                title = "Chương 1",
+                href = "Text/chapter_0001.xhtml",
+                chapterIndex = 0,
+                chapterFileName = "chapter_0001.xhtml"
+            )
+        )
+        val updated = TocGenerator.addNewChapterEntry(
+            entries = initial,
+            newChapterIndex = 1,
+            newChapterFileName = "chapter_new_2.xhtml",
+            newChapterTitle = "Chương 2: Ngoại truyện"
+        )
+        assertEquals(2, updated.size)
+        assertEquals("Chương 2: Ngoại truyện", updated[1].title)
+        assertEquals("Text/chapter_new_2.xhtml", updated[1].href)
+        assertEquals(1, updated[1].chapterIndex)
+        assertFalse(updated[1].isManualBookmark)
+    }
+
+    @Test
+    fun libraryManager_sortsBooksCyclesSpeedAndVoicesAndExtractsXhtmlParagraphs() {
+        val tempRoot = java.nio.file.Files.createTempDirectory("epub_lib_pure_").toFile()
+        try {
+            val chapFile = File(tempRoot, "chapter_0001.xhtml").apply {
+                writeText(
+                    EpubWorkspaceManager.buildValidXhtmlDocument(
+                        "Chương 1: Khởi đầu",
+                        "<h1>Chương 1: Khởi đầu</h1><p>Đoạn mở đầu của cuốn sách.</p><p>Đoạn thứ hai rất hay.</p>"
+                    ),
+                    Charsets.UTF_8
+                )
+            }
+            val paras = com.example.data.LibraryManager.extractParagraphsFromXhtmlFile(chapFile)
+            assertEquals(3, paras.size)
+            assertEquals("Đoạn mở đầu của cuốn sách.", paras[1])
+
+            val b1 = com.example.data.LibraryBook(
+                id = "1", title = "A", author = "X", sourceType = "EPUB",
+                coverPath = null, chapterCount = 2, addedAtMillis = 1000L, lastOpenedAtMillis = 5000L
+            )
+            val b2 = com.example.data.LibraryBook(
+                id = "2", title = "B", author = "Y", sourceType = "PDF",
+                coverPath = null, chapterCount = 3, addedAtMillis = 2000L, lastOpenedAtMillis = 0L
+            )
+            val b3 = com.example.data.LibraryBook(
+                id = "3", title = "C", author = "Z", sourceType = "EPUB",
+                coverPath = null, chapterCount = 1, addedAtMillis = 1500L, lastOpenedAtMillis = 9000L
+            )
+
+            assertEquals(listOf("2", "3", "1"), com.example.data.LibraryManager.sortAllBooks(listOf(b1, b2, b3)).map { it.id })
+            assertEquals(listOf("3", "1"), com.example.data.LibraryManager.sortRecentlyRead(listOf(b1, b2, b3)).map { it.id })
+
+            assertEquals(1.0f, com.example.data.LibraryManager.nextSpeechRate(0.8f), 0.001f)
+            assertEquals(1.2f, com.example.data.LibraryManager.nextSpeechRate(1.0f), 0.001f)
+            assertEquals(1.5f, com.example.data.LibraryManager.nextSpeechRate(1.2f), 0.001f)
+            assertEquals(1.8f, com.example.data.LibraryManager.nextSpeechRate(1.5f), 0.001f)
+            assertEquals(0.8f, com.example.data.LibraryManager.nextSpeechRate(1.8f), 0.001f)
+            assertEquals("1.5x", com.example.data.LibraryManager.formatSpeechRate(1.5f))
+
+            assertEquals(com.example.data.ReaderVoiceProfile.FEMALE_2, com.example.data.ReaderVoiceProfile.FEMALE_1.next())
+            assertEquals(com.example.data.ReaderVoiceProfile.MALE_1, com.example.data.ReaderVoiceProfile.FEMALE_2.next())
+            assertEquals(com.example.data.ReaderVoiceProfile.FEMALE_1, com.example.data.ReaderVoiceProfile.MALE_1.next())
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
 }

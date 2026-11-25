@@ -352,6 +352,29 @@ object TocGenerator {
     }
 
     /**
+     * Upgrade 1.5: Appends a newly created `.xhtml` chapter to the editable TOC list.
+     */
+    fun addNewChapterEntry(
+        entries: List<EditableTocItem>,
+        newChapterIndex: Int,
+        newChapterFileName: String,
+        newChapterTitle: String
+    ): List<EditableTocItem> {
+        val cleanTitle = newChapterTitle.trim().take(120).ifBlank { "Chương ${newChapterIndex + 1}" }
+        val newItem = EditableTocItem(
+            id = "toc_new_${System.currentTimeMillis()}_$newChapterFileName",
+            title = cleanTitle,
+            href = "Text/$newChapterFileName",
+            chapterIndex = newChapterIndex,
+            chapterFileName = newChapterFileName,
+            paragraphIndex = 0,
+            anchorId = null,
+            isManualBookmark = false
+        )
+        return entries + newItem
+    }
+
+    /**
      * Converts editable TOC items back into EPUB [TocEntry] records for `nav.xhtml` & `toc.ncx`.
      */
     fun toTocEntries(editableItems: List<EditableTocItem>): List<TocEntry> {

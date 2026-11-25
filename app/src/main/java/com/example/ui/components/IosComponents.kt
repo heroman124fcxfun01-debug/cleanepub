@@ -1,10 +1,14 @@
 package com.example.ui.components
 
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +38,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,11 +47,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -153,7 +162,7 @@ fun IosSectionHeader(
  * - Blue glow drop shadow (`elevation = 10.dp`, `spotColor = #007AFF @ 45%`)
  * - Vertical glossy gradient `#2E9BFF` -> `#0066E6`
  * - Top highlight bevel border `Color.White.copy(alpha = 0.35f)`
- * - Compact height `48.dp`, single-line `15.sp` SemiBold label
+ * - Smooth spring press-bounce feedback
  */
 @Composable
 fun IosPrimaryButton(
@@ -165,6 +174,16 @@ fun IosPrimaryButton(
     leadingIcon: @Composable (() -> Unit)? = null
 ) {
     val pillShape = RoundedCornerShape(50)
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed && enabled) 0.97f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "ios_primary_press_scale"
+    )
     val gradientColors = if (enabled) {
         listOf(IosBlueTop, IosBlueBottom)
     } else {
@@ -175,6 +194,10 @@ fun IosPrimaryButton(
         modifier = modifier
             .fillMaxWidth()
             .height(height)
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
             .shadow(
                 elevation = if (enabled) 10.dp else 2.dp,
                 shape = pillShape,
@@ -193,7 +216,12 @@ fun IosPrimaryButton(
                 ),
                 shape = pillShape
             )
-            .clickable(enabled = enabled, onClick = onClick)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = androidx.compose.material3.ripple(color = Color.White),
+                enabled = enabled,
+                onClick = onClick
+            )
             .padding(horizontal = 16.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -220,9 +248,106 @@ fun IosPrimaryButton(
 }
 
 /**
+ * 3D Elevated iPhone Minimalist Pill Button (Apple Books / iOS surface style):
+ * - Pure white / dark charcoal subtle vertical sheen, 0.8.dp luminous bevel, soft drop shadow
+ * - Smooth spring press-bounce feedback
+ */
+@Composable
+fun Ios3DSurfacePillButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    height: Dp = 46.dp,
+    enabled: Boolean = true,
+    accentColor: Color = IosBlue,
+    leadingIcon: @Composable (() -> Unit)? = null,
+    trailingContent: @Composable (() -> Unit)? = null
+) {
+    val isDark = LocalIsDarkTheme.current
+    val pillShape = RoundedCornerShape(50)
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed && enabled) 0.97f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "ios_surface_pill_press_scale"
+    )
+
+    val bgBrush = Brush.verticalGradient(
+        colors = if (isDark) {
+            listOf(Color(0xFF2C2C2E), Color(0xFF1C1C1E))
+        } else {
+            listOf(Color(0xFFFFFFFF), Color(0xFFF6F6FA))
+        }
+    )
+    val borderBrush = Brush.verticalGradient(
+        colors = if (isDark) {
+            listOf(Color.White.copy(alpha = 0.22f), Color(0xFF2C2C2E))
+        } else {
+            listOf(Color.White, Color(0xFFE5E5EA))
+        }
+    )
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(height)
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
+            .shadow(
+                elevation = if (isDark) 6.dp else 7.dp,
+                shape = pillShape,
+                ambientColor = Color.Black.copy(alpha = if (isDark) 0.35f else 0.08f),
+                spotColor = accentColor.copy(alpha = if (isDark) 0.22f else 0.14f)
+            )
+            .clip(pillShape)
+            .background(brush = bgBrush)
+            .border(width = 0.8.dp, brush = borderBrush, shape = pillShape)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = androidx.compose.material3.ripple(color = accentColor),
+                enabled = enabled,
+                onClick = onClick
+            )
+            .padding(horizontal = 16.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            if (leadingIcon != null) {
+                leadingIcon()
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            Text(
+                text = text,
+                fontSize = 14.sp,
+                lineHeight = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (trailingContent != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                trailingContent()
+            }
+        }
+    }
+}
+
+/**
  * Reusable iOS Floating Rounded-Square Dialog Card (`RoundedCornerShape(24.dp)`):
  * - Deep elevation (`16.dp`) floating over a dimmed scrim
  * - Subtle `1.dp` luminous white bevel border for crisp 3D separation
+ * - Locks `fontScale <= 1.0f` inside Android Dialog windows
  */
 @Composable
 fun IosFloatingDialog(
@@ -239,57 +364,65 @@ fun IosFloatingDialog(
             decorFitsSystemWindows = false
         )
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(IosScrim)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onDismissRequest
-                )
-                .padding(horizontal = 20.dp, vertical = 24.dp),
-            contentAlignment = Alignment.Center
+        val currentDensity = LocalDensity.current
+        CompositionLocalProvider(
+            LocalDensity provides Density(
+                density = currentDensity.density,
+                fontScale = currentDensity.fontScale.coerceAtMost(1.0f)
+            )
         ) {
             Box(
                 modifier = Modifier
-                    .widthIn(max = 420.dp)
-                    .fillMaxWidth()
-                    .shadow(
-                        elevation = 16.dp,
-                        shape = dialogShape,
-                        ambientColor = Color.Black.copy(alpha = 0.22f),
-                        spotColor = Color.Black.copy(alpha = 0.36f)
-                    )
-                    .clip(dialogShape)
-                    .background(MaterialTheme.colorScheme.surface)
-                    .border(
-                        width = 1.dp,
-                        brush = Brush.verticalGradient(
-                            colors = if (isDark) {
-                                listOf(
-                                    Color.White.copy(alpha = 0.24f),
-                                    Color.White.copy(alpha = 0.06f)
-                                )
-                            } else {
-                                listOf(
-                                    Color.White.copy(alpha = 0.92f),
-                                    Color.White.copy(alpha = 0.35f)
-                                )
-                            }
-                        ),
-                        shape = dialogShape
-                    )
+                    .fillMaxSize()
+                    .background(IosScrim)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
-                        onClick = {}
+                        onClick = onDismissRequest
                     )
+                    .padding(horizontal = 20.dp, vertical = 24.dp),
+                contentAlignment = Alignment.Center
             ) {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    content = content
-                )
+                Box(
+                    modifier = Modifier
+                        .widthIn(max = 420.dp)
+                        .fillMaxWidth()
+                        .shadow(
+                            elevation = 16.dp,
+                            shape = dialogShape,
+                            ambientColor = Color.Black.copy(alpha = 0.22f),
+                            spotColor = Color.Black.copy(alpha = 0.36f)
+                        )
+                        .clip(dialogShape)
+                        .background(MaterialTheme.colorScheme.surface)
+                        .border(
+                            width = 1.dp,
+                            brush = Brush.verticalGradient(
+                                colors = if (isDark) {
+                                    listOf(
+                                        Color.White.copy(alpha = 0.24f),
+                                        Color.White.copy(alpha = 0.06f)
+                                    )
+                                } else {
+                                    listOf(
+                                        Color.White.copy(alpha = 0.92f),
+                                        Color.White.copy(alpha = 0.35f)
+                                    )
+                                }
+                            ),
+                            shape = dialogShape
+                        )
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = {}
+                        )
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        content = content
+                    )
+                }
             }
         }
     }

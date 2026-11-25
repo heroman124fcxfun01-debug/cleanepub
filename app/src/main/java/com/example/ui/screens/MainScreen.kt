@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.rounded.MenuBook
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoFixHigh
+import androidx.compose.material.icons.rounded.AutoStories
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
@@ -47,6 +48,7 @@ import androidx.compose.material.icons.rounded.Spellcheck
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -79,6 +81,7 @@ import com.example.data.CleanedFileHistory
 import com.example.data.FileRecordStatus
 import com.example.data.HistoryManager
 import com.example.pipeline.CleaningOptions
+import com.example.ui.components.Ios3DSurfacePillButton
 import com.example.ui.components.IosFloatingDialog
 import com.example.ui.components.IosPrimaryButton
 import com.example.ui.theme.IosBlue
@@ -97,11 +100,13 @@ import com.example.ui.theme.LocalIsDarkTheme
 @Composable
 fun MainScreen(
     recentFiles: List<CleanedFileHistory>,
+    libraryBookCount: Int = 0,
     isOpeningEditor: Boolean,
     hasAllFilesAccess: Boolean,
     cleaningOptions: CleaningOptions,
     isLoadingMetadata: Boolean,
     errorBanner: String?,
+    onOpenLibraryClick: () -> Unit,
     onSelectFileClick: () -> Unit,
     onRequestStoragePermission: () -> Unit,
     onOpenSettingsClick: () -> Unit,
@@ -300,9 +305,53 @@ fun MainScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // 2. 3D Glossy Blue Pill CTA Button: "+ Chọn file EPUB / PDF"
+            // 2. Reading Zone (Apple Books Minimalist 3D Pill): "Thư viện sách"
+            Ios3DSurfacePillButton(
+                text = "Thư viện sách",
+                height = 46.dp,
+                onClick = onOpenLibraryClick,
+                modifier = Modifier.testTag("open_book_library_button"),
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.AutoStories,
+                        contentDescription = null,
+                        tint = if (isDark) MaterialTheme.colorScheme.primary else IosBlue,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                trailingContent = if (libraryBookCount > 0) {
+                    {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = (if (isDark) MaterialTheme.colorScheme.primary else IosBlue).copy(alpha = 0.12f)
+                        ) {
+                            Text(
+                                text = libraryBookCount.toString(),
+                                fontSize = 11.sp,
+                                lineHeight = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (isDark) MaterialTheme.colorScheme.primary else IosBlue,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                } else {
+                    null
+                }
+            )
+
+            // Horizontal divider cleanly separating Reading Zone (above) from Cleaning & Editing Zone (below)
+            HorizontalDivider(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 10.dp),
+                thickness = 0.8.dp,
+                color = if (isDark) Color(0xFF2C2C2E) else Color(0xFFD1D1D6)
+            )
+
+            // 3. Cleaning & Editing Zone: 3D Glossy Blue Pill CTA Button: "+ Chọn file EPUB / PDF"
             IosPrimaryButton(
                 text = if (isLoadingMetadata) "Đang đọc thông tin sách…" else "Chọn file EPUB / PDF",
                 enabled = !isLoadingMetadata,

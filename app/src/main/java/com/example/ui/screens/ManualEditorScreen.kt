@@ -1,11 +1,19 @@
 package com.example.ui.screens
 
+import android.os.Handler
+import android.os.Looper
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -13,9 +21,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -29,6 +39,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -43,13 +55,16 @@ import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.BookmarkAdd
 import androidx.compose.material.icons.rounded.CallSplit
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.SaveAs
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Splitscreen
+import androidx.compose.material.icons.rounded.StopCircle
 import androidx.compose.material.icons.rounded.SwapVert
+import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -59,8 +74,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -72,13 +89,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -87,7 +111,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.data.CustomReplaceManager
 import com.example.data.CustomReplaceRule
+import java.util.Locale
 import com.example.pipeline.ManualChapterContent
 import com.example.pipeline.ManualReadingMode
 import com.example.pipeline.ManualSearchMatch
@@ -145,6 +171,7 @@ fun ManualEditorScreen(
     onUndoEdit: () -> Unit,
     onSetSkipUndoConfirm: (Boolean) -> Unit,
     onAddManualToc: (chapterIndex: Int, paragraphIndex: Int, title: String) -> Unit,
+    onAddNewChapter: (title: String) -> Unit,
     onRenameTocItem: (entryId: String, newTitle: String) -> Unit,
     onDeleteTocItem: (entryId: String) -> Unit,
     onSplitChapterAtActiveParagraph: () -> Unit,
@@ -164,6 +191,7 @@ fun ManualEditorScreen(
     onSaveWithMode: (SaveMode) -> Unit,
     onOpenSavedFile: (absolutePath: String?, uriString: String?) -> Unit,
     onBackToReview: () -> Unit,
+    onSaveDraftAndExitToHome: () -> Unit,
     onFinishToHome: () -> Unit,
     onDismissSaveError: () -> Unit
 ) {
@@ -176,8 +204,91 @@ fun ManualEditorScreen(
     var showExitDialog by remember { mutableStateOf(false) }
     var showCustomReplaceDialog by remember { mutableStateOf(false) }
 
+    val context = LocalContext.current
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val currListState = rememberLazyListState()
     val origListState = rememberLazyListState()
+    val density = LocalDensity.current
+    val focusManager = LocalFocusManager.current
+    val imeBottomPx = WindowInsets.ime.getBottom(density)
+    val isUserDraggingVertical by currListState.interactionSource.collectIsDraggedAsState()
+    var focusedParagraphIndex by remember(editorState.currentChapterIndex) {
+        mutableStateOf<Int?>(null)
+    }
+    var userTappedParagraphInReadMode by remember(editorState.currentChapterIndex) {
+        mutableStateOf(false)
+    }
+
+    // Upgrade 1.5: Offline Android TTS (RAM-lightweight with strict DisposableEffect cleanup)
+    var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
+    var isTtsReady by remember { mutableStateOf(false) }
+    var speakingParagraphIndex by remember(editorState.currentChapterIndex) {
+        mutableIntStateOf(-1)
+    }
+
+    DisposableEffect(context) {
+        var localTts: TextToSpeech? = null
+        localTts = TextToSpeech(context.applicationContext) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                localTts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) = Unit
+                    override fun onDone(utteranceId: String?) {
+                        mainHandler.post { speakingParagraphIndex = -1 }
+                    }
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(utteranceId: String?) {
+                        mainHandler.post { speakingParagraphIndex = -1 }
+                    }
+                    override fun onError(utteranceId: String?, errorCode: Int) {
+                        mainHandler.post { speakingParagraphIndex = -1 }
+                    }
+                })
+                mainHandler.post {
+                    isTtsReady = true
+                }
+            }
+        }
+        ttsEngine = localTts
+        onDispose {
+            runCatching {
+                localTts.stop()
+                localTts.shutdown()
+            }
+            ttsEngine = null
+            isTtsReady = false
+            speakingParagraphIndex = -1
+        }
+    }
+
+    fun stopTtsPlayback() {
+        runCatching { ttsEngine?.stop() }
+        if (speakingParagraphIndex != -1) {
+            speakingParagraphIndex = -1
+        }
+    }
+
+    // Stop TTS immediately when switching chapters
+    LaunchedEffect(editorState.currentChapterIndex) {
+        stopTtsPlayback()
+    }
+
+    // Upgrade 1.5: Auto-extract short (1..3 words) edited pair for 1-tap save to "Thư viện thay thế"
+    var editBaselineKey by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var editBaselineText by remember { mutableStateOf<String?>(null) }
+    var dismissedSuggestionKey by remember { mutableStateOf<String?>(null) }
+    var quickRuleSuggestion by remember { mutableStateOf<Pair<String, String>?>(null) }
+
+    // Clear keyboard, focus & quick-rule suggestion when leaving Edit Mode
+    LaunchedEffect(editorState.isEditMode) {
+        if (!editorState.isEditMode) {
+            focusedParagraphIndex = null
+            editBaselineKey = null
+            editBaselineText = null
+            quickRuleSuggestion = null
+            dismissedSuggestionKey = null
+            focusManager.clearFocus()
+        }
+    }
 
     BackHandler {
         when {
@@ -218,16 +329,66 @@ fun ManualEditorScreen(
         }
     }
 
-    // Track first visible paragraph as activeParagraphIndex while scrolling vertically
+    // Track first visible paragraph ONLY when the user manually drags vertically (never on IME auto-scroll)
     if (editorState.readingMode == ManualReadingMode.VERTICAL_SCROLL) {
         LaunchedEffect(currListState) {
-            snapshotFlow { currListState.firstVisibleItemIndex }
+            snapshotFlow { currListState.firstVisibleItemIndex to isUserDraggingVertical }
                 .distinctUntilChanged()
-                .collect { firstVisible ->
-                    if (currListState.isScrollInProgress) {
+                .collect { (firstVisible, dragging) ->
+                    if (dragging) {
                         onActiveParagraphChanged(firstVisible)
                     }
                 }
+        }
+    }
+
+    // Keep the focused/tapped paragraph riding smoothly ABOVE the rising Android soft keyboard
+    LaunchedEffect(
+        editorState.isEditMode,
+        editorState.readingMode,
+        focusedParagraphIndex,
+        imeBottomPx
+    ) {
+        val targetIdx = focusedParagraphIndex ?: return@LaunchedEffect
+        if (!editorState.isEditMode || editorState.readingMode != ManualReadingMode.VERTICAL_SCROLL) {
+            return@LaunchedEffect
+        }
+        if (imeBottomPx <= 0) return@LaunchedEffect
+
+        val marginBottomPx = with(density) { 28.dp.roundToPx() }
+        val marginTopPx = with(density) { 12.dp.roundToPx() }
+
+        // Check layout immediately (tracks every IME animation frame) and once more after layout settles
+        repeat(2) { pass ->
+            if (pass == 1) delay(60L)
+            val layoutInfo = currListState.layoutInfo
+            val viewportHeight = (layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset)
+                .coerceAtLeast(1)
+            val itemInfo = layoutInfo.visibleItemsInfo.firstOrNull { it.index == targetIdx }
+
+            if (itemInfo == null) {
+                // Paragraph was pushed off-screen by rising keyboard -> immediately bring it back into view
+                runCatching { currListState.scrollToItem(targetIdx, scrollOffset = 0) }
+            } else {
+                val safeBottom = (viewportHeight - marginBottomPx).coerceAtLeast(viewportHeight / 2)
+                val itemBottom = itemInfo.offset + itemInfo.size
+                if (itemBottom > safeBottom) {
+                    val neededScroll = itemBottom - safeBottom
+                    // Never push the top of a tall paragraph above the top edge unless needed for cursor
+                    val maxSafeScroll = (itemInfo.offset - marginTopPx).coerceAtLeast(0)
+                    val delta = if (itemInfo.size <= safeBottom) {
+                        neededScroll
+                    } else {
+                        minOf(neededScroll, maxSafeScroll)
+                    }
+                    if (delta > 0) {
+                        runCatching { currListState.scrollBy(delta.toFloat()) }
+                    }
+                } else if (itemInfo.offset < marginTopPx && targetIdx > 0) {
+                    val upDelta = itemInfo.offset - marginTopPx
+                    runCatching { currListState.scrollBy(upDelta.toFloat()) }
+                }
+            }
         }
     }
 
@@ -241,6 +402,83 @@ fun ManualEditorScreen(
     }
 
     val activeChapter = editorState.activeChapter
+
+    val focusedCurrentText = remember(activeChapter, focusedParagraphIndex) {
+        val idx = focusedParagraphIndex ?: return@remember null
+        activeChapter?.currentParagraphs?.getOrNull(idx)
+    }
+
+    // Debounced auto-detection of quick replacement rule while typing in Edit Mode
+    LaunchedEffect(
+        editorState.isEditMode,
+        focusedParagraphIndex,
+        editBaselineText,
+        focusedCurrentText,
+        customReplaceRules,
+        dismissedSuggestionKey
+    ) {
+        val base = editBaselineText
+        val current = focusedCurrentText
+        if (!editorState.isEditMode || focusedParagraphIndex == null || base == null || current == null || base == current) {
+            quickRuleSuggestion = null
+            return@LaunchedEffect
+        }
+        delay(350L)
+        val extracted = CustomReplaceManager.extractQuickRuleSuggestion(
+            beforeParagraph = base,
+            afterParagraph = current,
+            existingRules = customReplaceRules
+        )
+        val key = extracted?.let { "${it.first}->${it.second}" }
+        quickRuleSuggestion = if (key != null && key != dismissedSuggestionKey) extracted else null
+    }
+
+    fun toggleTtsForActiveParagraph() {
+        if (speakingParagraphIndex >= 0) {
+            stopTtsPlayback()
+            return
+        }
+        val chapter = activeChapter ?: return
+        val targetIdx = editorState.activeParagraphIndex
+            .coerceIn(0, (chapter.currentParagraphs.lastIndex).coerceAtLeast(0))
+        val textToSpeak = chapter.currentParagraphs.getOrNull(targetIdx)?.trim().orEmpty()
+        if (textToSpeak.isEmpty()) {
+            Toast.makeText(context, "Đoạn văn đang trống", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val engine = ttsEngine
+        if (engine == null || !isTtsReady) {
+            Toast.makeText(context, "Bộ đọc giọng nói trên máy đang khởi tạo…", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val desiredLocale = resolveTtsLocale(
+            text = textToSpeak,
+            bookLanguage = snapshot.metadata?.language
+        )
+        val langResult = runCatching { engine.setLanguage(desiredLocale) }
+            .getOrDefault(TextToSpeech.LANG_NOT_SUPPORTED)
+        if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+            // Fallback gracefully to English US or default system locale
+            runCatching { engine.setLanguage(Locale.US) }
+        }
+        speakingParagraphIndex = targetIdx
+        engine.speak(
+            textToSpeak,
+            TextToSpeech.QUEUE_FLUSH,
+            null,
+            "epub_tts_${editorState.currentChapterIndex}_$targetIdx"
+        )
+    }
+
+    fun handleSelectParagraph(pIdx: Int, fromExplicitTap: Boolean) {
+        if (speakingParagraphIndex >= 0 && speakingParagraphIndex != pIdx) {
+            stopTtsPlayback()
+        }
+        if (fromExplicitTap && !editorState.isEditMode) {
+            userTappedParagraphInReadMode = true
+        }
+        onActiveParagraphChanged(pIdx)
+    }
 
     val activeChapterBookmarks = remember(editorState.manualTocEntries, editorState.currentChapterIndex) {
         editorState.manualTocEntries
@@ -276,20 +514,31 @@ fun ManualEditorScreen(
                 .navigationBarsPadding()
                 .imePadding()
         ) {
-            // 1. Compact Same-Tone Sepia Top Bar with Save Draft & standalone Compare icon
+            // 1. Compact Same-Tone Sepia Top Bar with Save Draft, Offline TTS Speaker & standalone Compare icon
             SepiaTopBar(
                 isEditMode = editorState.isEditMode,
+                isSpeaking = speakingParagraphIndex >= 0,
                 isCompareMode = editorState.isCompareMode,
                 isSearchOpen = showSearchBar,
                 isSaving = saveUiState is SaveUiState.Saving,
                 fontSizeSp = editorState.fontSizeSp,
                 readingMode = editorState.readingMode,
                 showMoreMenu = showMoreMenu,
-                onOpenToc = { showTocDialog = true },
-                onSaveClick = { showSaveDialog = true },
+                onOpenToc = {
+                    stopTtsPlayback()
+                    showTocDialog = true
+                },
+                onSaveClick = {
+                    stopTtsPlayback()
+                    showSaveDialog = true
+                },
                 onSaveDraftClick = onSaveDraftClick,
-                onHomeClick = { showExitDialog = true },
+                onHomeClick = {
+                    stopTtsPlayback()
+                    showExitDialog = true
+                },
                 onToggleEdit = onToggleEditMode,
+                onToggleTts = ::toggleTtsForActiveParagraph,
                 onToggleCompare = onToggleCompareMode,
                 onToggleSearch = {
                     showSearchBar = !showSearchBar
@@ -450,9 +699,20 @@ fun ManualEditorScreen(
                                 }
                             }
 
+                            val topPaneWeight = if (editorState.isCompareMode && editorState.isEditMode && imeBottomPx > 0) {
+                                1.35f
+                            } else {
+                                1f
+                            }
+                            val bottomPaneWeight = if (editorState.isCompareMode && editorState.isEditMode && imeBottomPx > 0) {
+                                0.65f
+                            } else {
+                                1f
+                            }
+
                             Box(
                                 modifier = Modifier
-                                    .weight(1f)
+                                    .weight(topPaneWeight)
                                     .fillMaxWidth()
                             ) {
                                 if (editorState.readingMode == ManualReadingMode.VERTICAL_SCROLL) {
@@ -461,15 +721,38 @@ fun ManualEditorScreen(
                                         chapterIndex = editorState.currentChapterIndex,
                                         totalChapters = editorState.chapters.size,
                                         activeParagraphIndex = editorState.activeParagraphIndex,
+                                        speakingParagraphIndex = speakingParagraphIndex,
+                                        showReadSelectionOutline = userTappedParagraphInReadMode,
                                         fontSizeSp = editorState.fontSizeSp,
                                         isEditMode = editorState.isEditMode,
                                         isCompareMode = editorState.isCompareMode,
+                                        imeBottomPx = imeBottomPx,
                                         listState = currListState,
                                         activeChapterBookmarks = activeChapterBookmarks,
                                         activeChapterMatches = activeChapterMatches,
                                         activeGlobalMatchIndex = editorState.activeMatchIndex,
-                                        onSelectParagraph = onActiveParagraphChanged,
+                                        onSelectParagraph = { pIdx -> handleSelectParagraph(pIdx, fromExplicitTap = true) },
+                                        onParagraphFocusChanged = { pIdx, focused ->
+                                            if (focused) {
+                                                focusedParagraphIndex = pIdx
+                                                val key = editorState.currentChapterIndex to pIdx
+                                                if (editBaselineKey != key) {
+                                                    editBaselineKey = key
+                                                    editBaselineText = activeChapter.currentParagraphs.getOrNull(pIdx)
+                                                    dismissedSuggestionKey = null
+                                                }
+                                                handleSelectParagraph(pIdx, fromExplicitTap = false)
+                                            } else if (focusedParagraphIndex == pIdx) {
+                                                focusedParagraphIndex = null
+                                            }
+                                        },
                                         onUpdateParagraph = { pIdx, text ->
+                                            val key = editorState.currentChapterIndex to pIdx
+                                            if (editBaselineKey != key) {
+                                                editBaselineKey = key
+                                                editBaselineText = activeChapter.currentParagraphs.getOrNull(pIdx)
+                                                dismissedSuggestionKey = null
+                                            }
                                             onUpdateParagraph(editorState.currentChapterIndex, pIdx, text)
                                         },
                                         onSelectChapter = { nextChap -> onSelectChapter(nextChap, 0) }
@@ -480,16 +763,39 @@ fun ManualEditorScreen(
                                         chapterIndex = editorState.currentChapterIndex,
                                         totalChapters = editorState.chapters.size,
                                         activeParagraphIndex = editorState.activeParagraphIndex,
+                                        speakingParagraphIndex = speakingParagraphIndex,
+                                        showReadSelectionOutline = userTappedParagraphInReadMode,
                                         scrollRequestId = editorState.scrollRequestId,
                                         scrollTargetParagraphIndex = editorState.scrollTargetParagraphIndex,
                                         fontSizeSp = editorState.fontSizeSp,
                                         isEditMode = editorState.isEditMode,
                                         isCompareMode = editorState.isCompareMode,
+                                        imeBottomPx = imeBottomPx,
                                         activeChapterBookmarks = activeChapterBookmarks,
                                         activeChapterMatches = activeChapterMatches,
                                         activeGlobalMatchIndex = editorState.activeMatchIndex,
-                                        onSelectParagraph = onActiveParagraphChanged,
+                                        onSelectParagraph = { pIdx -> handleSelectParagraph(pIdx, fromExplicitTap = true) },
+                                        onParagraphFocusChanged = { pIdx, focused ->
+                                            if (focused) {
+                                                focusedParagraphIndex = pIdx
+                                                val key = editorState.currentChapterIndex to pIdx
+                                                if (editBaselineKey != key) {
+                                                    editBaselineKey = key
+                                                    editBaselineText = activeChapter.currentParagraphs.getOrNull(pIdx)
+                                                    dismissedSuggestionKey = null
+                                                }
+                                                handleSelectParagraph(pIdx, fromExplicitTap = false)
+                                            } else if (focusedParagraphIndex == pIdx) {
+                                                focusedParagraphIndex = null
+                                            }
+                                        },
                                         onUpdateParagraph = { pIdx, text ->
+                                            val key = editorState.currentChapterIndex to pIdx
+                                            if (editBaselineKey != key) {
+                                                editBaselineKey = key
+                                                editBaselineText = activeChapter.currentParagraphs.getOrNull(pIdx)
+                                                dismissedSuggestionKey = null
+                                            }
                                             onUpdateParagraph(editorState.currentChapterIndex, pIdx, text)
                                         },
                                         onSelectChapter = { nextChap -> onSelectChapter(nextChap, 0) }
@@ -508,9 +814,9 @@ fun ManualEditorScreen(
                                     activeParagraphIndex = editorState.activeParagraphIndex,
                                     fontSizeSp = (editorState.fontSizeSp - 0.5f).coerceAtLeast(12f),
                                     origListState = origListState,
-                                    onTapOriginalParagraph = onActiveParagraphChanged,
+                                    onTapOriginalParagraph = { pIdx -> handleSelectParagraph(pIdx, fromExplicitTap = true) },
                                     modifier = Modifier
-                                        .weight(1f)
+                                        .weight(bottomPaneWeight)
                                         .fillMaxWidth()
                                 )
                             }
@@ -540,16 +846,41 @@ fun ManualEditorScreen(
                     }
                 }
             }
+
+            // Upgrade 1.5: 1-tap Quick-Save Rule Pill Chip directly above the keyboard / bottom bar
+            val suggestion = quickRuleSuggestion
+            if (editorState.isEditMode && suggestion != null) {
+                QuickSaveReplaceRuleChipBar(
+                    oldPhrase = suggestion.first,
+                    newPhrase = suggestion.second,
+                    onSaveRule = {
+                        onAddCustomReplaceRule(suggestion.first, suggestion.second)
+                        editBaselineText = focusedCurrentText
+                        quickRuleSuggestion = null
+                        dismissedSuggestionKey = null
+                        Toast.makeText(
+                            context,
+                            "Đã lưu vào Thư viện thay thế",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    onDismiss = {
+                        dismissedSuggestionKey = "${suggestion.first}->${suggestion.second}"
+                        quickRuleSuggestion = null
+                    }
+                )
+            }
         }
     }
 
-    // Editable Table of Contents Overlay (with dedicated "Sửa" toggle for Merge, Rename & Delete)
+    // Editable Table of Contents Overlay (with "+ Thêm chương" & dedicated "Sửa" toggle for Merge, Rename & Delete)
     ManualTocOverlayDialog(
         visible = showTocDialog,
         tocItems = editorState.editableTocItems,
         currentChapterIndex = editorState.currentChapterIndex,
         totalChapters = editorState.chapters.size,
         onSelectTarget = onSelectChapter,
+        onAddNewChapter = onAddNewChapter,
         onRenameItem = onRenameTocItem,
         onDeleteItem = onDeleteTocItem,
         onMergeChapterWithNext = onMergeChapterWithNext,
@@ -612,12 +943,16 @@ fun ManualEditorScreen(
         )
     }
 
-    // 2-Tap Exit Confirmation Dialog when pressing Home on Top Bar
+    // Home Exit Dialog: 2-tap "Hủy sửa chữa" (discard & keep original) + "Về màn hình chính và lưu"
     ExitConfirmDialog(
         visible = showExitDialog,
-        onConfirmExit = {
+        onDiscardAndExit = {
             showExitDialog = false
             onFinishToHome()
+        },
+        onSaveAndExit = {
+            showExitDialog = false
+            onSaveDraftAndExitToHome()
         },
         onDismiss = { showExitDialog = false }
     )
@@ -649,15 +984,18 @@ fun ManualEditorScreen(
 }
 
 /**
- * Floating iOS Rounded-Square Exit Confirmation Dialog with 2-Tap Guard:
- * - Tap 1 on "Hủy sửa chữa" -> switches to warning red (#FF3B30) "Bấm lần nữa để xác nhận"
- * - Tap 2 -> cancels editing session & navigates back to MainScreen
- * - Tap outside dialog -> dismisses cleanly & resets tap counter to 0
+ * Floating iOS Rounded-Square Home Exit Dialog:
+ * 1. "Hủy sửa chữa" (2-tap confirm): discards all unsaved edits, keeps the original untouched, returns Home.
+ *    - Tap 1 -> switches to warning red (#FF3B30) "Bấm lần nữa để xác nhận hủy"
+ *    - Tap 2 -> discards edits and returns to MainScreen
+ * 2. "Về màn hình chính và lưu" (below): saves current editing progress as a Draft and returns Home.
+ * - Tap outside dialog -> dismisses cleanly & resets tap counter to 0.
  */
 @Composable
 fun ExitConfirmDialog(
     visible: Boolean,
-    onConfirmExit: () -> Unit,
+    onDiscardAndExit: () -> Unit,
+    onSaveAndExit: () -> Unit,
     onDismiss: () -> Unit
 ) {
     if (!visible) return
@@ -665,11 +1003,11 @@ fun ExitConfirmDialog(
     var confirmStep by remember { mutableIntStateOf(0) }
     val isArmed = confirmStep >= 1
 
-    val buttonBg by animateColorAsState(
+    val discardButtonBg by animateColorAsState(
         targetValue = if (isArmed) Color(0xFFFF3B30) else Color(0xFFFFE5DC),
         label = "exit_confirm_btn_bg"
     )
-    val buttonTextColor by animateColorAsState(
+    val discardButtonTextColor by animateColorAsState(
         targetValue = if (isArmed) Color.White else Color(0xFFD84315),
         label = "exit_confirm_btn_text"
     )
@@ -739,19 +1077,23 @@ fun ExitConfirmDialog(
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
-                    text = "Bạn có chấp nhận hủy việc sửa chữa và về màn hình chính?",
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp,
-                    color = SepiaInkMuted,
+                    text = if (isArmed) {
+                        "Không lưu bất kỳ thay đổi nào và giữ nguyên bản gốc."
+                    } else {
+                        "Bạn muốn hủy toàn bộ sửa chữa hay lưu lại trước khi về màn hình chính?"
+                    },
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    color = if (isArmed) Color(0xFFC62828) else SepiaInkMuted,
                     textAlign = TextAlign.Center
                 )
 
-                Spacer(modifier = Modifier.height(18.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                // 2-Step Confirmation Pill Button
+                // Option 1: 2-Step Confirmation Pill Button — "Hủy sửa chữa" (Discard, keep original)
                 Surface(
                     shape = RoundedCornerShape(50),
-                    color = buttonBg,
+                    color = discardButtonBg,
                     border = if (isArmed) null else BorderStroke(1.dp, Color(0xFFFFA58A)),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -762,7 +1104,7 @@ fun ExitConfirmDialog(
                                 confirmStep = 1
                             } else {
                                 confirmStep = 0
-                                onConfirmExit()
+                                onDiscardAndExit()
                             }
                         }
                         .testTag("exit_confirm_two_step_button")
@@ -772,10 +1114,53 @@ fun ExitConfirmDialog(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = if (isArmed) "Bấm lần nữa để xác nhận" else "Hủy sửa chữa",
-                            fontSize = 14.sp,
+                            text = if (isArmed) "Bấm lần nữa để xác nhận hủy" else "Hủy sửa chữa (giữ bản gốc)",
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = buttonTextColor,
+                            color = discardButtonTextColor,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 12.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Option 2 (Below): Save current editing state as Draft and return to Home
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = SepiaAccent,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(50))
+                        .clickable {
+                            confirmStep = 0
+                            onSaveAndExit()
+                        }
+                        .testTag("exit_save_and_home_button")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 14.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.SaveAs,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Về màn hình chính và lưu",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White,
                             maxLines = 1,
                             softWrap = false,
                             overflow = TextOverflow.Ellipsis
@@ -783,7 +1168,7 @@ fun ExitConfirmDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 Text(
                     text = "Chạm ra ngoài để tiếp tục sửa",
@@ -799,6 +1184,7 @@ fun ExitConfirmDialog(
 @Composable
 private fun SepiaTopBar(
     isEditMode: Boolean,
+    isSpeaking: Boolean,
     isCompareMode: Boolean,
     isSearchOpen: Boolean,
     isSaving: Boolean,
@@ -810,6 +1196,7 @@ private fun SepiaTopBar(
     onSaveDraftClick: () -> Unit,
     onHomeClick: () -> Unit,
     onToggleEdit: () -> Unit,
+    onToggleTts: () -> Unit,
     onToggleCompare: () -> Unit,
     onToggleSearch: () -> Unit,
     onAddTocClick: () -> Unit,
@@ -835,14 +1222,14 @@ private fun SepiaTopBar(
             IconButton(
                 onClick = onOpenToc,
                 modifier = Modifier
-                    .size(32.dp)
+                    .size(30.dp)
                     .testTag("manual_toc_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Menu,
                     contentDescription = "Mở Mục lục",
                     tint = SepiaInk,
-                    modifier = Modifier.size(19.dp)
+                    modifier = Modifier.size(18.dp)
                 )
             }
 
@@ -851,7 +1238,7 @@ private fun SepiaTopBar(
                 shape = RoundedCornerShape(50),
                 color = SepiaAccent,
                 modifier = Modifier
-                    .height(28.dp)
+                    .height(27.dp)
                     .clip(RoundedCornerShape(50))
                     .clickable(enabled = !isSaving, onClick = onSaveClick)
                     .testTag("manual_save_button")
@@ -870,7 +1257,7 @@ private fun SepiaTopBar(
                     }
                     Text(
                         text = if (isSaving) "Lưu…" else "Lưu",
-                        fontSize = 12.sp,
+                        fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color.White,
                         maxLines = 1,
@@ -883,14 +1270,14 @@ private fun SepiaTopBar(
             IconButton(
                 onClick = onSaveDraftClick,
                 modifier = Modifier
-                    .size(32.dp)
+                    .size(30.dp)
                     .testTag("manual_save_draft_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.SaveAs,
                     contentDescription = "Lưu nháp",
                     tint = SepiaAccent,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier.size(17.dp)
                 )
             }
 
@@ -898,14 +1285,14 @@ private fun SepiaTopBar(
             IconButton(
                 onClick = onHomeClick,
                 modifier = Modifier
-                    .size(32.dp)
+                    .size(30.dp)
                     .testTag("manual_home_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Home,
                     contentDescription = "Về màn hình chính",
                     tint = SepiaInk,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier.size(17.dp)
                 )
             }
 
@@ -917,18 +1304,18 @@ private fun SepiaTopBar(
                 color = if (isEditMode) SepiaAccent else SepiaCard,
                 border = if (isEditMode) null else BorderStroke(0.9.dp, SepiaBorder),
                 modifier = Modifier
-                    .height(28.dp)
+                    .height(27.dp)
                     .clip(RoundedCornerShape(50))
                     .clickable(onClick = onToggleEdit)
                     .testTag("manual_edit_toggle_button")
             ) {
                 Box(
-                    modifier = Modifier.padding(horizontal = 9.dp),
+                    modifier = Modifier.padding(horizontal = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = "Sửa",
-                        fontSize = 12.sp,
+                        fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = if (isEditMode) Color.White else SepiaInk,
                         maxLines = 1,
@@ -939,11 +1326,28 @@ private fun SepiaTopBar(
 
             Spacer(modifier = Modifier.width(2.dp))
 
-            // Top-Right 2: Standalone "So sánh" Icon right next to "Sửa"
+            // Top-Right 2 (Upgrade 1.5): Offline Android TTS Speaker Icon right next to "Sửa"
+            IconButton(
+                onClick = onToggleTts,
+                modifier = Modifier
+                    .size(30.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(if (isSpeaking) Color(0x282A7B6F) else Color.Transparent)
+                    .testTag("manual_tts_button")
+            ) {
+                Icon(
+                    imageVector = if (isSpeaking) Icons.Rounded.StopCircle else Icons.Rounded.VolumeUp,
+                    contentDescription = if (isSpeaking) "Dừng đọc thử" else "Đọc thử đoạn văn",
+                    tint = if (isSpeaking) Color(0xFF1F6B5F) else SepiaInk,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            // Top-Right 3: Standalone "So sánh" Icon
             IconButton(
                 onClick = onToggleCompare,
                 modifier = Modifier
-                    .size(33.dp)
+                    .size(30.dp)
                     .clip(RoundedCornerShape(50))
                     .background(if (isCompareMode) SepiaAccentSoft else Color.Transparent)
                     .testTag("manual_compare_button")
@@ -952,53 +1356,53 @@ private fun SepiaTopBar(
                     imageVector = Icons.Rounded.Splitscreen,
                     contentDescription = "Bật/tắt So sánh với bản gốc",
                     tint = if (isCompareMode) SepiaAccent else SepiaInk,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier.size(17.dp)
                 )
             }
 
-            // Top-Right 3: Search (Find & Replace)
+            // Top-Right 4: Search (Find & Replace)
             IconButton(
                 onClick = onToggleSearch,
                 modifier = Modifier
-                    .size(33.dp)
+                    .size(30.dp)
                     .testTag("manual_search_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Search,
                     contentDescription = "Tìm kiếm và thay thế",
                     tint = if (isSearchOpen) SepiaAccent else SepiaInk,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier.size(17.dp)
                 )
             }
 
-            // Top-Right 4: Add Manual TOC Bookmark
+            // Top-Right 5: Add Manual TOC Bookmark
             IconButton(
                 onClick = onAddTocClick,
                 modifier = Modifier
-                    .size(33.dp)
+                    .size(30.dp)
                     .testTag("manual_add_toc_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.BookmarkAdd,
                     contentDescription = "Thêm mục lục thủ công",
                     tint = SepiaInk,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier.size(17.dp)
                 )
             }
 
-            // Top-Right 5: Exclamation Menu (!) — ONLY Font a/A + Vertical/Horizontal Reading Mode
+            // Top-Right 6: Exclamation Menu (!) — ONLY Font a/A + Vertical/Horizontal Reading Mode
             Box {
                 IconButton(
                     onClick = { onMoreMenuChange(true) },
                     modifier = Modifier
-                        .size(33.dp)
+                        .size(30.dp)
                         .testTag("manual_more_menu_button")
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.ErrorOutline,
                         contentDescription = "Cỡ chữ và chế độ lật trang",
                         tint = SepiaInk,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(17.dp)
                     )
                 }
 
@@ -1307,21 +1711,30 @@ private fun SepiaVerticalBookPane(
     chapterIndex: Int,
     totalChapters: Int,
     activeParagraphIndex: Int,
+    speakingParagraphIndex: Int,
+    showReadSelectionOutline: Boolean,
     fontSizeSp: Float,
     isEditMode: Boolean,
     isCompareMode: Boolean,
+    imeBottomPx: Int,
     listState: LazyListState,
     activeChapterBookmarks: Map<Int, ManualTocEntry>,
     activeChapterMatches: Map<Int, List<Pair<Int, ManualSearchMatch>>>,
     activeGlobalMatchIndex: Int,
     onSelectParagraph: (Int) -> Unit,
+    onParagraphFocusChanged: (Int, Boolean) -> Unit,
     onUpdateParagraph: (Int, String) -> Unit,
     onSelectChapter: (Int) -> Unit
 ) {
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+        contentPadding = PaddingValues(
+            start = 16.dp,
+            end = 16.dp,
+            top = 8.dp,
+            bottom = if (isEditMode) 120.dp else 12.dp
+        ),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         itemsIndexed(
@@ -1330,6 +1743,8 @@ private fun SepiaVerticalBookPane(
         ) { pIdx, paragraph ->
             val origPara = chapter.originalParagraphs.getOrNull(pIdx).orEmpty()
             val isActiveHighlightPara = (isCompareMode || isEditMode) && pIdx == activeParagraphIndex
+            val isSpeakingPara = pIdx == speakingParagraphIndex
+            val isReadSelectedPara = !isEditMode && !isCompareMode && showReadSelectionOutline && pIdx == activeParagraphIndex
 
             SepiaCurrentParagraphItem(
                 text = paragraph,
@@ -1339,10 +1754,14 @@ private fun SepiaVerticalBookPane(
                 isEditMode = isEditMode,
                 isCompareMode = isCompareMode,
                 isActiveHighlight = isActiveHighlightPara,
+                isSpeaking = isSpeakingPara,
+                isReadSelected = isReadSelectedPara,
+                imeBottomPx = imeBottomPx,
                 bookmark = activeChapterBookmarks[pIdx],
                 paragraphMatches = activeChapterMatches[pIdx].orEmpty(),
                 activeGlobalMatchIndex = activeGlobalMatchIndex,
                 onActivate = { onSelectParagraph(pIdx) },
+                onFocusChanged = { focused -> onParagraphFocusChanged(pIdx, focused) },
                 onTextChange = { updated -> onUpdateParagraph(pIdx, updated) }
             )
         }
@@ -1360,7 +1779,8 @@ private fun SepiaVerticalBookPane(
 
 /**
  * Horizontal Pager ("Lướt ngang") view that groups paragraphs into screen-fitted pages.
- * Automatically locks horizontal swipe when `isEditMode == true` to prevent gesture conflicts while typing.
+ * Automatically locks horizontal swipe when `isEditMode == true` and keeps page height stable
+ * while the soft keyboard is visible so tapping text never causes mid-edit repagination.
  */
 @Composable
 private fun SepiaHorizontalPagerPane(
@@ -1368,36 +1788,50 @@ private fun SepiaHorizontalPagerPane(
     chapterIndex: Int,
     totalChapters: Int,
     activeParagraphIndex: Int,
+    speakingParagraphIndex: Int,
+    showReadSelectionOutline: Boolean,
     scrollRequestId: Long,
     scrollTargetParagraphIndex: Int,
     fontSizeSp: Float,
     isEditMode: Boolean,
     isCompareMode: Boolean,
+    imeBottomPx: Int,
     activeChapterBookmarks: Map<Int, ManualTocEntry>,
     activeChapterMatches: Map<Int, List<Pair<Int, ManualSearchMatch>>>,
     activeGlobalMatchIndex: Int,
     onSelectParagraph: (Int) -> Unit,
+    onParagraphFocusChanged: (Int, Boolean) -> Unit,
     onUpdateParagraph: (Int, String) -> Unit,
     onSelectChapter: (Int) -> Unit
 ) {
     val scope = rememberCoroutineScope()
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val availableHeightDp: Dp = (maxHeight - 44.dp).coerceAtLeast(180.dp)
+        val rawAvailableHeightDp: Dp = (maxHeight - 44.dp).coerceAtLeast(180.dp)
         val availableWidthDp: Dp = (maxWidth - 36.dp).coerceAtLeast(220.dp)
+
+        // Freeze pagination height while keyboard is open so tapped paragraphs stay on the same page
+        var stableHeightDp by remember(chapter.fileName, isCompareMode) {
+            mutableStateOf(rawAvailableHeightDp)
+        }
+        if (imeBottomPx == 0 && rawAvailableHeightDp > 180.dp) {
+            stableHeightDp = rawAvailableHeightDp
+        } else if (rawAvailableHeightDp > stableHeightDp) {
+            stableHeightDp = rawAvailableHeightDp
+        }
 
         // Paginate paragraph indices dynamically to fit available screen height cleanly
         val pages: List<List<Int>> = remember(
             chapter.fileName,
             chapter.currentParagraphs.size,
             fontSizeSp,
-            availableHeightDp,
+            stableHeightDp,
             availableWidthDp
         ) {
             paginateParagraphIndices(
                 paragraphs = chapter.currentParagraphs,
                 fontSizeSp = fontSizeSp,
-                availableHeightDp = availableHeightDp.value,
+                availableHeightDp = stableHeightDp.value,
                 availableWidthDp = availableWidthDp.value
             )
         }
@@ -1438,28 +1872,41 @@ private fun SepiaHorizontalPagerPane(
                     modifier = Modifier
                         .fillMaxSize()
                         .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                        .padding(
+                            start = 16.dp,
+                            end = 16.dp,
+                            top = 8.dp,
+                            bottom = if (isEditMode) 120.dp else 12.dp
+                        ),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     for (pIdx in paraIndices) {
                         val paragraph = chapter.currentParagraphs.getOrNull(pIdx) ?: continue
                         val origPara = chapter.originalParagraphs.getOrNull(pIdx).orEmpty()
                         val isActiveHighlightPara = (isCompareMode || isEditMode) && pIdx == activeParagraphIndex
+                        val isSpeakingPara = pIdx == speakingParagraphIndex
+                        val isReadSelectedPara = !isEditMode && !isCompareMode && showReadSelectionOutline && pIdx == activeParagraphIndex
 
-                        SepiaCurrentParagraphItem(
-                            text = paragraph,
-                            originalText = origPara,
-                            isHeading = pIdx == 0 && paragraph.length <= 120,
-                            fontSizeSp = fontSizeSp,
-                            isEditMode = isEditMode,
-                            isCompareMode = isCompareMode,
-                            isActiveHighlight = isActiveHighlightPara,
-                            bookmark = activeChapterBookmarks[pIdx],
-                            paragraphMatches = activeChapterMatches[pIdx].orEmpty(),
-                            activeGlobalMatchIndex = activeGlobalMatchIndex,
-                            onActivate = { onSelectParagraph(pIdx) },
-                            onTextChange = { updated -> onUpdateParagraph(pIdx, updated) }
-                        )
+                        key("${chapter.fileName}_hp_$pIdx") {
+                            SepiaCurrentParagraphItem(
+                                text = paragraph,
+                                originalText = origPara,
+                                isHeading = pIdx == 0 && paragraph.length <= 120,
+                                fontSizeSp = fontSizeSp,
+                                isEditMode = isEditMode,
+                                isCompareMode = isCompareMode,
+                                isActiveHighlight = isActiveHighlightPara,
+                                isSpeaking = isSpeakingPara,
+                                isReadSelected = isReadSelectedPara,
+                                imeBottomPx = imeBottomPx,
+                                bookmark = activeChapterBookmarks[pIdx],
+                                paragraphMatches = activeChapterMatches[pIdx].orEmpty(),
+                                activeGlobalMatchIndex = activeGlobalMatchIndex,
+                                onActivate = { onSelectParagraph(pIdx) },
+                                onFocusChanged = { focused -> onParagraphFocusChanged(pIdx, focused) },
+                                onTextChange = { updated -> onUpdateParagraph(pIdx, updated) }
+                            )
+                        }
                     }
                 }
             }
@@ -1638,6 +2085,7 @@ private fun SepiaOriginalCompareBottomPane(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SepiaCurrentParagraphItem(
     text: String,
@@ -1647,36 +2095,87 @@ private fun SepiaCurrentParagraphItem(
     isEditMode: Boolean,
     isCompareMode: Boolean,
     isActiveHighlight: Boolean,
+    isSpeaking: Boolean,
+    isReadSelected: Boolean,
+    imeBottomPx: Int,
     bookmark: ManualTocEntry?,
     paragraphMatches: List<Pair<Int, ManualSearchMatch>>,
     activeGlobalMatchIndex: Int,
     onActivate: () -> Unit,
+    onFocusChanged: (Boolean) -> Unit,
     onTextChange: (String) -> Unit
 ) {
     var isFocused by remember { mutableStateOf(false) }
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val density = LocalDensity.current
+    var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+
+    var textFieldValue by remember {
+        mutableStateOf(TextFieldValue(text = text, selection = TextRange(text.length)))
+    }
+    if (textFieldValue.text != text) {
+        val safeStart = textFieldValue.selection.start.coerceIn(0, text.length)
+        val safeEnd = textFieldValue.selection.end.coerceIn(0, text.length)
+        textFieldValue = TextFieldValue(
+            text = text,
+            selection = TextRange(safeStart, safeEnd)
+        )
+    }
+
+    // Bring exact cursor line into view above the rising soft keyboard whenever focused, IME resizes, or cursor moves
+    LaunchedEffect(isFocused, imeBottomPx, textFieldValue.selection.end) {
+        if (!isEditMode || !isFocused || imeBottomPx <= 0) return@LaunchedEffect
+        val padPx = with(density) { 28.dp.toPx() }
+        val layout = textLayoutResult
+        val cursorOffset = textFieldValue.selection.end.coerceIn(0, textFieldValue.text.length)
+        val targetRect = if (layout != null && cursorOffset <= layout.layoutInput.text.length) {
+            runCatching {
+                val r = layout.getCursorRect(cursorOffset)
+                Rect(
+                    left = r.left,
+                    top = (r.top - padPx).coerceAtLeast(0f),
+                    right = r.right,
+                    bottom = r.bottom + padPx
+                )
+            }.getOrNull()
+        } else {
+            null
+        }
+        runCatching { bringIntoViewRequester.bringIntoView(targetRect) }
+        delay(80L)
+        runCatching { bringIntoViewRequester.bringIntoView(targetRect) }
+    }
 
     val effectiveFontSize = if (isHeading) (fontSizeSp + 2.5f).sp else fontSizeSp.sp
     val effectiveLineHeight = if (isHeading) ((fontSizeSp + 2.5f) * 1.38f).sp else (fontSizeSp * 1.62f).sp
     val effectiveWeight = if (isHeading) FontWeight.Bold else FontWeight.Normal
 
+    val ttsTintColor = Color(0x262A7B6F)
+    val ttsBorderColor = Color(0xFF1F6B5F)
+
     val containerBg = when {
+        isSpeaking -> ttsTintColor
         isActiveHighlight -> SepiaActiveParagraphBg
+        isReadSelected -> SepiaActiveParagraphBg.copy(alpha = 0.55f)
         isEditMode && isFocused -> SepiaCard
         else -> Color.Transparent
     }
 
     val containerBorder = when {
+        isSpeaking -> BorderStroke(1.4.dp, ttsBorderColor)
         isEditMode && isFocused -> BorderStroke(1.3.dp, SepiaAccent)
         isActiveHighlight -> BorderStroke(1.1.dp, SepiaAccent.copy(alpha = 0.65f))
+        isReadSelected -> BorderStroke(0.9.dp, SepiaAccent.copy(alpha = 0.45f))
         isEditMode -> BorderStroke(0.6.dp, SepiaBorder.copy(alpha = 0.65f))
         else -> null
     }
 
-    val needsCardPadding = isEditMode || isActiveHighlight
+    val needsCardPadding = isEditMode || isActiveHighlight || isSpeaking || isReadSelected
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .bringIntoViewRequester(bringIntoViewRequester)
             .clip(RoundedCornerShape(10.dp))
             .background(containerBg)
             .then(
@@ -1687,7 +2186,7 @@ private fun SepiaCurrentParagraphItem(
                 }
             )
             .then(
-                if (!isEditMode && isCompareMode) {
+                if (!isEditMode) {
                     Modifier.clickable(onClick = onActivate)
                 } else {
                     Modifier
@@ -1698,6 +2197,27 @@ private fun SepiaCurrentParagraphItem(
                 vertical = if (needsCardPadding) 7.dp else 2.dp
             )
     ) {
+        if (isSpeaking) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.padding(bottom = 3.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.VolumeUp,
+                    contentDescription = "Đang đọc thử",
+                    tint = ttsBorderColor,
+                    modifier = Modifier.size(12.dp)
+                )
+                Text(
+                    text = "Đang đọc thử…",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = ttsBorderColor
+                )
+            }
+        }
+
         if (bookmark != null) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -1731,29 +2251,41 @@ private fun SepiaCurrentParagraphItem(
                 }
             }
 
-            BasicTextField(
-                value = text,
-                onValueChange = { updated ->
-                    onActivate()
-                    onTextChange(updated)
-                },
-                visualTransformation = visualTransformation,
-                textStyle = TextStyle(
-                    fontSize = effectiveFontSize,
-                    lineHeight = effectiveLineHeight,
-                    fontWeight = effectiveWeight,
-                    color = SepiaInk
-                ),
-                cursorBrush = SolidColor(SepiaAccent),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .onFocusChanged { state ->
-                        isFocused = state.isFocused
-                        if (state.isFocused) {
-                            onActivate()
+            Box(modifier = Modifier.fillMaxWidth()) {
+                if (textFieldValue.text.isEmpty()) {
+                    Text(
+                        text = "Nhập nội dung đoạn văn…",
+                        fontSize = effectiveFontSize,
+                        lineHeight = effectiveLineHeight,
+                        color = SepiaInkMuted.copy(alpha = 0.55f)
+                    )
+                }
+                BasicTextField(
+                    value = textFieldValue,
+                    onValueChange = { updated ->
+                        textFieldValue = updated
+                        onActivate()
+                        if (updated.text != text) {
+                            onTextChange(updated.text)
                         }
-                    }
-            )
+                    },
+                    onTextLayout = { result -> textLayoutResult = result },
+                    visualTransformation = visualTransformation,
+                    textStyle = TextStyle(
+                        fontSize = effectiveFontSize,
+                        lineHeight = effectiveLineHeight,
+                        fontWeight = effectiveWeight,
+                        color = SepiaInk
+                    ),
+                    cursorBrush = SolidColor(SepiaAccent),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { state ->
+                            isFocused = state.isFocused
+                            onFocusChanged(state.isFocused)
+                        }
+                )
+            }
         } else {
             val renderedText = remember(
                 text,
@@ -1930,4 +2462,96 @@ private fun paginateParagraphIndices(
         pages.add(currentPage)
     }
     return pages
+}
+
+/**
+ * Upgrade 1.5: Compact iOS-style 1-tap quick-save rule chip rendered right above the keyboard
+ * when the user manually fixes a short phrase (1..3 words) in Edit Mode.
+ */
+@Composable
+private fun QuickSaveReplaceRuleChipBar(
+    oldPhrase: String,
+    newPhrase: String,
+    onSaveRule: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(SepiaChrome)
+    ) {
+        HorizontalDivider(thickness = 0.7.dp, color = SepiaBorder)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = SepiaCard,
+                border = BorderStroke(1.dp, SepiaAccent.copy(alpha = 0.65f)),
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .shadow(
+                        elevation = 3.dp,
+                        shape = RoundedCornerShape(50),
+                        ambientColor = Color.Black.copy(alpha = 0.08f),
+                        spotColor = Color.Black.copy(alpha = 0.12f)
+                    )
+                    .clip(RoundedCornerShape(50))
+                    .clickable(onClick = onSaveRule)
+                    .testTag("manual_quick_save_rule_chip")
+            ) {
+                Row(
+                    modifier = Modifier.padding(start = 12.dp, end = 6.dp, top = 5.dp, bottom = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "+ Lưu quy tắc: \"$oldPhrase\" -> \"$newPhrase\"",
+                        fontSize = 11.sp,
+                        lineHeight = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = SepiaAccent,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .clip(CircleShape)
+                            .background(SepiaChrome)
+                            .clickable(onClick = onDismiss)
+                            .testTag("manual_quick_save_rule_dismiss"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "Bỏ qua gợi ý quy tắc",
+                            tint = SepiaInkMuted,
+                            modifier = Modifier.size(12.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private val vietnameseDiacriticRegex = Regex(
+    """[ăâđêôơưĂÂĐÊÔƠƯàáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵÀÁẢÃẠẰẮẲẴẶẦẤẨẪẬÈÉẺẼẸỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌỒỐỔỖỘỜỚỞỠỢÙÚỦŨỤỪỨỬỮỰỲÝỶỸỴ]"""
+)
+
+private fun resolveTtsLocale(text: String, bookLanguage: String?): Locale {
+    if (vietnameseDiacriticRegex.containsMatchIn(text)) {
+        return Locale("vi", "VN")
+    }
+    if (bookLanguage != null && bookLanguage.trim().startsWith("en", ignoreCase = true)) {
+        return Locale.US
+    }
+    val asciiLetters = text.count { it in 'a'..'z' || it in 'A'..'Z' }
+    return if (asciiLetters >= 8) Locale.US else Locale("vi", "VN")
 }
