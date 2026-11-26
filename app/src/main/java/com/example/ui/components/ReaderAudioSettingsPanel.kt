@@ -12,8 +12,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -38,8 +36,6 @@ import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.RecordVoiceOver
-import androidx.compose.material.icons.rounded.RestartAlt
-import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.WaterDrop
 import androidx.compose.material3.CircularProgressIndicator
@@ -50,11 +46,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,6 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
@@ -76,19 +74,15 @@ import com.example.data.ReaderPreferences
 import com.example.data.ReaderVoiceProfile
 import com.example.service.DeviceOfflineVoice
 import com.example.ui.theme.IosBlue
-import java.util.Locale
-import kotlin.math.abs
 
 /**
- * Full-featured iOS Minimalist Audio Settings Sheet for BookReaderScreen:
- * 1. Giọng người dẫn truyện (Narrator selector)
- * 2. Giọng gốc trên thiết bị (Offline) — xếp hạng QUALITY_HIGH + nút Tải thêm giọng chất lượng cao
- * 3. Tùy chỉnh nâng cao (Pitch 0.60–1.40, Speech Rate 0.70–1.80, Sentence Pause 150–800ms + Nghe thử + Khôi phục mặc định)
- * 4. Tất cả 6 giọng mẫu Nam/Nữ (với bánh răng nhỏ chỉnh cao độ từng giọng)
- * 5. Quét nhân vật (Top 7 nhân vật -> phân vai giọng riêng -> OK)
- * 6. Âm thanh nền (Tắt + 3 bản nhạc nền du dương offline)
+ * Bảng Cài đặt nghe sách phong cách iOS tối giản trong trình đọc sách:
+ * 1. Giọng người dẫn truyện (dạng mũi tên xổ xuống gọn gàng)
+ * 2. Giọng gốc trên thiết bị (Offline • ưu tiên QUALITY_HIGH + nút Tải thêm giọng chất lượng cao)
+ * 3. Tùy chỉnh nâng cao (Pitch 0.60–1.40, Tốc độ 0.70–1.80, Ngắt nghỉ 150–800ms + Nghe thử + Khôi phục mặc định)
+ * 4. Quét nhân vật (Top 7 nhân vật -> chọn giọng -> OK) + Công tắc Bật/Tắt giọng nhân vật ngay bên dưới
+ * 5. Âm thanh nền (Tắt + 3 nhạc nền du dương offline + âm lượng)
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ReaderAudioSettingsSheetContent(
     readerPrefs: ReaderPreferences,
@@ -108,17 +102,14 @@ fun ReaderAudioSettingsSheetContent(
     onPreviewAdvanced: (pitch: Float, rate: Float, pauseMs: Int) -> Unit,
     onResetAdvancedDefaults: () -> Unit,
     onPreviewVoice: (ReaderVoiceProfile, Float) -> Unit,
-    onSaveVoicePitch: (ReaderVoiceProfile, Float) -> Unit,
-    onResetVoicePitch: (ReaderVoiceProfile) -> Unit,
+    onToggleCharacterVoicesEnabled: (Boolean) -> Unit,
     onScanCharactersClick: () -> Unit,
     onConfirmCharacterAssignments: (Map<String, ReaderVoiceProfile>) -> Unit,
     onSelectAmbientSound: (AmbientSoundTrack) -> Unit,
     onChangeAmbientVolume: (Float) -> Unit,
     onClose: () -> Unit
 ) {
-    // Which voice currently has its small pitch-settings card expanded
-    var tuningVoice by remember { mutableStateOf<ReaderVoiceProfile?>(null) }
-    var draftPitch by remember { mutableFloatStateOf(1.0f) }
+    var narratorDropdownExpanded by remember { mutableStateOf(false) }
 
     // Draft character -> voice map while the scanned character picker is open
     val draftCharVoices = remember { mutableStateMapOf<String, ReaderVoiceProfile?>() }
@@ -126,14 +117,12 @@ fun ReaderAudioSettingsSheetContent(
         if (showCharacterVoicePicker) {
             draftCharVoices.clear()
             scannedCharacters.forEachIndexed { idx, char ->
-                // Restore previously saved voice or suggest a varied voice distinct from narrator
                 val existing = savedCharacterAssignments[char.name]
                 if (existing != null) {
                     draftCharVoices[char.name] = existing
                 } else {
                     val allVoices = ReaderVoiceProfile.entries
-                    val suggested = allVoices[(idx + 1) % allVoices.size]
-                    draftCharVoices[char.name] = suggested
+                    draftCharVoices[char.name] = allVoices[(idx + 1) % allVoices.size]
                 }
             }
         }
@@ -186,7 +175,7 @@ fun ReaderAudioSettingsSheetContent(
                         color = primaryInk
                     )
                     Text(
-                        text = "Giọng đọc, phân vai nhân vật & âm thanh nền",
+                        text = "Giọng dẫn truyện, tinh chỉnh TTS & âm thanh nền",
                         fontSize = 10.sp,
                         color = secondaryInk
                     )
@@ -222,60 +211,129 @@ fun ReaderAudioSettingsSheetContent(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             // =================================================================
-            // 1. CHỌN GIỌNG NGƯỜI DẪN TRUYỆN (Narrator Voice)
+            // 1. GIỌNG NGƯỜI DẪN TRUYỆN — Dạng mũi tên xổ xuống (Dropdown)
             // =================================================================
             AudioSectionBlock(
                 icon = Icons.Rounded.RecordVoiceOver,
                 title = "Giọng người dẫn truyện",
-                subtitle = "Đọc lời kể chuyện và các đoạn không có nhân vật"
+                subtitle = "Chọn giọng mặc định để đọc lời kể chuyện"
             ) {
-                FlowRow(
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    ReaderVoiceProfile.entries.forEach { profile ->
-                        val isNarrator = readerPrefs.voiceProfile == profile
+                    Box(modifier = Modifier.weight(1f)) {
                         Surface(
-                            shape = RoundedCornerShape(50),
-                            color = if (isNarrator) IosBlue else itemBg,
-                            border = BorderStroke(
-                                width = 0.6.dp,
-                                color = if (isNarrator) IosBlue else borderCol
-                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            color = itemBg,
+                            border = BorderStroke(0.6.dp, borderCol),
                             modifier = Modifier
-                                .clip(RoundedCornerShape(50))
-                                .clickable { onSelectNarratorVoice(profile) }
-                                .testTag("narrator_voice_${profile.storageKey}")
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { narratorDropdownExpanded = true }
+                                .testTag("narrator_voice_dropdown")
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                if (isNarrator) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Check,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(12.dp)
-                                    )
-                                }
                                 Text(
-                                    text = profile.shortLabel,
-                                    fontSize = 11.sp,
-                                    fontWeight = if (isNarrator) FontWeight.SemiBold else FontWeight.Medium,
-                                    color = if (isNarrator) Color.White else primaryInk,
-                                    maxLines = 1
+                                    text = readerPrefs.voiceProfile.displayName,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = primaryInk,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Icon(
+                                    imageVector = Icons.Rounded.KeyboardArrowDown,
+                                    contentDescription = "Chọn giọng dẫn truyện",
+                                    tint = IosBlue,
+                                    modifier = Modifier.size(18.dp)
                                 )
                             }
+                        }
+
+                        DropdownMenu(
+                            expanded = narratorDropdownExpanded,
+                            onDismissRequest = { narratorDropdownExpanded = false },
+                            containerColor = Color.White
+                        ) {
+                            ReaderVoiceProfile.entries.forEach { profile ->
+                                val selected = readerPrefs.voiceProfile == profile
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Text(
+                                                text = profile.displayName,
+                                                fontSize = 12.sp,
+                                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                                color = if (selected) IosBlue else primaryInk
+                                            )
+                                            if (selected) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Check,
+                                                    contentDescription = null,
+                                                    tint = IosBlue,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
+                                        }
+                                    },
+                                    onClick = {
+                                        onSelectNarratorVoice(profile)
+                                        narratorDropdownExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    // Nút nghe thử nhanh giọng dẫn truyện hiện tại
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = cardBg,
+                        border = BorderStroke(0.5.dp, borderCol),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable {
+                                val pitch = readerPrefs.resolvePlaybackPitch(readerPrefs.voiceProfile)
+                                onPreviewVoice(readerPrefs.voiceProfile, pitch)
+                            }
+                            .testTag("narrator_voice_preview_button")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PlayArrow,
+                                contentDescription = "Nghe thử giọng dẫn truyện",
+                                tint = IosBlue,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Text(
+                                text = "Thử",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = primaryInk
+                            )
                         }
                     }
                 }
             }
 
             // =================================================================
-            // 1B. GIỌNG GỐC TRÊN THIẾT BỊ (OFFLINE • ƯU TIÊN QUALITY_HIGH)
+            // 2. GIỌNG GỐC TRÊN THIẾT BỊ (OFFLINE • ƯU TIÊN QUALITY_HIGH)
             // =================================================================
             DeviceOfflineVoicesSection(
                 availableDeviceVoices = availableDeviceVoices,
@@ -286,7 +344,7 @@ fun ReaderAudioSettingsSheetContent(
             )
 
             // =================================================================
-            // 1C. TÙY CHỈNH NÂNG CAO (PITCH, TỐC ĐỘ, NGẮT NGHỈ GIỮA CÁC CÂU)
+            // 3. TÙY CHỈNH NÂNG CAO (PITCH, TỐC ĐỘ, NGẮT NGHỈ GIỮA CÁC CÂU)
             // =================================================================
             AdvancedCustomVoiceSettingsSection(
                 readerPrefs = readerPrefs,
@@ -299,310 +357,7 @@ fun ReaderAudioSettingsSheetContent(
             )
 
             // =================================================================
-            // 2. TẤT CẢ GIỌNG (With small gear button beside each voice -> Pitch + Lưu + Reset)
-            // =================================================================
-            AudioSectionBlock(
-                icon = Icons.Rounded.GraphicEq,
-                title = "Tất cả giọng",
-                subtitle = "Chạm bánh răng nhỏ để tùy chỉnh độ cao bổng từng giọng"
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(itemBg)
-                        .border(0.5.dp, borderCol, RoundedCornerShape(14.dp))
-                ) {
-                    ReaderVoiceProfile.entries.forEachIndexed { idx, profile ->
-                        val currentPitch = readerPrefs.effectivePitchFor(profile)
-                        val isCustomized = readerPrefs.customVoicePitches.containsKey(profile.storageKey) &&
-                            abs(currentPitch - profile.pitch) > 0.01f
-                        val isNarrator = readerPrefs.voiceProfile == profile
-                        val isTuning = tuningVoice == profile
-
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onSelectNarratorVoice(profile) }
-                                    .padding(horizontal = 12.dp, vertical = 9.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        Text(
-                                            text = profile.displayName,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = if (isNarrator) IosBlue else primaryInk,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        if (isNarrator) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .clip(RoundedCornerShape(50))
-                                                    .background(IosBlue.copy(alpha = 0.12f))
-                                                    .padding(horizontal = 6.dp, vertical = 1.dp)
-                                            ) {
-                                                Text(
-                                                    text = "Dẫn truyện",
-                                                    fontSize = 9.sp,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    color = IosBlue
-                                                )
-                                            }
-                                        }
-                                    }
-                                    Text(
-                                        text = if (isCustomized) {
-                                            "Cao độ: ${formatPitchLabel(currentPitch)} (Đã tùy chỉnh)"
-                                        } else {
-                                            "Cao độ mặc định: ${formatPitchLabel(currentPitch)}"
-                                        },
-                                        fontSize = 10.sp,
-                                        color = if (isCustomized) IosBlue else secondaryInk
-                                    )
-                                }
-
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    // Mini Preview voice button
-                                    Box(
-                                        modifier = Modifier
-                                            .size(28.dp)
-                                            .clip(CircleShape)
-                                            .background(cardBg)
-                                            .clickable { onPreviewVoice(profile, currentPitch) }
-                                            .testTag("voice_preview_${profile.storageKey}"),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.PlayArrow,
-                                            contentDescription = "Nghe thử ${profile.shortLabel}",
-                                            tint = primaryInk,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    }
-
-                                    // Small Gear Settings icon beside each voice for Pitch Tuning
-                                    Box(
-                                        modifier = Modifier
-                                            .size(28.dp)
-                                            .clip(CircleShape)
-                                            .background(if (isTuning) IosBlue else cardBg)
-                                            .clickable {
-                                                if (isTuning) {
-                                                    tuningVoice = null
-                                                } else {
-                                                    tuningVoice = profile
-                                                    draftPitch = currentPitch
-                                                }
-                                            }
-                                            .testTag("voice_tune_${profile.storageKey}"),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.Settings,
-                                            contentDescription = "Chỉnh độ cao bổng ${profile.shortLabel}",
-                                            tint = if (isTuning) Color.White else secondaryInk,
-                                            modifier = Modifier.size(15.dp)
-                                        )
-                                    }
-                                }
-                            }
-
-                            // Expandable Inline Pitch Tuner (Độ cao bổng + Nghe thử + Reset + Lưu)
-                            AnimatedVisibility(
-                                visible = isTuning,
-                                enter = expandVertically() + fadeIn(),
-                                exit = shrinkVertically() + fadeOut()
-                            ) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(start = 12.dp, end = 12.dp, bottom = 10.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(cardBg)
-                                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = "Độ cao bổng (${profile.shortLabel})",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = primaryInk
-                                        )
-                                        Text(
-                                            text = "${formatPitchLabel(draftPitch)} • ${describePitchTone(draftPitch)}",
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = IosBlue
-                                        )
-                                    }
-
-                                    Slider(
-                                        value = draftPitch,
-                                        onValueChange = { draftPitch = it },
-                                        valueRange = LibraryManager.MIN_VOICE_PITCH..LibraryManager.MAX_VOICE_PITCH,
-                                        colors = SliderDefaults.colors(
-                                            thumbColor = IosBlue,
-                                            activeTrackColor = IosBlue,
-                                            inactiveTrackColor = Color(0xFFD1D1D6)
-                                        ),
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(28.dp)
-                                            .testTag("voice_pitch_slider_${profile.storageKey}")
-                                    )
-
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = "Trầm sâu",
-                                            fontSize = 9.sp,
-                                            color = secondaryInk
-                                        )
-                                        Text(
-                                            text = "Mặc định (${formatPitchLabel(profile.pitch)})",
-                                            fontSize = 9.sp,
-                                            color = secondaryInk
-                                        )
-                                        Text(
-                                            text = "Cao bổng",
-                                            fontSize = 9.sp,
-                                            color = secondaryInk
-                                        )
-                                    }
-
-                                    Spacer(modifier = Modifier.height(2.dp))
-
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        // Nghe thử nút nhỏ
-                                        Surface(
-                                            shape = RoundedCornerShape(50),
-                                            color = itemBg,
-                                            border = BorderStroke(0.5.dp, borderCol),
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(50))
-                                                .clickable { onPreviewVoice(profile, draftPitch) }
-                                                .testTag("voice_pitch_preview_${profile.storageKey}")
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(3.dp)
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Rounded.PlayArrow,
-                                                    contentDescription = null,
-                                                    tint = primaryInk,
-                                                    modifier = Modifier.size(13.dp)
-                                                )
-                                                Text(
-                                                    text = "Thử",
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.Medium,
-                                                    color = primaryInk
-                                                )
-                                            }
-                                        }
-
-                                        Spacer(modifier = Modifier.weight(1f))
-
-                                        // Reset button
-                                        Surface(
-                                            shape = RoundedCornerShape(50),
-                                            color = itemBg,
-                                            border = BorderStroke(0.5.dp, borderCol),
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(50))
-                                                .clickable {
-                                                    draftPitch = profile.pitch
-                                                    onResetVoicePitch(profile)
-                                                }
-                                                .testTag("voice_pitch_reset_${profile.storageKey}")
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Rounded.RestartAlt,
-                                                    contentDescription = null,
-                                                    tint = secondaryInk,
-                                                    modifier = Modifier.size(13.dp)
-                                                )
-                                                Text(
-                                                    text = "Reset",
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    color = primaryInk
-                                                )
-                                            }
-                                        }
-
-                                        // Lưu button
-                                        Surface(
-                                            shape = RoundedCornerShape(50),
-                                            color = IosBlue,
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(50))
-                                                .clickable {
-                                                    onSaveVoicePitch(profile, draftPitch)
-                                                    tuningVoice = null
-                                                }
-                                                .testTag("voice_pitch_save_${profile.storageKey}")
-                                        ) {
-                                            Text(
-                                                text = "Lưu",
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = Color.White,
-                                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (idx < ReaderVoiceProfile.entries.lastIndex) {
-                                HorizontalDivider(
-                                    thickness = 0.5.dp,
-                                    color = borderCol,
-                                    modifier = Modifier.padding(horizontal = 12.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // =================================================================
-            // 3. QUÉT NHÂN VẬT TRUYỆN (Top 7 Characters)
-            //    Hidden completely until user taps the Scan ("Quét") button!
+            // 4. PHÂN VAI NHÂN VẬT (Nút Quét + Công tắc Bật/Tắt giọng nhân vật bên dưới)
             // =================================================================
             AudioSectionBlock(
                 icon = Icons.Rounded.DocumentScanner,
@@ -650,7 +405,53 @@ fun ReaderAudioSettingsSheetContent(
                     }
                 }
             ) {
-                // ONLY shown after user explicitly taps "Quét"!
+                // Công tắc Bật / Tắt giọng nhân vật ngay dưới mục Quét
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(cardBg)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Chế độ giọng nhân vật",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = primaryInk
+                        )
+                        Text(
+                            text = if (readerPrefs.characterVoicesEnabled) {
+                                "Đang bật — Tự đổi giọng theo từng nhân vật đã gán"
+                            } else {
+                                "Đang tắt — Chỉ dùng giọng người dẫn truyện"
+                            },
+                            fontSize = 10.sp,
+                            color = secondaryInk,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Switch(
+                        checked = readerPrefs.characterVoicesEnabled,
+                        onCheckedChange = onToggleCharacterVoicesEnabled,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = IosBlue,
+                            uncheckedThumbColor = Color.White,
+                            uncheckedTrackColor = Color(0xFFD1D1D6),
+                            uncheckedBorderColor = Color.Transparent
+                        ),
+                        modifier = Modifier
+                            .scale(0.75f)
+                            .height(26.dp)
+                            .testTag("character_voices_toggle_switch")
+                    )
+                }
+
+                // Danh sách chọn giọng cho Top 7 nhân vật — CHỈ hiện khi vừa bấm nút Quét
                 AnimatedVisibility(
                     visible = showCharacterVoicePicker,
                     enter = expandVertically() + fadeIn(),
@@ -812,7 +613,6 @@ fun ReaderAudioSettingsSheetContent(
                             }
                         }
 
-                        // Confirm "OK" button to apply & close character picker
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -850,7 +650,7 @@ fun ReaderAudioSettingsSheetContent(
             }
 
             // =================================================================
-            // 4. ÂM THANH NỀN (Tắt + 3 gentle melodious offline background sounds)
+            // 5. ÂM THANH NỀN (Tắt + 3 nhạc nền du dương offline)
             // =================================================================
             AudioSectionBlock(
                 icon = Icons.Rounded.MusicNote,
@@ -1035,19 +835,5 @@ private fun AudioSectionBlock(
             }
         }
         content()
-    }
-}
-
-private fun formatPitchLabel(pitch: Float): String {
-    return String.format(Locale.US, "%.2f", pitch)
-}
-
-private fun describePitchTone(pitch: Float): String {
-    return when {
-        pitch < 0.78f -> "Trầm sâu"
-        pitch < 0.94f -> "Trầm ấm"
-        pitch <= 1.10f -> "Tự nhiên"
-        pitch <= 1.30f -> "Thanh sáng"
-        else -> "Cao bổng"
     }
 }

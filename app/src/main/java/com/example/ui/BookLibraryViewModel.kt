@@ -7,6 +7,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.audio.AmbientSoundTrack
 import com.example.audio.DetectedCharacter
 import com.example.data.BookCollection
+import com.example.data.CustomImportedFont
+import com.example.data.HorizontalPageEffect
 import com.example.data.LibraryBook
 import com.example.data.LibraryChapterMeta
 import com.example.data.LibraryManager
@@ -14,12 +16,14 @@ import com.example.data.ReaderPaperTheme
 import com.example.data.ReaderPreferences
 import com.example.data.ReaderScrollDirection
 import com.example.data.ReaderVoiceProfile
+import com.example.data.TtsEngineType
 import com.example.pipeline.FilePathResolver
 import com.example.pipeline.PreparedWorkspace
 import com.example.pipeline.SourceFileInfo
 import com.example.service.AudioPlaybackStateHolder
 import com.example.service.BookAudioPlaybackService
 import com.example.service.BookAudioPlaybackState
+import com.example.ui.theme.ReaderFontRegistry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -78,6 +82,9 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     private val _readerPrefs = MutableStateFlow(libraryManager.getReaderPreferences())
     val readerPrefs: StateFlow<ReaderPreferences> = _readerPrefs.asStateFlow()
 
+    private val _customFonts = MutableStateFlow<List<CustomImportedFont>>(emptyList())
+    val customFonts: StateFlow<List<CustomImportedFont>> = _customFonts.asStateFlow()
+
     private val _readerState = MutableStateFlow(ActiveBookReaderState())
     val readerState: StateFlow<ActiveBookReaderState> = _readerState.asStateFlow()
 
@@ -91,8 +98,10 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch(Dispatchers.IO) {
             libraryManager.ensureSampleBookSeeded()
             val (loadedBooks, loadedCollections) = libraryManager.loadLibraryIndex()
+            val loadedFonts = libraryManager.loadCustomImportedFonts()
             _books.value = loadedBooks
             _collections.value = loadedCollections
+            _customFonts.value = loadedFonts
         }
     }
 
@@ -538,6 +547,75 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
         libraryManager.saveReaderPreferences(updated)
         BookAudioPlaybackService.syncSettings(getApplication())
         _statusMessage.value = "Đã khôi phục mặc định thông số giọng đọc"
+    }
+
+    fun selectReaderFont(fontId: String) {
+        val cleanId = fontId.ifBlank { LibraryManager.DEFAULT_FONT_ID }
+        val updated = _readerPrefs.value.copy(fontId = cleanId)
+        _readerPrefs.value = updated
+        libraryManager.saveReaderPreferences(updated)
+    }
+
+    fun importCustomFont(uri: Uri) {
+        viewModelScope.launch {
+            val result = libraryManager.importCustomFontFromUri(getApplication(), uri)
+            result.onSuccess { imported ->
+                val refreshed = withContext(Dispatchers.IO) {
+                    libraryManager.loadCustomImportedFonts()
+                }
+                _customFonts.value = refreshed
+                selectReaderFont(imported.id)
+                _statusMessage.value = "Đã nhập font \"${imported.displayName}\""
+            }.onFailure { err ->
+                _statusMessage.value = err.message ?: "Không thể nhập tệp font này (.ttf / .otf)."
+            }
+        }
+    }
+
+    fun deleteCustomFont(fontId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val targetPath = _customFonts.value.firstOrNull { it.id == fontId }?.filePath
+            val remaining = libraryManager.deleteCustomImportedFont(fontId)
+            if (targetPath != null) {
+                ReaderFontRegistry.evictCachedFont(targetPath)
+            }
+            _customFonts.value = remaining
+            if (_readerPrefs.value.fontId == fontId) {
+                val updated = _readerPrefs.value.copy(fontId = LibraryManager.DEFAULT_FONT_ID)
+                _readerPrefs.value = updated
+                libraryManager.saveReaderPreferences(updated)
+            }
+        }
+    }
+
+    fun selectHorizontalPageEffect(effect: HorizontalPageEffect) {
+        val updated = _readerPrefs.value.copy(horizontalPageEffect = effect)
+        _readerPrefs.value = updated
+        libraryManager.saveReaderPreferences(updated)
+    }
+
+    fun setCharacterVoicesEnabled(enabled: Boolean) {
+        val updated = _readerPrefs.value.copy(characterVoicesEnabled = enabled)
+        _readerPrefs.value = updated
+        libraryManager.saveReaderPreferences(updated)
+        BookAudioPlaybackService.syncSettings(getApplication())
+    }
+
+    fun selectTtsEngineType(engineType: TtsEngineType) {
+        val updated = _readerPrefs.value.copy(ttsEngineType = engineType)
+        _readerPrefs.value = updated
+        libraryManager.saveReaderPreferences(updated)
+        BookAudioPlaybackService.syncSettings(getApplication())
+        if (engineType == TtsEngineType.AI_TTS) {
+            _statusMessage.value = "TTS AI sẽ sớm được tích hợp — tạm thời vẫn dùng TTS Hệ thống khi phát."
+        }
+    }
+
+    fun setAutoPlayAmbientWithAudio(enabled: Boolean) {
+        val updated = _readerPrefs.value.copy(autoPlayAmbientWithAudio = enabled)
+        _readerPrefs.value = updated
+        libraryManager.saveReaderPreferences(updated)
+        BookAudioPlaybackService.syncSettings(getApplication())
     }
 
     fun selectAmbientSound(track: AmbientSoundTrack) {

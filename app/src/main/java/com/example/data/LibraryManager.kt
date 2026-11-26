@@ -6,9 +6,11 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.provider.OpenableColumns
 import com.example.audio.AmbientSoundTrack
 import com.example.audio.DetectedCharacter
 import com.example.audio.StoryCharacterScanner
@@ -171,18 +173,69 @@ enum class ReaderScrollDirection(val storageKey: String, val label: String) {
     }
 }
 
+/**
+ * 3 chế độ hiệu ứng khi chọn lướt ngang trong trình đọc sách.
+ */
+enum class HorizontalPageEffect(
+    val storageKey: String,
+    val label: String,
+    val subtitle: String
+) {
+    BOOK_FLIP("book_flip", "Lật sách", "Hiệu ứng lật trang 3D mềm mại"),
+    TAP_FADE("tap_fade", "Chạm lướt mờ", "Chạm mép hoặc vuốt chuyển mờ nhẹ"),
+    NONE("none", "Không hiệu ứng", "Chuyển trang tức thì, siêu nhẹ");
+
+    companion object {
+        fun fromKey(key: String?): HorizontalPageEffect {
+            return entries.firstOrNull { it.storageKey == key } ?: BOOK_FLIP
+        }
+    }
+}
+
+/**
+ * Bộ máy đọc sách nói: TTS Hệ thống (đang chạy offline) hoặc TTS AI (chờ tích hợp ở bản tới).
+ */
+enum class TtsEngineType(
+    val storageKey: String,
+    val label: String,
+    val subtitle: String
+) {
+    SYSTEM_TTS("system_tts", "TTS Hệ thống", "Giọng đọc Offline gốc trên thiết bị"),
+    AI_TTS("ai_tts", "TTS AI", "Giọng AI tự nhiên (sẽ bổ sung sau)");
+
+    companion object {
+        fun fromKey(key: String?): TtsEngineType {
+            return entries.firstOrNull { it.storageKey == key } ?: SYSTEM_TTS
+        }
+    }
+}
+
+/**
+ * Font chữ `.ttf` / `.otf` do người dùng tự nhập vào ứng dụng (lưu offline).
+ */
+data class CustomImportedFont(
+    val id: String,
+    val displayName: String,
+    val filePath: String
+)
+
 data class ReaderPreferences(
     val fontSizeSp: Float = 17f,
+    val fontId: String = "literata",
     val paperTheme: ReaderPaperTheme = ReaderPaperTheme.BOOK_BROWN,
     val scrollDirection: ReaderScrollDirection = ReaderScrollDirection.VERTICAL,
+    val horizontalPageEffect: HorizontalPageEffect = HorizontalPageEffect.BOOK_FLIP,
     val pageMarginDp: Float = 22f,
     val lineHeightMultiplier: Float = 1.56f,
     val letterSpacingSp: Float = 0.0f,
     val speechRate: Float = 1.0f,
     val voiceProfile: ReaderVoiceProfile = ReaderVoiceProfile.FEMALE_1,
     val customVoicePitches: Map<String, Float> = emptyMap(),
+    val characterVoicesEnabled: Boolean = true,
+    val ttsEngineType: TtsEngineType = TtsEngineType.SYSTEM_TTS,
     val ambientSound: AmbientSoundTrack = AmbientSoundTrack.NONE,
     val ambientVolume: Float = 0.20f,
+    val autoPlayAmbientWithAudio: Boolean = true,
     // Nâng cấp TTS Offline: giọng gốc trên máy + chế độ Tùy chỉnh nâng cao (Pitch, Rate, Pause)
     val selectedSystemVoiceName: String? = null,
     val advancedCustomEnabled: Boolean = false,
@@ -824,8 +877,10 @@ class LibraryManager(
         }
         return ReaderPreferences(
             fontSizeSp = p.getFloat(KEY_FONT_SIZE, 17f).coerceIn(MIN_FONT_SIZE_SP, MAX_FONT_SIZE_SP),
+            fontId = p.getString(KEY_FONT_ID, DEFAULT_FONT_ID)?.takeIf { it.isNotBlank() } ?: DEFAULT_FONT_ID,
             paperTheme = ReaderPaperTheme.fromKey(p.getString(KEY_PAPER_THEME, null)),
             scrollDirection = ReaderScrollDirection.fromKey(p.getString(KEY_SCROLL_DIRECTION, null)),
+            horizontalPageEffect = HorizontalPageEffect.fromKey(p.getString(KEY_HORIZONTAL_PAGE_EFFECT, null)),
             pageMarginDp = p.getFloat(KEY_PAGE_MARGIN_DP, DEFAULT_PAGE_MARGIN_DP)
                 .coerceIn(MIN_PAGE_MARGIN_DP, MAX_PAGE_MARGIN_DP),
             lineHeightMultiplier = p.getFloat(KEY_LINE_HEIGHT_MULT, DEFAULT_LINE_HEIGHT_MULT)
@@ -835,9 +890,12 @@ class LibraryManager(
             speechRate = p.getFloat(KEY_SPEECH_RATE, 1.0f).coerceIn(MIN_ADVANCED_RATE, MAX_ADVANCED_RATE),
             voiceProfile = ReaderVoiceProfile.fromKey(p.getString(KEY_VOICE_PROFILE, null)),
             customVoicePitches = pitchMap,
+            characterVoicesEnabled = p.getBoolean(KEY_CHARACTER_VOICES_ENABLED, true),
+            ttsEngineType = TtsEngineType.fromKey(p.getString(KEY_TTS_ENGINE_TYPE, null)),
             ambientSound = AmbientSoundTrack.fromKey(p.getString(KEY_AMBIENT_SOUND, null)),
             ambientVolume = p.getFloat(KEY_AMBIENT_VOLUME, DEFAULT_AMBIENT_VOLUME)
                 .coerceIn(MIN_AMBIENT_VOLUME, MAX_AMBIENT_VOLUME),
+            autoPlayAmbientWithAudio = p.getBoolean(KEY_AUTO_PLAY_AMBIENT, true),
             selectedSystemVoiceName = p.getString(KEY_SELECTED_SYSTEM_VOICE, null)?.takeIf { it.isNotBlank() },
             advancedCustomEnabled = p.getBoolean(KEY_ADVANCED_CUSTOM_ENABLED, false),
             customPitch = p.getFloat(KEY_CUSTOM_PITCH, DEFAULT_ADVANCED_PITCH)
@@ -856,8 +914,10 @@ class LibraryManager(
         }
         prefs?.edit()
             ?.putFloat(KEY_FONT_SIZE, readerPrefs.fontSizeSp.coerceIn(MIN_FONT_SIZE_SP, MAX_FONT_SIZE_SP))
+            ?.putString(KEY_FONT_ID, readerPrefs.fontId.ifBlank { DEFAULT_FONT_ID })
             ?.putString(KEY_PAPER_THEME, readerPrefs.paperTheme.storageKey)
             ?.putString(KEY_SCROLL_DIRECTION, readerPrefs.scrollDirection.storageKey)
+            ?.putString(KEY_HORIZONTAL_PAGE_EFFECT, readerPrefs.horizontalPageEffect.storageKey)
             ?.putFloat(
                 KEY_PAGE_MARGIN_DP,
                 readerPrefs.pageMarginDp.coerceIn(MIN_PAGE_MARGIN_DP, MAX_PAGE_MARGIN_DP)
@@ -876,11 +936,14 @@ class LibraryManager(
             )
             ?.putString(KEY_VOICE_PROFILE, readerPrefs.voiceProfile.storageKey)
             ?.putString(KEY_CUSTOM_VOICE_PITCHES, pitchObj.toString())
+            ?.putBoolean(KEY_CHARACTER_VOICES_ENABLED, readerPrefs.characterVoicesEnabled)
+            ?.putString(KEY_TTS_ENGINE_TYPE, readerPrefs.ttsEngineType.storageKey)
             ?.putString(KEY_AMBIENT_SOUND, readerPrefs.ambientSound.storageKey)
             ?.putFloat(
                 KEY_AMBIENT_VOLUME,
                 readerPrefs.ambientVolume.coerceIn(MIN_AMBIENT_VOLUME, MAX_AMBIENT_VOLUME)
             )
+            ?.putBoolean(KEY_AUTO_PLAY_AMBIENT, readerPrefs.autoPlayAmbientWithAudio)
             ?.putString(KEY_SELECTED_SYSTEM_VOICE, readerPrefs.selectedSystemVoiceName ?: "")
             ?.putBoolean(KEY_ADVANCED_CUSTOM_ENABLED, readerPrefs.advancedCustomEnabled)
             ?.putFloat(
@@ -896,6 +959,124 @@ class LibraryManager(
                 readerPrefs.sentencePauseMs.coerceIn(MIN_SENTENCE_PAUSE_MS, MAX_SENTENCE_PAUSE_MS)
             )
             ?.apply()
+    }
+
+    // -------------------------------------------------------------------------
+    // Custom Imported Fonts (`.ttf` / `.otf` stored locally in `book_library/custom_fonts/`)
+    // -------------------------------------------------------------------------
+
+    private val customFontsDir: File
+        get() = File(libraryRootDir, CUSTOM_FONTS_SUBDIR)
+
+    private val customFontsIndexFile: File
+        get() = File(customFontsDir, CUSTOM_FONTS_INDEX_FILE)
+
+    @Synchronized
+    fun loadCustomImportedFonts(): List<CustomImportedFont> {
+        if (!customFontsIndexFile.exists()) return emptyList()
+        return runCatching {
+            val arr = JSONArray(customFontsIndexFile.readText(Charsets.UTF_8))
+            val result = ArrayList<CustomImportedFont>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val id = obj.optString("id").trim()
+                val name = obj.optString("displayName").trim()
+                val path = obj.optString("filePath").trim()
+                if (id.isNotEmpty() && name.isNotEmpty() && path.isNotEmpty() && File(path).exists()) {
+                    result.add(CustomImportedFont(id = id, displayName = name, filePath = path))
+                }
+            }
+            result
+        }.getOrDefault(emptyList())
+    }
+
+    @Synchronized
+    private fun saveCustomImportedFonts(fonts: List<CustomImportedFont>) {
+        customFontsDir.mkdirs()
+        val arr = JSONArray()
+        fonts.forEach { font ->
+            arr.put(
+                JSONObject().apply {
+                    put("id", font.id)
+                    put("displayName", font.displayName)
+                    put("filePath", font.filePath)
+                }
+            )
+        }
+        customFontsIndexFile.writeText(arr.toString(), Charsets.UTF_8)
+    }
+
+    suspend fun importCustomFontFromUri(context: Context, uri: Uri): Result<CustomImportedFont> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val rawName = queryDisplayName(context, uri) ?: "CustomFont.ttf"
+                val lower = rawName.lowercase()
+                val ext = when {
+                    lower.endsWith(".otf") -> ".otf"
+                    lower.endsWith(".ttf") -> ".ttf"
+                    else -> ".ttf"
+                }
+                val cleanDisplayName = rawName
+                    .substringBeforeLast('.')
+                    .replace('_', ' ')
+                    .replace('-', ' ')
+                    .trim()
+                    .ifBlank { "Font đã nhập" }
+                    .take(40)
+
+                customFontsDir.mkdirs()
+                val fontId = "custom_${UUID.randomUUID().toString().take(8)}"
+                val destFile = File(customFontsDir, "$fontId$ext")
+
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(destFile).use { output ->
+                        input.copyTo(output)
+                    }
+                } ?: error("Không thể đọc tệp font đã chọn.")
+
+                // Xác thực tệp font hợp lệ bằng Android Typeface
+                val valid = runCatching {
+                    val tf = Typeface.createFromFile(destFile)
+                    tf != null && tf != Typeface.DEFAULT
+                }.getOrDefault(false)
+
+                if (!valid || destFile.length() < 1024L) {
+                    destFile.delete()
+                    error("Tệp không phải font .ttf hoặc .otf hợp lệ.")
+                }
+
+                val imported = CustomImportedFont(
+                    id = fontId,
+                    displayName = cleanDisplayName,
+                    filePath = destFile.absolutePath
+                )
+                val updated = listOf(imported) + loadCustomImportedFonts()
+                saveCustomImportedFonts(updated)
+                imported
+            }
+        }
+
+    @Synchronized
+    fun deleteCustomImportedFont(fontId: String): List<CustomImportedFont> {
+        val existing = loadCustomImportedFonts()
+        val target = existing.firstOrNull { it.id == fontId }
+        if (target != null) {
+            runCatching { File(target.filePath).delete() }
+        }
+        val remaining = existing.filterNot { it.id == fontId }
+        saveCustomImportedFonts(remaining)
+        return remaining
+    }
+
+    private fun queryDisplayName(context: Context, uri: Uri): String? {
+        return runCatching {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        cursor.getString(0)?.takeIf { it.isNotBlank() }
+                    } else null
+                }
+        }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/')
     }
 
     // -------------------------------------------------------------------------
@@ -988,26 +1169,35 @@ class LibraryManager(
         private const val TOC_FILE_NAME = "toc.json"
         private const val COVER_FILE_NAME = "cover.jpg"
         private const val CHARACTER_VOICES_FILE_NAME = "character_voices.json"
+        private const val CUSTOM_FONTS_SUBDIR = "custom_fonts"
+        private const val CUSTOM_FONTS_INDEX_FILE = "fonts_index.json"
         private const val COVER_THUMB_MAX_PX = 240
 
         private const val PREFS_NAME = "epub_clean_book_reader_prefs"
         private const val KEY_FONT_SIZE = "reader_font_size_sp"
+        private const val KEY_FONT_ID = "reader_font_id"
         private const val KEY_PAPER_THEME = "reader_paper_theme"
         private const val KEY_SCROLL_DIRECTION = "reader_scroll_direction"
+        private const val KEY_HORIZONTAL_PAGE_EFFECT = "reader_horizontal_page_effect"
         private const val KEY_PAGE_MARGIN_DP = "reader_page_margin_dp"
         private const val KEY_LINE_HEIGHT_MULT = "reader_line_height_mult"
         private const val KEY_LETTER_SPACING_SP = "reader_letter_spacing_sp"
         private const val KEY_SPEECH_RATE = "reader_speech_rate"
         private const val KEY_VOICE_PROFILE = "reader_voice_profile"
         private const val KEY_CUSTOM_VOICE_PITCHES = "reader_custom_voice_pitches"
+        private const val KEY_CHARACTER_VOICES_ENABLED = "reader_character_voices_enabled"
+        private const val KEY_TTS_ENGINE_TYPE = "reader_tts_engine_type"
         private const val KEY_AMBIENT_SOUND = "reader_ambient_sound"
         private const val KEY_AMBIENT_VOLUME = "reader_ambient_volume"
+        private const val KEY_AUTO_PLAY_AMBIENT = "reader_auto_play_ambient_with_audio"
         private const val KEY_SELECTED_SYSTEM_VOICE = "reader_selected_system_voice"
         private const val KEY_ADVANCED_CUSTOM_ENABLED = "reader_advanced_custom_enabled"
         private const val KEY_CUSTOM_PITCH = "reader_custom_pitch"
         private const val KEY_CUSTOM_SPEECH_RATE = "reader_custom_speech_rate"
         private const val KEY_SENTENCE_PAUSE_MS = "reader_sentence_pause_ms"
         private const val KEY_SAMPLE_BOOK_SEEDED_V1 = "library_sample_book_seeded_v1"
+
+        const val DEFAULT_FONT_ID = "literata"
 
         const val MIN_FONT_SIZE_SP = 13f
         const val MAX_FONT_SIZE_SP = 48f

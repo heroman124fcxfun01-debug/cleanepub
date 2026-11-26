@@ -34,10 +34,17 @@ data class BookAudioPlaybackState(
     val activeSpeakerName: String? = null,
     val speechRate: Float = 1.0f,
     val voiceProfile: ReaderVoiceProfile = ReaderVoiceProfile.FEMALE_1,
-    val availableDeviceVoices: List<DeviceOfflineVoice> = emptyList()
+    val availableDeviceVoices: List<DeviceOfflineVoice> = emptyList(),
+    // Hẹn giờ tự tắt nghe sách (Sleep Timer)
+    val sleepTimerEndAtMillis: Long = 0L,
+    val sleepTimerEndOfChapter: Boolean = false,
+    val sleepTimerRemainingMinutes: Int = 0
 ) {
     val hasActiveSession: Boolean
         get() = bookId != null && (isPlaying || isPaused)
+
+    val hasActiveSleepTimer: Boolean
+        get() = sleepTimerEndOfChapter || sleepTimerEndAtMillis > 0L
 }
 
 object AudioPlaybackStateHolder {

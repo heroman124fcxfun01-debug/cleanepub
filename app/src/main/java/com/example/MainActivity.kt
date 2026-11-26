@@ -52,6 +52,7 @@ import com.example.ui.LibraryImportFlowState
 import com.example.ui.MainViewModel
 import com.example.ui.components.EpubMetadataEditorDialog
 import com.example.ui.components.FloatingBackgroundAudioBanner
+import com.example.ui.components.LibraryReaderGeneralSettingsSheet
 import com.example.ui.components.SettingsDialog
 import com.example.ui.screens.BookLibraryScreen
 import com.example.ui.screens.BookReaderScreen
@@ -162,6 +163,7 @@ private fun EpubCleanNavHost(
     val libraryToastMessage by libraryViewModel.statusMessage.collectAsStateWithLifecycle()
     val bookReaderState by libraryViewModel.readerState.collectAsStateWithLifecycle()
     val bookReaderPrefs by libraryViewModel.readerPrefs.collectAsStateWithLifecycle()
+    val customFonts by libraryViewModel.customFonts.collectAsStateWithLifecycle()
     val audioPlaybackState by libraryViewModel.audioPlaybackState.collectAsStateWithLifecycle()
 
     LaunchedEffect(statusToastMessage) {
@@ -187,6 +189,7 @@ private fun EpubCleanNavHost(
     }
 
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showLibraryReaderSettingsSheet by remember { mutableStateOf(false) }
     var showReviewMetadataDialog by remember { mutableStateOf(false) }
     var coverPickerForReview by remember { mutableStateOf(false) }
 
@@ -273,6 +276,16 @@ private fun EpubCleanNavHost(
         onResult = { uri ->
             if (uri != null) {
                 libraryViewModel.onLibraryFilePicked(uri)
+            }
+        }
+    )
+
+    // Offline font importer (.ttf / .otf) for Book Reader general settings
+    val fontImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri ->
+            if (uri != null) {
+                libraryViewModel.importCustomFont(uri)
             }
         }
     )
@@ -426,6 +439,7 @@ private fun EpubCleanNavHost(
                 cleaningProgressPercent = (snapshot.progressFraction * 100f).toInt().coerceIn(0, 100),
                 cleaningStatusMessage = snapshot.statusDetail,
                 onBackClick = { navController.popBackStack() },
+                onOpenReaderGeneralSettingsClick = { showLibraryReaderSettingsSheet = true },
                 onImportBookClick = {
                     libraryImportLauncher.launch(
                         arrayOf(
@@ -485,6 +499,7 @@ private fun EpubCleanNavHost(
             BookReaderScreen(
                 readerState = bookReaderState,
                 readerPrefs = bookReaderPrefs,
+                customFonts = customFonts,
                 audioPlaybackState = audioPlaybackState,
                 onBackClick = { chapIdx, paraIdx ->
                     libraryViewModel.saveReadingProgress(chapIdx, paraIdx)
@@ -497,10 +512,12 @@ private fun EpubCleanNavHost(
                 onSaveProgress = { chapIdx, paraIdx ->
                     libraryViewModel.saveReadingProgress(chapIdx, paraIdx)
                 },
+                onSelectFont = { fontId -> libraryViewModel.selectReaderFont(fontId) },
                 onSetFontSize = { size -> libraryViewModel.setReaderFontSize(size) },
                 onAdjustFontSize = { delta -> libraryViewModel.adjustReaderFontSize(delta) },
                 onSelectPaperTheme = { theme -> libraryViewModel.selectReaderPaperTheme(theme) },
                 onSelectScrollDirection = { dir -> libraryViewModel.selectScrollDirection(dir) },
+                onSelectHorizontalPageEffect = { effect -> libraryViewModel.selectHorizontalPageEffect(effect) },
                 onAdjustPageMargin = { delta -> libraryViewModel.adjustPageMargin(delta) },
                 onAdjustLineHeight = { delta -> libraryViewModel.adjustLineHeightMultiplier(delta) },
                 onAdjustLetterSpacing = { delta -> libraryViewModel.adjustLetterSpacing(delta) },
@@ -513,8 +530,7 @@ private fun EpubCleanNavHost(
                 onAdvancedRateChanged = { rate -> libraryViewModel.setAdvancedCustomSpeechRate(rate) },
                 onSentencePauseChanged = { pauseMs -> libraryViewModel.setSentencePauseMs(pauseMs) },
                 onResetAdvancedDefaults = { libraryViewModel.resetAdvancedVoiceSettings() },
-                onSaveVoicePitch = { profile, pitch -> libraryViewModel.saveCustomVoicePitch(profile, pitch) },
-                onResetVoicePitch = { profile -> libraryViewModel.resetCustomVoicePitch(profile) },
+                onToggleCharacterVoicesEnabled = { enabled -> libraryViewModel.setCharacterVoicesEnabled(enabled) },
                 onScanCharacters = { libraryViewModel.scanCharactersForCurrentBook() },
                 onConfirmCharacterAssignments = { map ->
                     libraryViewModel.confirmCharacterVoiceAssignments(map)
@@ -679,6 +695,39 @@ private fun EpubCleanNavHost(
         },
         onDismiss = { showSettingsDialog = false }
     )
+
+    // Library General Reading & Audio Settings Sheet (2 side-by-side iOS pills)
+    if (showLibraryReaderSettingsSheet) {
+        LibraryReaderGeneralSettingsSheet(
+            readerPrefs = bookReaderPrefs,
+            customFonts = customFonts,
+            onSelectFont = { fontId -> libraryViewModel.selectReaderFont(fontId) },
+            onImportFontClick = {
+                fontImportLauncher.launch(
+                    arrayOf(
+                        "font/ttf",
+                        "font/otf",
+                        "application/x-font-ttf",
+                        "application/x-font-otf",
+                        "application/octet-stream",
+                        "*/*"
+                    )
+                )
+            },
+            onDeleteCustomFont = { fontId -> libraryViewModel.deleteCustomFont(fontId) },
+            onSelectScrollDirection = { dir -> libraryViewModel.selectScrollDirection(dir) },
+            onSelectHorizontalPageEffect = { effect -> libraryViewModel.selectHorizontalPageEffect(effect) },
+            onSetFontSize = { size -> libraryViewModel.setReaderFontSize(size) },
+            onAdjustFontSize = { delta -> libraryViewModel.adjustReaderFontSize(delta) },
+            onAdjustPageMargin = { delta -> libraryViewModel.adjustPageMargin(delta) },
+            onAdjustLineHeight = { delta -> libraryViewModel.adjustLineHeightMultiplier(delta) },
+            onSelectTtsEngine = { engine -> libraryViewModel.selectTtsEngineType(engine) },
+            onSelectNarratorVoice = { profile -> libraryViewModel.selectNarratorVoice(profile) },
+            onSelectAmbientSound = { track -> libraryViewModel.selectAmbientSound(track) },
+            onToggleAutoPlayAmbient = { enabled -> libraryViewModel.setAutoPlayAmbientWithAudio(enabled) },
+            onDismiss = { showLibraryReaderSettingsSheet = false }
+        )
+    }
 
     // Floating iOS Metadata & Cover Editor Dialog immediately on file import
     val currentPending = pendingImport

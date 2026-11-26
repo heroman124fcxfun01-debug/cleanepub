@@ -43,6 +43,7 @@ import androidx.compose.material.icons.rounded.CollectionsBookmark
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -114,6 +115,7 @@ fun BookLibraryScreen(
     cleaningStatusMessage: String = "",
     onBackClick: () -> Unit,
     onImportBookClick: () -> Unit,
+    onOpenReaderGeneralSettingsClick: () -> Unit = {},
     onConfirmCleanBeforeImport: () -> Unit = {},
     onConfirmDirectImportNoClean: () -> Unit = {},
     onCancelAutoClean: () -> Unit = {},
@@ -225,27 +227,46 @@ fun BookLibraryScreen(
                         )
                     }
                 } else {
-                    IconButton(
-                        onClick = { if (!isImporting) onImportBookClick() },
-                        enabled = !isImporting,
-                        modifier = Modifier
-                            .align(Alignment.CenterEnd)
-                            .size(48.dp)
-                            .testTag("library_import_book_button")
+                    Row(
+                        modifier = Modifier.align(Alignment.CenterEnd),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        if (isImporting) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp,
-                                color = accentBlue
-                            )
-                        } else {
+                        // Bánh răng cài đặt chung cho chỗ đọc sách (ngay cạnh dấu +)
+                        IconButton(
+                            onClick = onOpenReaderGeneralSettingsClick,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("library_reader_general_settings_button")
+                        ) {
                             Icon(
-                                imageVector = Icons.Rounded.Add,
-                                contentDescription = "Nhập sách EPUB / PDF",
+                                imageVector = Icons.Rounded.Settings,
+                                contentDescription = "Cài đặt chung cho trình đọc sách",
                                 tint = accentBlue,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(19.dp)
                             )
+                        }
+
+                        IconButton(
+                            onClick = { if (!isImporting) onImportBookClick() },
+                            enabled = !isImporting,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("library_import_book_button")
+                        ) {
+                            if (isImporting) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = accentBlue
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.Add,
+                                    contentDescription = "Nhập sách EPUB / PDF",
+                                    tint = accentBlue,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                         }
                     }
                 }

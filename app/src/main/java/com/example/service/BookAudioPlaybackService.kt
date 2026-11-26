@@ -96,6 +96,25 @@ class BookAudioPlaybackService : Service() {
     private var lastAppliedPitch = -1f
     private var lastAppliedRate = -1f
 
+    // Hẹn giờ tự tắt nghe sách (Sleep Timer)
+    private var sleepTimerEndAtMillis = 0L
+    private var sleepTimerEndOfChapter = false
+    private val sleepTimerHandler = Handler(Looper.getMainLooper())
+    private val sleepTimerTickRunnable = object : Runnable {
+        override fun run() {
+            if (sleepTimerEndAtMillis <= 0L) return
+            val remainingMs = sleepTimerEndAtMillis - System.currentTimeMillis()
+            if (remainingMs <= 0L) {
+                clearSleepTimerInternal(publish = false)
+                pausePlayback()
+            } else {
+                publishState()
+                val nextDelay = remainingMs.coerceAtMost(15_000L)
+                sleepTimerHandler.postDelayed(this, nextDelay)
+            }
+        }
+    }
+
     private data class PendingStartRequest(
         val bookId: String,
         val chapterIndex: Int,
@@ -201,6 +220,11 @@ class BookAudioPlaybackService : Service() {
                 if (!active && !isPlaying && !AudioPlaybackStateHolder.state.value.hasActiveSession) {
                     stopForegroundAndSelf()
                 }
+            }
+
+            ACTION_SET_SLEEP_TIMER -> {
+                val minutes = intent.getIntExtra(EXTRA_SLEEP_TIMER_MINUTES, 0)
+                applySleepTimer(minutes)
             }
 
             ACTION_STOP -> stopPlaybackAndService()
@@ -363,12 +387,43 @@ class BookAudioPlaybackService : Service() {
         val nextPara = speakingParagraphIndex + 1
         if (nextPara < activeParagraphs.size) {
             speakParagraphAt(nextPara)
+        } else if (sleepTimerEndOfChapter) {
+            // Hẹn giờ tự tắt khi hết chương hiện tại
+            clearSleepTimerInternal(publish = false)
+            pausePlayback()
         } else if (activeChapterIndex + 1 < activeToc.size && activeBookId != null) {
             loadChapterAndSpeak(activeBookId!!, activeChapterIndex + 1, 0)
         } else {
             // Đã đọc hết chương cuối của sách
             pausePlayback()
         }
+    }
+
+    private fun applySleepTimer(minutes: Int) {
+        sleepTimerHandler.removeCallbacks(sleepTimerTickRunnable)
+        when {
+            minutes == SLEEP_TIMER_END_OF_CHAPTER -> {
+                sleepTimerEndAtMillis = 0L
+                sleepTimerEndOfChapter = true
+            }
+            minutes > 0 -> {
+                sleepTimerEndOfChapter = false
+                sleepTimerEndAtMillis = System.currentTimeMillis() + minutes * 60_000L
+                sleepTimerHandler.postDelayed(sleepTimerTickRunnable, 15_000L)
+            }
+            else -> {
+                sleepTimerEndAtMillis = 0L
+                sleepTimerEndOfChapter = false
+            }
+        }
+        publishState()
+    }
+
+    private fun clearSleepTimerInternal(publish: Boolean) {
+        sleepTimerHandler.removeCallbacks(sleepTimerTickRunnable)
+        sleepTimerEndAtMillis = 0L
+        sleepTimerEndOfChapter = false
+        if (publish) publishState()
     }
 
     // -------------------------------------------------------------------------
@@ -670,7 +725,8 @@ class BookAudioPlaybackService : Service() {
     private fun syncAmbientPlayback() {
         val track = activePrefs.ambientSound
         val volume = activePrefs.ambientVolume
-        if (track != AmbientSoundTrack.NONE && (isPlaying || isPreviewingAmbient)) {
+        val shouldPlayForBook = isPlaying && activePrefs.autoPlayAmbientWithAudio
+        if (track != AmbientSoundTrack.NONE && (shouldPlayForBook || isPreviewingAmbient)) {
             ambientEngine.start(track, volume)
             ambientEngine.updateVolume(volume)
         } else {
@@ -686,7 +742,10 @@ class BookAudioPlaybackService : Service() {
         paragraphs: List<String>,
         paraIndex: Int
     ): Pair<ReaderVoiceProfile, String?> {
-        if (activeCharacterVoices.isNotEmpty() && paraIndex in paragraphs.indices) {
+        if (activePrefs.characterVoicesEnabled &&
+            activeCharacterVoices.isNotEmpty() &&
+            paraIndex in paragraphs.indices
+        ) {
             val detectedSpeaker = StoryCharacterScanner.detectSpeakerForParagraph(
                 paragraph = paragraphs[paraIndex],
                 previousParagraph = paragraphs.getOrNull(paraIndex - 1),
@@ -812,6 +871,10 @@ class BookAudioPlaybackService : Service() {
         } else {
             activePrefs.speechRate
         }
+        val remainingMins = if (sleepTimerEndAtMillis > 0L) {
+            val diffMs = (sleepTimerEndAtMillis - System.currentTimeMillis()).coerceAtLeast(0L)
+            ((diffMs + 59_999L) / 60_000L).toInt()
+        } else 0
         AudioPlaybackStateHolder.update {
             BookAudioPlaybackState(
                 bookId = activeBookId,
@@ -826,7 +889,10 @@ class BookAudioPlaybackService : Service() {
                 activeSpeakerName = activeSpeakerName,
                 speechRate = activeRate,
                 voiceProfile = activePrefs.voiceProfile,
-                availableDeviceVoices = cachedDeviceVoiceModels
+                availableDeviceVoices = cachedDeviceVoiceModels,
+                sleepTimerEndAtMillis = sleepTimerEndAtMillis,
+                sleepTimerEndOfChapter = sleepTimerEndOfChapter,
+                sleepTimerRemainingMinutes = remainingMins
             )
         }
     }
@@ -842,6 +908,7 @@ class BookAudioPlaybackService : Service() {
 
     private fun stopPlaybackAndService() {
         mainHandler.removeCallbacksAndMessages(null)
+        clearSleepTimerInternal(publish = false)
         activeParagraphGeneration += 1L
         isPlaying = false
         isPreviewingAmbient = false
@@ -949,6 +1016,7 @@ class BookAudioPlaybackService : Service() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
+        sleepTimerHandler.removeCallbacksAndMessages(null)
         ambientEngine.stop()
         runCatching {
             ttsEngine?.stop()
@@ -962,6 +1030,9 @@ class BookAudioPlaybackService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
+        const val SLEEP_TIMER_OFF = 0
+        const val SLEEP_TIMER_END_OF_CHAPTER = -1
+
         private const val ACTION_PLAY_AT = "com.example.service.AUDIO_PLAY_AT"
         private const val ACTION_TOGGLE_PLAY_PAUSE = "com.example.service.AUDIO_TOGGLE"
         private const val ACTION_PAUSE = "com.example.service.AUDIO_PAUSE"
@@ -971,6 +1042,7 @@ class BookAudioPlaybackService : Service() {
         private const val ACTION_REFRESH_VOICES = "com.example.service.AUDIO_REFRESH_VOICES"
         private const val ACTION_PREVIEW_VOICE = "com.example.service.AUDIO_PREVIEW_VOICE"
         private const val ACTION_PREVIEW_AMBIENT = "com.example.service.AUDIO_PREVIEW_AMBIENT"
+        private const val ACTION_SET_SLEEP_TIMER = "com.example.service.AUDIO_SET_SLEEP_TIMER"
         private const val ACTION_STOP = "com.example.service.AUDIO_STOP"
 
         private const val EXTRA_BOOK_ID = "extra_book_id"
@@ -982,6 +1054,7 @@ class BookAudioPlaybackService : Service() {
         private const val EXTRA_SENTENCE_PAUSE_MS = "extra_sentence_pause_ms"
         private const val EXTRA_SYSTEM_VOICE_NAME = "extra_system_voice_name"
         private const val EXTRA_AMBIENT_PREVIEW_ACTIVE = "extra_ambient_preview_active"
+        private const val EXTRA_SLEEP_TIMER_MINUTES = "extra_sleep_timer_minutes"
 
         fun playAt(context: Context, bookId: String, chapterIndex: Int, paragraphIndex: Int) {
             val intent = Intent(context.applicationContext, BookAudioPlaybackService::class.java).apply {
@@ -1075,6 +1148,20 @@ class BookAudioPlaybackService : Service() {
             val intent = Intent(context.applicationContext, BookAudioPlaybackService::class.java).apply {
                 action = ACTION_PREVIEW_AMBIENT
                 putExtra(EXTRA_AMBIENT_PREVIEW_ACTIVE, active)
+            }
+            runCatching { context.applicationContext.startService(intent) }
+        }
+
+        /**
+         * Đặt hẹn giờ tự tắt nghe sách:
+         * - [minutes] == 0 (`SLEEP_TIMER_OFF`): Tắt hẹn giờ
+         * - [minutes] > 0: Tự dừng đọc sau N phút (15, 30, 45, 60...)
+         * - [minutes] == -1 (`SLEEP_TIMER_END_OF_CHAPTER`): Tự dừng khi đọc hết chương hiện tại
+         */
+        fun setSleepTimer(context: Context, minutes: Int) {
+            val intent = Intent(context.applicationContext, BookAudioPlaybackService::class.java).apply {
+                action = ACTION_SET_SLEEP_TIMER
+                putExtra(EXTRA_SLEEP_TIMER_MINUTES, minutes)
             }
             runCatching { context.applicationContext.startService(intent) }
         }

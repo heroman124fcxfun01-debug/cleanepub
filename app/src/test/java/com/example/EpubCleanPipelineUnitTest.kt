@@ -1627,5 +1627,46 @@ class EpubCleanPipelineUnitTest {
             0.001f
         )
     }
+
+    @Test
+    fun readerGeneralSettings_defaultsAndEnumKeys_areConsistent() {
+        assertEquals(
+            com.example.data.HorizontalPageEffect.BOOK_FLIP,
+            com.example.data.HorizontalPageEffect.fromKey("book_flip")
+        )
+        assertEquals(
+            com.example.data.HorizontalPageEffect.TAP_FADE,
+            com.example.data.HorizontalPageEffect.fromKey("tap_fade")
+        )
+        assertEquals(
+            com.example.data.HorizontalPageEffect.NONE,
+            com.example.data.HorizontalPageEffect.fromKey("none")
+        )
+        assertEquals(
+            com.example.data.HorizontalPageEffect.BOOK_FLIP,
+            com.example.data.HorizontalPageEffect.fromKey("unknown_key")
+        )
+
+        assertEquals(
+            com.example.data.TtsEngineType.SYSTEM_TTS,
+            com.example.data.TtsEngineType.fromKey("system_tts")
+        )
+        assertEquals(
+            com.example.data.TtsEngineType.AI_TTS,
+            com.example.data.TtsEngineType.fromKey("ai_tts")
+        )
+        assertEquals(
+            com.example.data.TtsEngineType.SYSTEM_TTS,
+            com.example.data.TtsEngineType.fromKey(null)
+        )
+
+        val defaults = com.example.data.ReaderPreferences()
+        assertEquals(com.example.data.LibraryManager.DEFAULT_FONT_ID, defaults.fontId)
+        assertEquals(com.example.data.HorizontalPageEffect.BOOK_FLIP, defaults.horizontalPageEffect)
+        assertTrue(defaults.characterVoicesEnabled)
+        assertEquals(com.example.data.TtsEngineType.SYSTEM_TTS, defaults.ttsEngineType)
+        assertTrue(defaults.autoPlayAmbientWithAudio)
+    }
 }
+
 
