@@ -35,6 +35,8 @@ data class VieNeuConfigData(
     val audioBosTokenId: Long? = null,
     val audioEosTokenId: Long? = null,
     val audioPadTokenId: Long? = null,
+    val audioRefSlotTokenId: Long? = null,
+    val defaultStyleTokenId: Long? = null,
     val rmsNormEps: Float = 1e-6f,
     val rawSummary: String = ""
 )
@@ -276,6 +278,8 @@ class VieNeuV3WeightStore(
             var audioBosId: Long? = null
             var audioEosId: Long? = null
             var audioPadId: Long? = null
+            var audioRefSlotId: Long? = null
+            var defaultStyleId: Long? = null
             var rmsEps = 1e-6f
             val summaryParts = ArrayList<String>()
 
@@ -305,16 +309,21 @@ class VieNeuV3WeightStore(
                         root.optInt("audio_vocab_size", codebookSize)
                     )
                     speakerDim = root.optInt("speaker_dim", root.optInt("speaker_embed_dim", speakerDim))
-                    val sr = root.optInt("sample_rate", root.optInt("sampling_rate", 0))
+                    val sr = root.optInt(
+                        "audio_sample_rate",
+                        root.optInt("sample_rate", root.optInt("sampling_rate", 0))
+                    )
                     if (sr in setOf(16_000, 22_050, 24_000, 44_100, 48_000)) sampleRate = sr
                     bosId = optLongOrNull(root, "bos_token_id", "bos_id")
                     eosId = optLongOrNull(root, "eos_token_id", "eos_id")
                     padId = optLongOrNull(root, "pad_token_id", "pad_id")
-                    textBosId = optLongOrNull(root, "text_bos_token_id", "text_start_token_id")
-                    textEosId = optLongOrNull(root, "text_eos_token_id", "text_end_token_id")
-                    audioBosId = optLongOrNull(root, "audio_bos_token_id", "audio_start_token_id")
-                    audioEosId = optLongOrNull(root, "audio_eos_token_id", "audio_end_token_id", "stop_token_id")
+                    textBosId = optLongOrNull(root, "text_bos_token_id", "text_start_token_id", "text_prompt_start_token_id")
+                    textEosId = optLongOrNull(root, "text_eos_token_id", "text_end_token_id", "text_prompt_end_token_id")
+                    audioBosId = optLongOrNull(root, "audio_bos_token_id", "audio_start_token_id", "speech_generation_start_token_id")
+                    audioEosId = optLongOrNull(root, "audio_eos_token_id", "audio_end_token_id", "speech_generation_end_token_id", "stop_token_id")
                     audioPadId = optLongOrNull(root, "audio_pad_token_id")
+                    audioRefSlotId = optLongOrNull(root, "audio_ref_slot_token_id")
+                    defaultStyleId = optLongOrNull(root, "default_style_token_id")
                     rmsEps = root.optDouble("rms_norm_eps", 1e-6).toFloat()
 
                     val keys = root.keys()
@@ -355,8 +364,10 @@ class VieNeuV3WeightStore(
                 audioBosTokenId = audioBosId,
                 audioEosTokenId = audioEosId,
                 audioPadTokenId = audioPadId,
+                audioRefSlotTokenId = audioRefSlotId,
+                defaultStyleTokenId = defaultStyleId,
                 rmsNormEps = rmsEps,
-                rawSummary = summaryParts.take(24).joinToString(", ")
+                rawSummary = summaryParts.take(28).joinToString(", ")
             )
         }
 
@@ -365,56 +376,70 @@ class VieNeuV3WeightStore(
             return runCatching {
                 val raw = voicesFile.readText(Charsets.UTF_8).trim()
                 val out = ArrayList<VieNeuPresetVoice>()
-                if (!raw.startsWith("{")) return emptyList()
-                val root = JSONObject(raw)
-                val container = root.optJSONObject("presets")
-                    ?: root.optJSONObject("voices")
-                    ?: root
-                val keys = container.keys()
-                while (keys.hasNext()) {
-                    val id = keys.next()
-                    val item = container.opt(id)
-                    when (item) {
-                        is JSONArray -> {
-                            val vec = FloatArray(item.length()) { item.optDouble(it, 0.0).toFloat() }
-                            out.add(VieNeuPresetVoice(id, vec, null, null, null, "array[${vec.size}]"))
-                        }
-                        is JSONObject -> {
-                            val embArr = item.optJSONArray("embedding")
-                                ?: item.optJSONArray("speaker_embedding")
-                                ?: item.optJSONArray("spk_emb")
-                            val emb = embArr?.let { a -> FloatArray(a.length()) { a.optDouble(it, 0.0).toFloat() } }
 
-                            val codesArr = item.optJSONArray("codes")
-                                ?: item.optJSONArray("ref_codes")
-                                ?: item.optJSONArray("audio_codes")
-                            val refCodes = parseCodesMatrix(codesArr)
-                            val refText = item.optString("text", item.optString("ref_text", "")).ifBlank { null }
-                            val refPhonemes = item.optString("phonemes", item.optString("ref_phonemes", "")).ifBlank { null }
+                fun parseVoiceObj(id: String, item: JSONObject) {
+                    val embArr = item.optJSONArray("embedding")
+                        ?: item.optJSONArray("speaker_embedding")
+                        ?: item.optJSONArray("xvector")
+                        ?: item.optJSONArray("xvec")
+                        ?: item.optJSONArray("spk_emb")
+                    val emb = embArr?.let { a -> FloatArray(a.length()) { a.optDouble(it, 0.0).toFloat() } }
 
-                            val subKeys = ArrayList<String>()
-                            val ik = item.keys()
-                            while (ik.hasNext()) {
-                                val sk = ik.next()
-                                val sv = item.opt(sk)
-                                subKeys.add(
-                                    when (sv) {
-                                        is JSONArray -> "$sk[${sv.length()}]"
-                                        is String -> "$sk(len=${sv.length})"
-                                        else -> "$sk=$sv"
-                                    }
-                                )
+                    val codesArr = item.optJSONArray("codes")
+                        ?: item.optJSONArray("ref_codes")
+                        ?: item.optJSONArray("audio_codes")
+                    val refCodes = parseCodesMatrix(codesArr)
+                    val refText = item.optString("text", item.optString("ref_text", "")).ifBlank { null }
+                    val refPhonemes = item.optString("phonemes", item.optString("ref_phonemes", "")).ifBlank { null }
+
+                    val subKeys = ArrayList<String>()
+                    val ik = item.keys()
+                    while (ik.hasNext()) {
+                        val sk = ik.next()
+                        val sv = item.opt(sk)
+                        subKeys.add(
+                            when (sv) {
+                                is JSONArray -> "$sk[${sv.length()}]"
+                                is String -> "$sk(len=${sv.length})"
+                                else -> "$sk=$sv"
                             }
-                            out.add(
-                                VieNeuPresetVoice(
-                                    id = id,
-                                    speakerEmbedding = emb,
-                                    refCodes = refCodes,
-                                    refText = refText,
-                                    refPhonemes = refPhonemes,
-                                    keysSummary = subKeys.joinToString(", ")
-                                )
-                            )
+                        )
+                    }
+                    out.add(
+                        VieNeuPresetVoice(
+                            id = id,
+                            speakerEmbedding = emb,
+                            refCodes = refCodes,
+                            refText = refText,
+                            refPhonemes = refPhonemes,
+                            keysSummary = subKeys.joinToString(", ")
+                        )
+                    )
+                }
+
+                if (raw.startsWith("{")) {
+                    val root = JSONObject(raw)
+                    val arrVoices = root.optJSONArray("voices") ?: root.optJSONArray("presets")
+                    if (arrVoices != null) {
+                        for (i in 0 until arrVoices.length()) {
+                            val item = arrVoices.optJSONObject(i) ?: continue
+                            val id = item.optString("id", item.optString("name", "voice_$i"))
+                            parseVoiceObj(id, item)
+                        }
+                        return out
+                    }
+                    val container = root.optJSONObject("presets")
+                        ?: root.optJSONObject("voices")
+                        ?: root
+                    val keys = container.keys()
+                    while (keys.hasNext()) {
+                        val id = keys.next()
+                        when (val item = container.opt(id)) {
+                            is JSONArray -> {
+                                val vec = FloatArray(item.length()) { item.optDouble(it, 0.0).toFloat() }
+                                out.add(VieNeuPresetVoice(id, vec, null, null, null, "array[${vec.size}]"))
+                            }
+                            is JSONObject -> parseVoiceObj(id, item)
                         }
                     }
                 }
@@ -693,6 +718,28 @@ class VieNeuV3WeightStore(
             for (v in x) ss += v * v
             val invRms = (1.0 / sqrt(ss / x.size.coerceAtLeast(1) + eps)).toFloat()
             return FloatArray(x.size) { i -> x[i] * invRms * (weight.getOrNull(i) ?: 1f) }
+        }
+
+        fun layerNorm(
+            x: FloatArray,
+            weight: FloatArray?,
+            bias: FloatArray?,
+            eps: Float = 1e-5f
+        ): FloatArray {
+            val n = x.size.coerceAtLeast(1)
+            var mean = 0.0
+            for (v in x) mean += v
+            mean /= n
+            var varSum = 0.0
+            for (v in x) {
+                val d = v - mean
+                varSum += d * d
+            }
+            val invStd = (1.0 / sqrt(varSum / n + eps)).toFloat()
+            return FloatArray(x.size) { i ->
+                val norm = ((x[i] - mean).toFloat()) * invStd
+                norm * (weight?.getOrNull(i) ?: 1f) + (bias?.getOrNull(i) ?: 0f)
+            }
         }
 
         fun siluInPlace(x: FloatArray) {

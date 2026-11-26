@@ -340,13 +340,20 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 ?.take(24)
                 ?.joinToString(" ") { "${it.key}:${it.value}" }
                 ?: "(trống)"
+            val phonemeToks = tokenizerData?.idToToken?.entries
+                ?.sortedBy { it.key }
+                ?.drop(24)
+                ?.take(48)
+                ?.joinToString(" ") { "${it.key}:${it.value}" }
+                ?: "(trống)"
             val voicesDetail = if (richPresetVoices.isEmpty()) "(trống)" else {
-                richPresetVoices.take(4).joinToString(" | ") { "${it.id}(${it.keysSummary})" }
+                richPresetVoices.take(3).joinToString(" | ") { "${it.id}(${it.keysSummary})" }
             }
             val metadata = linkedMapOf(
                 "config.json" to vieNeuConfig.rawSummary.ifBlank { "(trống)" },
                 "heads.json" to (headWeightStore?.describeAll() ?: "(trống)"),
                 "tokenizer[0..23]" to sampleToks,
+                "tokenizer[24..71]" to phonemeToks,
                 "voices.json" to voicesDetail
             )
 
@@ -429,6 +436,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
         try {
             ensureInitialized()
             val emb = speakerEmbedding?.takeIf { it.isNotEmpty() }
+                ?: richPresetVoices.firstOrNull { it.speakerEmbedding?.isNotEmpty() == true }?.speakerEmbedding
                 ?: presetVoices.values.firstOrNull()
                 ?: OnnxModelAssetHelper.l2Normalize(FloatArray(192) { i -> ((i % 17) - 8) / 16f })
 

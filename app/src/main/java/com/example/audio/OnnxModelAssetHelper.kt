@@ -603,8 +603,29 @@ object OnnxModelAssetHelper {
     fun parseSeaG2pBinary(file: File?): Map<String, IntArray> {
         if (file == null || !file.exists()) return emptyMap()
         return runCatching {
+            val fileLen = file.length()
+            if (fileLen <= 8L) return emptyMap()
+
+            // Peek first 4 magic bytes without loading 48MB into Java heap (prevents OutOfMemoryError!)
+            val magic = ByteArray(4)
+            java.io.RandomAccessFile(file, "r").use { raf ->
+                if (raf.read(magic) < 4) return emptyMap()
+            }
+
+            // `SEAP` is pnnbao97/sea-g2p's 47.77MB Rust mmap binary format — NEVER load into Java heap.
+            // VietnameseIpaPhonemizer handles Vietnamese IPA directly with ~0KB heap.
+            if (magic[0] == 'S'.code.toByte() && magic[1] == 'E'.code.toByte() &&
+                magic[2] == 'A'.code.toByte() && magic[3] == 'P'.code.toByte()
+            ) {
+                return emptyMap()
+            }
+
+            // Guard against loading any multi-megabyte binary lexicon into Java String heap
+            if (fileLen > 4L * 1024L * 1024L) {
+                return emptyMap()
+            }
+
             val bytes = file.readBytes()
-            if (bytes.isEmpty()) return emptyMap()
             val map = HashMap<String, IntArray>(4096)
 
             // Format A: Binary G2P header ("G2P1" / "G2P")
@@ -627,7 +648,7 @@ object OnnxModelAssetHelper {
                 if (map.isNotEmpty()) return map
             }
 
-            // Format B: UTF-8 tab-separated lexicon ("từ\t12 34 56" or "từ\tph1 ph2")
+            // Format B: Small UTF-8 tab-separated lexicon
             val text = String(bytes, Charsets.UTF_8)
             text.lineSequence().forEach { line ->
                 val trimmed = line.trim()
