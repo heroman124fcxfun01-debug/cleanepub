@@ -71,9 +71,10 @@ data class LibraryChapterContent(
 )
 
 enum class ReaderPaperTheme(val storageKey: String, val label: String) {
-    BOOK_BROWN("book_brown", "Nâu sách"),
+    BOOK_BROWN("book_brown", "Nâu sách cũ"),
     WARM_CREAM("warm_cream", "Vàng ngả"),
-    PURE_WHITE("pure_white", "Trắng");
+    PURE_WHITE("pure_white", "Trắng ngà"),
+    DARK_NIGHT("dark_night", "Nền tối");
 
     companion object {
         fun fromKey(key: String?): ReaderPaperTheme {

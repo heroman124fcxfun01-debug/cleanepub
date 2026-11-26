@@ -6,13 +6,19 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -104,6 +110,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -132,6 +139,7 @@ import com.example.ui.components.neoHardOffsetShadow
 import com.example.ui.components.SepiaAccent
 import com.example.ui.components.SepiaAccentSoft
 import com.example.ui.components.SepiaActiveParagraphBg
+import com.example.ui.components.SepiaAmber
 import com.example.ui.components.SepiaBg
 import com.example.ui.components.SepiaBorder
 import com.example.ui.components.SepiaCard
@@ -495,6 +503,8 @@ fun ManualEditorScreen(
             .groupBy { it.second.paragraphIndex }
     }
 
+    var acceptedDiffKeys by remember(snapshot.sourceFile) { mutableStateOf(setOf<String>()) }
+
     fun triggerUndoClick() {
         if (!editorState.canUndo) return
         if (editorState.skipUndoConfirm) {
@@ -515,13 +525,14 @@ fun ManualEditorScreen(
                 .navigationBarsPadding()
                 .imePadding()
         ) {
-            // 1. Compact Same-Tone Sepia Top Bar with Save Draft, Offline TTS Speaker & standalone Compare icon
+            // 1. Swiss Neo-Brutalist 3D Keycap Editing Toolbar + Cobalt "Lưu" Pill
             SepiaTopBar(
                 isEditMode = editorState.isEditMode,
                 isSpeaking = speakingParagraphIndex >= 0,
                 isCompareMode = editorState.isCompareMode,
                 isSearchOpen = showSearchBar,
                 isSaving = saveUiState is SaveUiState.Saving,
+                canUndo = editorState.canUndo,
                 fontSizeSp = editorState.fontSizeSp,
                 readingMode = editorState.readingMode,
                 showMoreMenu = showMoreMenu,
@@ -538,6 +549,7 @@ fun ManualEditorScreen(
                     stopTtsPlayback()
                     showExitDialog = true
                 },
+                onUndoClick = ::triggerUndoClick,
                 onToggleEdit = onToggleEditMode,
                 onToggleTts = ::toggleTtsForActiveParagraph,
                 onToggleCompare = onToggleCompareMode,
@@ -555,8 +567,12 @@ fun ManualEditorScreen(
                 }
             )
 
-            // 2. Optional Find & Replace Bar (+ Quick Replace Dictionary button)
-            if (showSearchBar) {
+            // 2. Animated 3D Art-Paper Find & Replace Card
+            AnimatedVisibility(
+                visible = showSearchBar,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
                 SepiaFindReplaceBar(
                     searchQuery = editorState.searchQuery,
                     replaceQuery = editorState.replaceQuery,
@@ -577,7 +593,7 @@ fun ManualEditorScreen(
                 )
             }
 
-            // 3. Chapter Strip + Compact Undo Button + Edit Mode "Tách chương từ đây" Action Bar
+            // 3. Chapter Strip + Edit Mode "Tách chương từ đây" 3D Bar
             if (activeChapter != null) {
                 SepiaChapterStrip(
                     chapterIndex = editorState.currentChapterIndex,
@@ -587,8 +603,6 @@ fun ManualEditorScreen(
                     totalParagraphsInChapter = activeChapter.currentParagraphs.size,
                     isEditMode = editorState.isEditMode,
                     isCompareMode = editorState.isCompareMode,
-                    canUndo = editorState.canUndo,
-                    onUndoClick = ::triggerUndoClick,
                     onSplitChapterClick = onSplitChapterAtActiveParagraph
                 )
             }
@@ -711,10 +725,22 @@ fun ManualEditorScreen(
                                 1f
                             }
 
+                            val paperSheetShape = RoundedCornerShape(14.dp)
                             Box(
                                 modifier = Modifier
                                     .weight(topPaneWeight)
                                     .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    .padding(end = 3.dp, bottom = 3.dp)
+                                    .neoHardOffsetShadow(
+                                        cornerRadius = 14.dp,
+                                        offsetX = 3.dp,
+                                        offsetY = 3.dp,
+                                        shadowColor = SepiaInk
+                                    )
+                                    .clip(paperSheetShape)
+                                    .background(SepiaCard)
+                                    .border(1.5.dp, SepiaInk, paperSheetShape)
                             ) {
                                 if (editorState.readingMode == ManualReadingMode.VERTICAL_SCROLL) {
                                     SepiaVerticalBookPane(
@@ -732,6 +758,11 @@ fun ManualEditorScreen(
                                         activeChapterBookmarks = activeChapterBookmarks,
                                         activeChapterMatches = activeChapterMatches,
                                         activeGlobalMatchIndex = editorState.activeMatchIndex,
+                                        acceptedDiffKeys = acceptedDiffKeys,
+                                        onAcceptDiff = { key -> acceptedDiffKeys = acceptedDiffKeys + key },
+                                        onRejectDiff = { pIdx, origText ->
+                                            onUpdateParagraph(editorState.currentChapterIndex, pIdx, origText)
+                                        },
                                         onSelectParagraph = { pIdx -> handleSelectParagraph(pIdx, fromExplicitTap = true) },
                                         onParagraphFocusChanged = { pIdx, focused ->
                                             if (focused) {
@@ -775,6 +806,11 @@ fun ManualEditorScreen(
                                         activeChapterBookmarks = activeChapterBookmarks,
                                         activeChapterMatches = activeChapterMatches,
                                         activeGlobalMatchIndex = editorState.activeMatchIndex,
+                                        acceptedDiffKeys = acceptedDiffKeys,
+                                        onAcceptDiff = { key -> acceptedDiffKeys = acceptedDiffKeys + key },
+                                        onRejectDiff = { pIdx, origText ->
+                                            onUpdateParagraph(editorState.currentChapterIndex, pIdx, origText)
+                                        },
                                         onSelectParagraph = { pIdx -> handleSelectParagraph(pIdx, fromExplicitTap = true) },
                                         onParagraphFocusChanged = { pIdx, focused ->
                                             if (focused) {
@@ -804,12 +840,8 @@ fun ManualEditorScreen(
                                 }
                             }
 
-                            // BOTTOM HALF (Only when Compare Mode is ON): Original Reference Pane with Diff Highlights
+                            // BOTTOM HALF (Only when Compare Mode is ON): Original Reference Pane in 3D Archival Sheet
                             if (editorState.isCompareMode) {
-                                HorizontalDivider(
-                                    thickness = 2.dp,
-                                    color = SepiaAccent.copy(alpha = 0.55f)
-                                )
                                 SepiaOriginalCompareBottomPane(
                                     chapter = activeChapter,
                                     activeParagraphIndex = editorState.activeParagraphIndex,
@@ -819,27 +851,43 @@ fun ManualEditorScreen(
                                     modifier = Modifier
                                         .weight(bottomPaneWeight)
                                         .fillMaxWidth()
+                                        .padding(start = 10.dp, end = 13.dp, bottom = 9.dp)
+                                        .neoHardOffsetShadow(
+                                            cornerRadius = 14.dp,
+                                            offsetX = 3.dp,
+                                            offsetY = 3.dp,
+                                            shadowColor = SepiaInk
+                                        )
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .border(1.5.dp, SepiaInk, RoundedCornerShape(14.dp))
                                 )
                             }
                         }
                     }
                 }
 
-                // Floating transient feedback pill
+                // Floating transient 3D feedback pill
                 val feedback = editorState.feedbackMessage
                 if (feedback != null) {
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = SepiaInk.copy(alpha = 0.90f),
+                    Box(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
-                            .padding(bottom = 14.dp, start = 20.dp, end = 20.dp)
+                            .padding(bottom = 16.dp, start = 20.dp, end = 20.dp)
+                            .neoHardOffsetShadow(
+                                cornerRadius = 50.dp,
+                                offsetX = 2.5.dp,
+                                offsetY = 2.5.dp,
+                                shadowColor = SepiaInk
+                            )
+                            .clip(RoundedCornerShape(50))
+                            .background(SepiaAmber)
+                            .border(1.5.dp, SepiaInk, RoundedCornerShape(50))
                     ) {
                         Text(
                             text = feedback,
                             fontSize = 12.sp,
-                            color = SepiaBg,
-                            fontWeight = FontWeight.Medium,
+                            color = SepiaInk,
+                            fontWeight = FontWeight.ExtraBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
@@ -1185,12 +1233,37 @@ fun ExitConfirmDialog(
 }
 
 @Composable
+private fun Editor3DKeycapButton(
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    containerColor: Color = SepiaCard,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    NeoBrutalistPressBox(
+        onClick = onClick,
+        enabled = enabled,
+        cornerRadius = 9.dp,
+        shadowOffset = 2.dp,
+        pressDepth = 2.dp,
+        borderWidth = 1.5.dp,
+        containerColor = if (enabled) containerColor else SepiaChrome,
+        borderColor = if (enabled) SepiaInk else SepiaInkMuted.copy(alpha = 0.45f),
+        shadowColor = if (enabled) SepiaInk else Color.Transparent,
+        modifier = modifier.size(34.dp)
+    ) {
+        content()
+    }
+}
+
+@Composable
 private fun SepiaTopBar(
     isEditMode: Boolean,
     isSpeaking: Boolean,
     isCompareMode: Boolean,
     isSearchOpen: Boolean,
     isSaving: Boolean,
+    canUndo: Boolean,
     fontSizeSp: Float,
     readingMode: ManualReadingMode,
     showMoreMenu: Boolean,
@@ -1198,6 +1271,7 @@ private fun SepiaTopBar(
     onSaveClick: () -> Unit,
     onSaveDraftClick: () -> Unit,
     onHomeClick: () -> Unit,
+    onUndoClick: () -> Unit,
     onToggleEdit: () -> Unit,
     onToggleTts: () -> Unit,
     onToggleCompare: () -> Unit,
@@ -1211,50 +1285,49 @@ private fun SepiaTopBar(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(SepiaChrome)
+            .background(SepiaBg)
             .statusBarsPadding()
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(48.dp)
-                .padding(horizontal = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-            // Top-Left 1: ☰ TOC Menu
-            IconButton(
+            // 1. ☰ TOC 3D Keycap
+            Editor3DKeycapButton(
                 onClick = onOpenToc,
-                modifier = Modifier
-                    .size(30.dp)
-                    .testTag("manual_toc_button")
+                modifier = Modifier.testTag("manual_toc_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Menu,
                     contentDescription = "Mở Mục lục",
                     tint = SepiaInk,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier.size(17.dp)
                 )
             }
 
-            // Top-Left 2: Compact Pill "Lưu"
+            // 2. Prominent Cobalt Blue (#1D5CD6) 3D "Lưu" Pill
             NeoBrutalistPressBox(
                 onClick = onSaveClick,
                 enabled = !isSaving,
                 isPill = true,
-                shadowOffset = 2.5.dp,
+                shadowOffset = 2.dp,
                 pressDepth = 2.dp,
                 borderWidth = 1.5.dp,
                 containerColor = SepiaAccent,
                 borderColor = SepiaInk,
                 shadowColor = SepiaInk,
                 modifier = Modifier
-                    .height(30.dp)
+                    .height(34.dp)
                     .testTag("manual_save_button")
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 9.dp),
+                    modifier = Modifier.padding(horizontal = 11.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     if (isSaving) {
                         CircularProgressIndicator(
@@ -1265,8 +1338,8 @@ private fun SepiaTopBar(
                     }
                     Text(
                         text = if (isSaving) "Lưu…" else "Lưu",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.ExtraBold,
                         color = Color.White,
                         maxLines = 1,
                         softWrap = false
@@ -1274,27 +1347,23 @@ private fun SepiaTopBar(
                 }
             }
 
-            // Top-Left 3 (Upgrade 1.2): Compact "Lưu nháp" Icon right next to "Lưu"
-            IconButton(
+            // 3. Save Draft 3D Keycap
+            Editor3DKeycapButton(
                 onClick = onSaveDraftClick,
-                modifier = Modifier
-                    .size(30.dp)
-                    .testTag("manual_save_draft_button")
+                modifier = Modifier.testTag("manual_save_draft_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.SaveAs,
                     contentDescription = "Lưu nháp",
                     tint = SepiaAccent,
-                    modifier = Modifier.size(17.dp)
+                    modifier = Modifier.size(16.dp)
                 )
             }
 
-            // Top-Left 4: Compact Home Icon (Sepia tone)
-            IconButton(
+            // 4. Home 3D Keycap
+            Editor3DKeycapButton(
                 onClick = onHomeClick,
-                modifier = Modifier
-                    .size(30.dp)
-                    .testTag("manual_home_button")
+                modifier = Modifier.testTag("manual_home_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Home,
@@ -1304,30 +1373,43 @@ private fun SepiaTopBar(
                 )
             }
 
-            Spacer(modifier = Modifier.weight(1f))
+            // 5. Undo 3D Keycap (Hoàn tác)
+            Editor3DKeycapButton(
+                onClick = onUndoClick,
+                enabled = canUndo,
+                containerColor = if (canUndo) SepiaAmber else SepiaChrome,
+                modifier = Modifier.testTag("manual_undo_button")
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.Undo,
+                    contentDescription = "Hoàn tác",
+                    tint = if (canUndo) SepiaInk else SepiaInkMuted.copy(alpha = 0.45f),
+                    modifier = Modifier.size(17.dp)
+                )
+            }
 
-            // Top-Right 1: Compact Pill "Sửa"
+            // 6. "Sửa" Toggle 3D Pill
             NeoBrutalistPressBox(
                 onClick = onToggleEdit,
                 isPill = true,
-                shadowOffset = 2.5.dp,
+                shadowOffset = 2.dp,
                 pressDepth = 2.dp,
                 borderWidth = 1.5.dp,
                 containerColor = if (isEditMode) SepiaAccent else SepiaCard,
                 borderColor = SepiaInk,
                 shadowColor = SepiaInk,
                 modifier = Modifier
-                    .height(30.dp)
+                    .height(34.dp)
                     .testTag("manual_edit_toggle_button")
             ) {
                 Box(
-                    modifier = Modifier.padding(horizontal = 9.dp),
+                    modifier = Modifier.padding(horizontal = 11.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = "Sửa",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.ExtraBold,
                         color = if (isEditMode) Color.White else SepiaInk,
                         maxLines = 1,
                         softWrap = false
@@ -1335,63 +1417,52 @@ private fun SepiaTopBar(
                 }
             }
 
-            Spacer(modifier = Modifier.width(2.dp))
-
-            // Top-Right 2 (Upgrade 1.5): Offline Android TTS Speaker Icon right next to "Sửa"
-            IconButton(
+            // 7. Offline Android TTS Speaker 3D Keycap
+            Editor3DKeycapButton(
                 onClick = onToggleTts,
-                modifier = Modifier
-                    .size(30.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(if (isSpeaking) Color(0x282A7B6F) else Color.Transparent)
-                    .testTag("manual_tts_button")
+                containerColor = if (isSpeaking) Color(0xFF16A34A) else SepiaCard,
+                modifier = Modifier.testTag("manual_tts_button")
             ) {
                 Icon(
                     imageVector = if (isSpeaking) Icons.Rounded.StopCircle else Icons.Rounded.VolumeUp,
                     contentDescription = if (isSpeaking) "Dừng đọc thử" else "Đọc thử đoạn văn",
-                    tint = if (isSpeaking) Color(0xFF1F6B5F) else SepiaInk,
-                    modifier = Modifier.size(18.dp)
+                    tint = if (isSpeaking) Color.White else SepiaInk,
+                    modifier = Modifier.size(17.dp)
                 )
             }
 
-            // Top-Right 3: Standalone "So sánh" Icon
-            IconButton(
+            // 8. Standalone "So sánh" 3D Keycap
+            Editor3DKeycapButton(
                 onClick = onToggleCompare,
-                modifier = Modifier
-                    .size(30.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(if (isCompareMode) SepiaAccentSoft else Color.Transparent)
-                    .testTag("manual_compare_button")
+                containerColor = if (isCompareMode) SepiaAmber else SepiaCard,
+                modifier = Modifier.testTag("manual_compare_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Splitscreen,
                     contentDescription = "Bật/tắt So sánh với bản gốc",
-                    tint = if (isCompareMode) SepiaAccent else SepiaInk,
+                    tint = SepiaInk,
                     modifier = Modifier.size(17.dp)
                 )
             }
 
-            // Top-Right 4: Search (Find & Replace)
-            IconButton(
+            // 9. Search (Find & Replace) 3D Keycap
+            Editor3DKeycapButton(
                 onClick = onToggleSearch,
-                modifier = Modifier
-                    .size(30.dp)
-                    .testTag("manual_search_button")
+                containerColor = if (isSearchOpen) SepiaAccent else SepiaCard,
+                modifier = Modifier.testTag("manual_search_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Search,
                     contentDescription = "Tìm kiếm và thay thế",
-                    tint = if (isSearchOpen) SepiaAccent else SepiaInk,
+                    tint = if (isSearchOpen) Color.White else SepiaInk,
                     modifier = Modifier.size(17.dp)
                 )
             }
 
-            // Top-Right 5: Add Manual TOC Bookmark
-            IconButton(
+            // 10. Add Manual TOC Bookmark 3D Keycap
+            Editor3DKeycapButton(
                 onClick = onAddTocClick,
-                modifier = Modifier
-                    .size(30.dp)
-                    .testTag("manual_add_toc_button")
+                modifier = Modifier.testTag("manual_add_toc_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.BookmarkAdd,
@@ -1401,13 +1472,12 @@ private fun SepiaTopBar(
                 )
             }
 
-            // Top-Right 6: Exclamation Menu (!) — ONLY Font a/A + Vertical/Horizontal Reading Mode
+            // 11. Exclamation Menu (!) 3D Keycap — Font A-/A+ + Vertical/Horizontal Reading Mode
             Box {
-                IconButton(
+                Editor3DKeycapButton(
                     onClick = { onMoreMenuChange(true) },
-                    modifier = Modifier
-                        .size(30.dp)
-                        .testTag("manual_more_menu_button")
+                    containerColor = if (showMoreMenu) SepiaAmber else SepiaCard,
+                    modifier = Modifier.testTag("manual_more_menu_button")
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.ErrorOutline,
@@ -1422,9 +1492,9 @@ private fun SepiaTopBar(
                     onDismissRequest = { onMoreMenuChange(false) },
                     modifier = Modifier
                         .background(SepiaCard)
+                        .border(1.5.dp, SepiaInk, RoundedCornerShape(10.dp))
                         .width(214.dp)
                 ) {
-                    // Section 1: Font size (ONLY 2 buttons 'a' and 'A')
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1433,8 +1503,8 @@ private fun SepiaTopBar(
                     ) {
                         Text(
                             text = "Cỡ chữ (${fontSizeSp.toInt()}sp)",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold,
                             color = SepiaInkMuted
                         )
                         Row(
@@ -1444,44 +1514,42 @@ private fun SepiaTopBar(
                         ) {
                             NeoBrutalistPressBox(
                                 onClick = onDecreaseFont,
-                                isPill = false,
-                                cornerRadius = 10.dp,
-                                shadowOffset = 3.dp,
+                                cornerRadius = 9.dp,
+                                shadowOffset = 2.dp,
                                 pressDepth = 2.dp,
                                 borderWidth = 1.5.dp,
-                                containerColor = SepiaChrome,
+                                containerColor = SepiaBg,
                                 borderColor = SepiaInk,
                                 shadowColor = SepiaInk,
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(39.dp)
+                                    .height(36.dp)
                                     .testTag("manual_font_decrease")
                             ) {
                                 Text(
-                                    text = "a",
-                                    fontSize = 14.sp,
+                                    text = "A-",
+                                    fontSize = 13.sp,
                                     fontWeight = FontWeight.ExtraBold,
                                     color = SepiaInk
                                 )
                             }
                             NeoBrutalistPressBox(
                                 onClick = onIncreaseFont,
-                                isPill = false,
-                                cornerRadius = 10.dp,
-                                shadowOffset = 3.dp,
+                                cornerRadius = 9.dp,
+                                shadowOffset = 2.dp,
                                 pressDepth = 2.dp,
                                 borderWidth = 1.5.dp,
-                                containerColor = SepiaChrome,
+                                containerColor = SepiaBg,
                                 borderColor = SepiaInk,
                                 shadowColor = SepiaInk,
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(39.dp)
+                                    .height(36.dp)
                                     .testTag("manual_font_increase")
                             ) {
                                 Text(
-                                    text = "A",
-                                    fontSize = 18.sp,
+                                    text = "A+",
+                                    fontSize = 13.5.sp,
                                     fontWeight = FontWeight.ExtraBold,
                                     color = SepiaInk
                                 )
@@ -1490,12 +1558,11 @@ private fun SepiaTopBar(
                     }
 
                     HorizontalDivider(
-                        thickness = 0.8.dp,
+                        thickness = 1.dp,
                         color = SepiaBorder,
                         modifier = Modifier.padding(vertical = 4.dp)
                     )
 
-                    // Section 2: Page-turn mode (Cuộn dọc / Lướt ngang)
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1504,8 +1571,8 @@ private fun SepiaTopBar(
                     ) {
                         Text(
                             text = "Chế độ lật trang",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold,
                             color = SepiaInkMuted
                         )
 
@@ -1528,7 +1595,7 @@ private fun SepiaTopBar(
                 }
             }
         }
-        HorizontalDivider(thickness = 0.8.dp, color = SepiaBorder)
+        HorizontalDivider(thickness = 1.2.dp, color = SepiaInk.copy(alpha = 0.22f))
     }
 }
 
@@ -1545,6 +1612,11 @@ private fun ReadingModeOptionRow(
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
             .background(if (selected) SepiaAccentSoft else Color.Transparent)
+            .border(
+                width = if (selected) 1.2.dp else 0.dp,
+                color = if (selected) SepiaInk else Color.Transparent,
+                shape = RoundedCornerShape(8.dp)
+            )
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1558,8 +1630,8 @@ private fun ReadingModeOptionRow(
         )
         Text(
             text = label,
-            fontSize = 13.sp,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            fontSize = 12.5.sp,
+            fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.SemiBold,
             color = if (selected) SepiaAccent else SepiaInk,
             modifier = Modifier.weight(1f)
         )
@@ -1583,8 +1655,6 @@ private fun SepiaChapterStrip(
     totalParagraphsInChapter: Int,
     isEditMode: Boolean,
     isCompareMode: Boolean,
-    canUndo: Boolean,
-    onUndoClick: () -> Unit,
     onSplitChapterClick: () -> Unit
 ) {
     Column(
@@ -1595,87 +1665,56 @@ private fun SepiaChapterStrip(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 5.dp),
+                .padding(horizontal = 12.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
                 text = "${chapterIndex + 1}/$totalChapters · $chapterTitle",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.Bold,
                 color = SepiaInkMuted,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                if (canUndo) {
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = SepiaChrome,
-                        border = BorderStroke(0.7.dp, SepiaBorder),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .clickable(onClick = onUndoClick)
-                            .testTag("manual_undo_button")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(3.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Rounded.Undo,
-                                contentDescription = "Hoàn tác",
-                                tint = SepiaInk,
-                                modifier = Modifier.size(13.dp)
-                            )
-                            Text(
-                                text = "Hoàn tác",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = SepiaInk
-                            )
-                        }
-                    }
-                }
-
-                if (isEditMode) {
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = SepiaAccentSoft
-                    ) {
-                        Text(
-                            text = if (isCompareMode) "Đang sửa · So sánh" else "Đang sửa",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = SepiaAccent,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                        )
-                    }
+            if (isEditMode) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(SepiaAmber)
+                        .border(1.2.dp, SepiaInk, RoundedCornerShape(50))
+                        .padding(horizontal = 9.dp, vertical = 3.dp)
+                ) {
+                    Text(
+                        text = if (isCompareMode) "Đang sửa · So sánh" else "Đang sửa",
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = SepiaInk,
+                        maxLines = 1,
+                        softWrap = false
+                    )
                 }
             }
         }
 
-        // Upgrade 1.3: Compact Split Chapter action bar shown when Edit Mode is active
+        // Compact 3D Split Chapter action bar shown when Edit Mode is active
         if (isEditMode && totalParagraphsInChapter > 1) {
             val canSplitHere = activeParagraphIndex in 1 until totalParagraphsInChapter
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(SepiaChrome.copy(alpha = 0.72f))
-                    .padding(horizontal = 14.dp, vertical = 4.dp),
+                    .background(SepiaChrome)
+                    .padding(horizontal = 12.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
                     text = "Đang chọn đoạn #${activeParagraphIndex + 1}/$totalParagraphsInChapter",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
                     color = SepiaInkMuted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -1684,14 +1723,16 @@ private fun SepiaChapterStrip(
 
                 Spacer(modifier = Modifier.width(8.dp))
 
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (canSplitHere) SepiaAccent else SepiaCard,
-                    border = if (canSplitHere) null else BorderStroke(0.8.dp, SepiaBorder),
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .clickable(onClick = onSplitChapterClick)
-                        .testTag("manual_split_chapter_button")
+                NeoBrutalistPressBox(
+                    onClick = onSplitChapterClick,
+                    isPill = true,
+                    shadowOffset = 2.dp,
+                    pressDepth = 1.5.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (canSplitHere) SepiaAccent else SepiaCard,
+                    borderColor = SepiaInk,
+                    shadowColor = if (canSplitHere) SepiaInk else Color.Transparent,
+                    modifier = Modifier.testTag("manual_split_chapter_button")
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
@@ -1706,8 +1747,8 @@ private fun SepiaChapterStrip(
                         )
                         Text(
                             text = "Tách chương từ đây",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
                             color = if (canSplitHere) Color.White else SepiaInkMuted,
                             maxLines = 1,
                             softWrap = false
@@ -1715,7 +1756,7 @@ private fun SepiaChapterStrip(
                     }
                 }
             }
-            HorizontalDivider(thickness = 0.6.dp, color = SepiaBorder)
+            HorizontalDivider(thickness = 1.dp, color = SepiaBorder)
         }
     }
 }
@@ -1736,6 +1777,9 @@ private fun SepiaVerticalBookPane(
     activeChapterBookmarks: Map<Int, ManualTocEntry>,
     activeChapterMatches: Map<Int, List<Pair<Int, ManualSearchMatch>>>,
     activeGlobalMatchIndex: Int,
+    acceptedDiffKeys: Set<String>,
+    onAcceptDiff: (String) -> Unit,
+    onRejectDiff: (Int, String) -> Unit,
     onSelectParagraph: (Int) -> Unit,
     onParagraphFocusChanged: (Int, Boolean) -> Unit,
     onUpdateParagraph: (Int, String) -> Unit,
@@ -1745,10 +1789,10 @@ private fun SepiaVerticalBookPane(
         state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
-            start = 16.dp,
-            end = 16.dp,
-            top = 8.dp,
-            bottom = if (isEditMode) 120.dp else 12.dp
+            start = 14.dp,
+            end = 14.dp,
+            top = 12.dp,
+            bottom = if (isEditMode) 120.dp else 18.dp
         ),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -1757,6 +1801,7 @@ private fun SepiaVerticalBookPane(
             key = { pIdx, _ -> "${chapter.fileName}_p_$pIdx" }
         ) { pIdx, paragraph ->
             val origPara = chapter.originalParagraphs.getOrNull(pIdx).orEmpty()
+            val diffKey = "${chapter.fileName}_$pIdx"
             val isActiveHighlightPara = (isCompareMode || isEditMode) && pIdx == activeParagraphIndex
             val isSpeakingPara = pIdx == speakingParagraphIndex
             val isReadSelectedPara = !isEditMode && !isCompareMode && showReadSelectionOutline && pIdx == activeParagraphIndex
@@ -1771,10 +1816,13 @@ private fun SepiaVerticalBookPane(
                 isActiveHighlight = isActiveHighlightPara,
                 isSpeaking = isSpeakingPara,
                 isReadSelected = isReadSelectedPara,
+                isAcceptedDiff = diffKey in acceptedDiffKeys,
                 imeBottomPx = imeBottomPx,
                 bookmark = activeChapterBookmarks[pIdx],
                 paragraphMatches = activeChapterMatches[pIdx].orEmpty(),
                 activeGlobalMatchIndex = activeGlobalMatchIndex,
+                onAcceptDiff = { onAcceptDiff(diffKey) },
+                onRejectDiff = { onRejectDiff(pIdx, origPara) },
                 onActivate = { onSelectParagraph(pIdx) },
                 onFocusChanged = { focused -> onParagraphFocusChanged(pIdx, focused) },
                 onTextChange = { updated -> onUpdateParagraph(pIdx, updated) }
@@ -1814,6 +1862,9 @@ private fun SepiaHorizontalPagerPane(
     activeChapterBookmarks: Map<Int, ManualTocEntry>,
     activeChapterMatches: Map<Int, List<Pair<Int, ManualSearchMatch>>>,
     activeGlobalMatchIndex: Int,
+    acceptedDiffKeys: Set<String>,
+    onAcceptDiff: (String) -> Unit,
+    onRejectDiff: (Int, String) -> Unit,
     onSelectParagraph: (Int) -> Unit,
     onParagraphFocusChanged: (Int, Boolean) -> Unit,
     onUpdateParagraph: (Int, String) -> Unit,
@@ -1822,7 +1873,7 @@ private fun SepiaHorizontalPagerPane(
     val scope = rememberCoroutineScope()
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val rawAvailableHeightDp: Dp = (maxHeight - 44.dp).coerceAtLeast(180.dp)
+        val rawAvailableHeightDp: Dp = (maxHeight - 48.dp).coerceAtLeast(180.dp)
         val availableWidthDp: Dp = (maxWidth - 36.dp).coerceAtLeast(220.dp)
 
         // Freeze pagination height while keyboard is open so tapped paragraphs stay on the same page
@@ -1888,16 +1939,17 @@ private fun SepiaHorizontalPagerPane(
                         .fillMaxSize()
                         .verticalScroll(rememberScrollState())
                         .padding(
-                            start = 16.dp,
-                            end = 16.dp,
-                            top = 8.dp,
-                            bottom = if (isEditMode) 120.dp else 12.dp
+                            start = 14.dp,
+                            end = 14.dp,
+                            top = 12.dp,
+                            bottom = if (isEditMode) 120.dp else 14.dp
                         ),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     for (pIdx in paraIndices) {
                         val paragraph = chapter.currentParagraphs.getOrNull(pIdx) ?: continue
                         val origPara = chapter.originalParagraphs.getOrNull(pIdx).orEmpty()
+                        val diffKey = "${chapter.fileName}_$pIdx"
                         val isActiveHighlightPara = (isCompareMode || isEditMode) && pIdx == activeParagraphIndex
                         val isSpeakingPara = pIdx == speakingParagraphIndex
                         val isReadSelectedPara = !isEditMode && !isCompareMode && showReadSelectionOutline && pIdx == activeParagraphIndex
@@ -1913,10 +1965,13 @@ private fun SepiaHorizontalPagerPane(
                                 isActiveHighlight = isActiveHighlightPara,
                                 isSpeaking = isSpeakingPara,
                                 isReadSelected = isReadSelectedPara,
+                                isAcceptedDiff = diffKey in acceptedDiffKeys,
                                 imeBottomPx = imeBottomPx,
                                 bookmark = activeChapterBookmarks[pIdx],
                                 paragraphMatches = activeChapterMatches[pIdx].orEmpty(),
                                 activeGlobalMatchIndex = activeGlobalMatchIndex,
+                                onAcceptDiff = { onAcceptDiff(diffKey) },
+                                onRejectDiff = { onRejectDiff(pIdx, origPara) },
                                 onActivate = { onSelectParagraph(pIdx) },
                                 onFocusChanged = { focused -> onParagraphFocusChanged(pIdx, focused) },
                                 onTextChange = { updated -> onUpdateParagraph(pIdx, updated) }
@@ -1926,29 +1981,34 @@ private fun SepiaHorizontalPagerPane(
                 }
             }
 
-            // Compact Horizontal Page Indicator + Prev/Next Page (works even when swipe locked in Edit Mode)
+            HorizontalDivider(thickness = 1.dp, color = SepiaBorder)
+
+            // Compact 3D Horizontal Page Indicator + Prev/Next Page
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(SepiaChrome)
-                    .padding(horizontal = 12.dp, vertical = 5.dp),
+                    .background(SepiaBg)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 val canPrevPage = pagerState.currentPage > 0 || chapterIndex > 0
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (canPrevPage) SepiaCard else Color.Transparent,
-                    border = if (canPrevPage) BorderStroke(0.7.dp, SepiaBorder) else null,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .clickable(enabled = canPrevPage) {
-                            if (pagerState.currentPage > 0) {
-                                scope.launch { pagerState.animateScrollToPage(pagerState.currentPage - 1) }
-                            } else if (chapterIndex > 0) {
-                                onSelectChapter(chapterIndex - 1)
-                            }
+                NeoBrutalistPressBox(
+                    onClick = {
+                        if (pagerState.currentPage > 0) {
+                            scope.launch { pagerState.animateScrollToPage(pagerState.currentPage - 1) }
+                        } else if (chapterIndex > 0) {
+                            onSelectChapter(chapterIndex - 1)
                         }
+                    },
+                    enabled = canPrevPage,
+                    isPill = true,
+                    shadowOffset = if (canPrevPage) 2.dp else 0.dp,
+                    pressDepth = 1.5.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (canPrevPage) SepiaCard else Color.Transparent,
+                    borderColor = if (canPrevPage) SepiaInk else SepiaBorder,
+                    shadowColor = if (canPrevPage) SepiaInk else Color.Transparent
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
@@ -1962,9 +2022,11 @@ private fun SepiaHorizontalPagerPane(
                         )
                         Text(
                             text = if (pagerState.currentPage == 0 && chapterIndex > 0) "Chương trước" else "Trước",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (canPrevPage) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f)
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (canPrevPage) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f),
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
                 }
@@ -1975,25 +2037,28 @@ private fun SepiaHorizontalPagerPane(
                         if (isEditMode) append(" · Khóa vuốt")
                     },
                     fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.ExtraBold,
                     color = if (isEditMode) SepiaAccent else SepiaInkMuted,
                     maxLines = 1
                 )
 
                 val canNextPage = pagerState.currentPage < pageCount - 1 || chapterIndex < totalChapters - 1
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (canNextPage) SepiaCard else Color.Transparent,
-                    border = if (canNextPage) BorderStroke(0.7.dp, SepiaBorder) else null,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .clickable(enabled = canNextPage) {
-                            if (pagerState.currentPage < pageCount - 1) {
-                                scope.launch { pagerState.animateScrollToPage(pagerState.currentPage + 1) }
-                            } else if (chapterIndex < totalChapters - 1) {
-                                onSelectChapter(chapterIndex + 1)
-                            }
+                NeoBrutalistPressBox(
+                    onClick = {
+                        if (pagerState.currentPage < pageCount - 1) {
+                            scope.launch { pagerState.animateScrollToPage(pagerState.currentPage + 1) }
+                        } else if (chapterIndex < totalChapters - 1) {
+                            onSelectChapter(chapterIndex + 1)
                         }
+                    },
+                    enabled = canNextPage,
+                    isPill = true,
+                    shadowOffset = if (canNextPage) 2.dp else 0.dp,
+                    pressDepth = 1.5.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (canNextPage) SepiaCard else Color.Transparent,
+                    borderColor = if (canNextPage) SepiaInk else SepiaBorder,
+                    shadowColor = if (canNextPage) SepiaInk else Color.Transparent
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
@@ -2001,9 +2066,11 @@ private fun SepiaHorizontalPagerPane(
                     ) {
                         Text(
                             text = if (pagerState.currentPage == pageCount - 1 && chapterIndex < totalChapters - 1) "Chương sau" else "Sau",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (canNextPage) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f)
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (canNextPage) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f),
+                            maxLines = 1,
+                            softWrap = false
                         )
                         Icon(
                             imageVector = Icons.AutoMirrored.Rounded.NavigateNext,
@@ -2031,7 +2098,7 @@ private fun SepiaOriginalCompareBottomPane(
     onTapOriginalParagraph: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Column(modifier = modifier.background(Color(0xFFEEE4CC))) {
+    Column(modifier = modifier.background(SepiaBg)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2112,10 +2179,13 @@ private fun SepiaCurrentParagraphItem(
     isActiveHighlight: Boolean,
     isSpeaking: Boolean,
     isReadSelected: Boolean,
+    isAcceptedDiff: Boolean,
     imeBottomPx: Int,
     bookmark: ManualTocEntry?,
     paragraphMatches: List<Pair<Int, ManualSearchMatch>>,
     activeGlobalMatchIndex: Int,
+    onAcceptDiff: () -> Unit,
+    onRejectDiff: () -> Unit,
     onActivate: () -> Unit,
     onFocusChanged: (Boolean) -> Unit,
     onTextChange: (String) -> Unit
@@ -2165,27 +2235,30 @@ private fun SepiaCurrentParagraphItem(
     val effectiveLineHeight = if (isHeading) ((fontSizeSp + 2.5f) * 1.38f).sp else (fontSizeSp * 1.62f).sp
     val effectiveWeight = if (isHeading) FontWeight.Bold else FontWeight.Normal
 
-    val ttsTintColor = Color(0x262A7B6F)
-    val ttsBorderColor = Color(0xFF1F6B5F)
+    val hasUnresolvedDiff = originalText.isNotBlank() && originalText != text && !isAcceptedDiff
+    val showInlineDiffCard = hasUnresolvedDiff && !isFocused
+
+    val ttsTintColor = Color(0xFFDCFCE7)
+    val ttsBorderColor = Color(0xFF16A34A)
 
     val containerBg = when {
         isSpeaking -> ttsTintColor
         isActiveHighlight -> SepiaActiveParagraphBg
-        isReadSelected -> SepiaActiveParagraphBg.copy(alpha = 0.55f)
-        isEditMode && isFocused -> SepiaCard
+        isReadSelected -> SepiaActiveParagraphBg.copy(alpha = 0.65f)
+        isEditMode && isFocused -> Color(0xFFFFFDF7)
         else -> Color.Transparent
     }
 
     val containerBorder = when {
-        isSpeaking -> BorderStroke(1.4.dp, ttsBorderColor)
-        isEditMode && isFocused -> BorderStroke(1.3.dp, SepiaAccent)
-        isActiveHighlight -> BorderStroke(1.1.dp, SepiaAccent.copy(alpha = 0.65f))
-        isReadSelected -> BorderStroke(0.9.dp, SepiaAccent.copy(alpha = 0.45f))
-        isEditMode -> BorderStroke(0.6.dp, SepiaBorder.copy(alpha = 0.65f))
+        isSpeaking -> BorderStroke(1.5.dp, ttsBorderColor)
+        isEditMode && isFocused -> BorderStroke(1.5.dp, SepiaAccent)
+        isActiveHighlight -> BorderStroke(1.5.dp, SepiaInk)
+        isReadSelected -> BorderStroke(1.2.dp, SepiaInk.copy(alpha = 0.65f))
+        isEditMode -> BorderStroke(0.9.dp, SepiaBorder)
         else -> null
     }
 
-    val needsCardPadding = isEditMode || isActiveHighlight || isSpeaking || isReadSelected
+    val needsCardPadding = isEditMode || isActiveHighlight || isSpeaking || isReadSelected || showInlineDiffCard
 
     Column(
         modifier = Modifier
@@ -2226,8 +2299,8 @@ private fun SepiaCurrentParagraphItem(
                 )
                 Text(
                     text = "Đang đọc thử…",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.Bold,
                     color = ttsBorderColor
                 )
             }
@@ -2247,8 +2320,8 @@ private fun SepiaCurrentParagraphItem(
                 )
                 Text(
                     text = bookmark.title,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.Bold,
                     color = SepiaAccent,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -2256,7 +2329,121 @@ private fun SepiaCurrentParagraphItem(
             }
         }
 
-        if (isEditMode) {
+        // Crisp 3D Inline Diff Comparison Card (Old Red Strikethrough vs New Green Highlight + Accept/Reject)
+        if (showInlineDiffCard && !isEditMode) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(end = 2.dp, bottom = 4.dp)
+                    .neoHardOffsetShadow(
+                        cornerRadius = 10.dp,
+                        offsetX = 2.dp,
+                        offsetY = 2.dp,
+                        shadowColor = SepiaInk
+                    )
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(SepiaCard)
+                    .border(1.5.dp, SepiaInk, RoundedCornerShape(10.dp))
+                    .padding(9.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                // Header + Chấp nhận / Từ chối quick actions
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "ĐÃ CHUẨN HÓA / SỬA",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = SepiaInkMuted,
+                        letterSpacing = 0.4.sp
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        NeoBrutalistPressBox(
+                            onClick = onRejectDiff,
+                            isPill = true,
+                            shadowOffset = 1.5.dp,
+                            pressDepth = 1.5.dp,
+                            borderWidth = 1.2.dp,
+                            containerColor = Color(0xFFFEE2E2),
+                            borderColor = SepiaInk,
+                            shadowColor = SepiaInk
+                        ) {
+                            Text(
+                                text = "Từ chối",
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFFB91C1C),
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                        NeoBrutalistPressBox(
+                            onClick = onAcceptDiff,
+                            isPill = true,
+                            shadowOffset = 1.5.dp,
+                            pressDepth = 1.5.dp,
+                            borderWidth = 1.2.dp,
+                            containerColor = Color(0xFF16A34A),
+                            borderColor = SepiaInk,
+                            shadowColor = SepiaInk
+                        ) {
+                            Text(
+                                text = "Chấp nhận",
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Original old text: soft red background (#FEE2E2) with strikethrough
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFFEE2E2))
+                        .border(1.dp, Color(0xFFDC2626).copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 9.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = originalText,
+                        fontSize = (fontSizeSp - 1.5f).coerceAtLeast(12f).sp,
+                        lineHeight = ((fontSizeSp - 1.5f).coerceAtLeast(12f) * 1.48f).sp,
+                        color = Color(0xFFB91C1C),
+                        textDecoration = TextDecoration.LineThrough
+                    )
+                }
+
+                // Normalized / New text: soft green background (#DCFCE7) with thin green border (#16A34A)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFDCFCE7))
+                        .border(1.dp, Color(0xFF16A34A), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 9.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = text,
+                        fontSize = effectiveFontSize,
+                        lineHeight = effectiveLineHeight,
+                        fontWeight = effectiveWeight,
+                        color = Color(0xFF14532D)
+                    )
+                }
+            }
+        } else if (isEditMode) {
             // Live word-diff VisualTransformation inside BasicTextField when Compare Mode is ON!
             val visualTransformation = remember(isCompareMode, originalText) {
                 if (isCompareMode && originalText.isNotEmpty()) {

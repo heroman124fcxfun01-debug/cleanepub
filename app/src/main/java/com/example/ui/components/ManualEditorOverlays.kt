@@ -58,21 +58,22 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.pipeline.EditableTocItem
 
-// Warm Vintage Old-Book Sepia Palette
-internal val SepiaBg = Color(0xFFF4ECD8)
-internal val SepiaChrome = Color(0xFFEFE5CE)
-internal val SepiaCard = Color(0xFFFAF4E6)
-internal val SepiaBorder = Color(0xFFD8CAAE)
-internal val SepiaInk = Color(0xFF3B2F2F)
-internal val SepiaInkMuted = Color(0xFF75624E)
-internal val SepiaAccent = Color(0xFFB35A28)
-internal val SepiaAccentSoft = Color(0x22B35A28)
-internal val SepiaActiveParagraphBg = Color(0xFFE8D8B5)
-internal val SepiaSearchHighlight = Color(0xFFF3CA6E)
-internal val SepiaSearchActive = Color(0xFFE59736)
+// Swiss Neo-Brutalist 3D Paper & Bookbinder Palette for Manual Book Editor
+internal val SepiaBg = Color(0xFFF3EFE6)               // Warm archival cream paper canvas
+internal val SepiaChrome = Color(0xFFE9E3D5)           // Warm linen toolbar & recessed tray
+internal val SepiaCard = Color(0xFFFAF7F0)             // Ivory art-paper sheet face
+internal val SepiaBorder = Color(0xFFD6D0C4)           // Subtle paper divider line
+internal val SepiaInk = Color(0xFF18181B)              // Razor-sharp charcoal ink border & text
+internal val SepiaInkMuted = Color(0xFF52525B)         // Secondary archival ink
+internal val SepiaAccent = Color(0xFF1D5CD6)           // Cobalt Blue primary action (Lưu, Thay tất cả)
+internal val SepiaAccentSoft = Color(0xFFE3ECFC)       // Soft Cobalt highlight tint
+internal val SepiaAmber = Color(0xFFF5B82E)            // Amber Gold active chapter / badge
+internal val SepiaActiveParagraphBg = Color(0xFFFEF3C7)// Soft Amber paper paragraph highlight
+internal val SepiaSearchHighlight = Color(0xFFFDE68A)
+internal val SepiaSearchActive = Color(0xFFF5B82E)
 
 /**
- * Compact Sepia Find & Replace panel shown directly below the Top Bar when Search is active.
+ * Floating Swiss Neo-Brutalist 3D Art-Paper Find & Replace Card shown smoothly below the Top Bar.
  */
 @Composable
 fun SepiaFindReplaceBar(
@@ -90,121 +91,158 @@ fun SepiaFindReplaceBar(
     onOpenCustomReplace: () -> Unit,
     onClose: () -> Unit
 ) {
-    Column(
+    val cardShape = RoundedCornerShape(14.dp)
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(SepiaChrome)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+            .background(SepiaBg)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        // Row 1: Find field + match count + prev/next + close
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(end = 3.dp, bottom = 3.dp)
+                .neoHardOffsetShadow(
+                    cornerRadius = 14.dp,
+                    offsetX = 3.dp,
+                    offsetY = 3.dp,
+                    shadowColor = SepiaInk
+                )
+                .clip(cardShape)
+                .background(SepiaCard)
+                .border(1.5.dp, SepiaInk, cardShape)
+                .padding(horizontal = 10.dp, vertical = 9.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp)
         ) {
-            SepiaCompactInput(
-                value = searchQuery,
-                onValueChange = onSearchQueryChange,
-                placeholder = "Tìm kiếm trong toàn sách…",
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("manual_search_input")
-            )
-
-            Text(
-                text = if (searchQuery.isBlank() || matchCount == 0) "0/0"
-                else "${activeMatchIndex + 1}/$matchCount",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = SepiaInkMuted,
-                maxLines = 1
-            )
-
-            IconButton(
-                onClick = onPrevMatch,
-                enabled = matchCount > 0,
-                modifier = Modifier
-                    .size(32.dp)
-                    .testTag("manual_search_prev")
+            // Row 1: Find field + match count + 3D square keycaps (▲ / ▼ / X)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.KeyboardArrowUp,
-                    contentDescription = "Kết quả trước",
-                    tint = if (matchCount > 0) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f),
-                    modifier = Modifier.size(18.dp)
+                SepiaCompactInput(
+                    value = searchQuery,
+                    onValueChange = onSearchQueryChange,
+                    placeholder = "Tìm kiếm trong toàn sách…",
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("manual_search_input")
                 )
+
+                Text(
+                    text = if (searchQuery.isBlank() || matchCount == 0) "0/0"
+                    else "${activeMatchIndex + 1}/$matchCount",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = SepiaInkMuted,
+                    maxLines = 1
+                )
+
+                NeoBrutalistPressBox(
+                    onClick = onPrevMatch,
+                    enabled = matchCount > 0,
+                    cornerRadius = 8.dp,
+                    shadowOffset = 2.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (matchCount > 0) SepiaBg else SepiaChrome,
+                    borderColor = SepiaInk,
+                    shadowColor = if (matchCount > 0) SepiaInk else Color.Transparent,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .testTag("manual_search_prev")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.KeyboardArrowUp,
+                        contentDescription = "Kết quả trước",
+                        tint = if (matchCount > 0) SepiaInk else SepiaInkMuted.copy(alpha = 0.45f),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                NeoBrutalistPressBox(
+                    onClick = onNextMatch,
+                    enabled = matchCount > 0,
+                    cornerRadius = 8.dp,
+                    shadowOffset = 2.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (matchCount > 0) SepiaBg else SepiaChrome,
+                    borderColor = SepiaInk,
+                    shadowColor = if (matchCount > 0) SepiaInk else Color.Transparent,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .testTag("manual_search_next")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.KeyboardArrowDown,
+                        contentDescription = "Kết quả tiếp",
+                        tint = if (matchCount > 0) SepiaInk else SepiaInkMuted.copy(alpha = 0.45f),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                NeoBrutalistPressBox(
+                    onClick = onClose,
+                    cornerRadius = 8.dp,
+                    shadowOffset = 2.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = SepiaBg,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .testTag("manual_search_close")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Đóng tìm kiếm",
+                        tint = SepiaInk,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
 
-            IconButton(
-                onClick = onNextMatch,
-                enabled = matchCount > 0,
-                modifier = Modifier
-                    .size(32.dp)
-                    .testTag("manual_search_next")
+            // Row 2: Replace field + 3D pills (Thay thế / Thay tất cả / Nhanh)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.KeyboardArrowDown,
-                    contentDescription = "Kết quả tiếp",
-                    tint = if (matchCount > 0) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f),
-                    modifier = Modifier.size(18.dp)
+                SepiaCompactInput(
+                    value = replaceQuery,
+                    onValueChange = onReplaceQueryChange,
+                    placeholder = "Thay thế bằng…",
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("manual_replace_input")
+                )
+
+                SepiaSmallActionChip(
+                    label = "Thay thế",
+                    enabled = matchCount > 0 && searchQuery.isNotBlank(),
+                    onClick = onReplaceOne,
+                    modifier = Modifier.testTag("manual_replace_one")
+                )
+
+                SepiaSmallActionChip(
+                    label = "Thay tất cả",
+                    enabled = matchCount > 0 && searchQuery.isNotBlank(),
+                    emphasized = true,
+                    onClick = onReplaceAll,
+                    modifier = Modifier.testTag("manual_replace_all")
+                )
+
+                SepiaSmallActionChip(
+                    label = if (customReplaceCount > 0) "Nhanh ($customReplaceCount)" else "Nhanh",
+                    enabled = true,
+                    onClick = onOpenCustomReplace,
+                    modifier = Modifier.testTag("manual_custom_replace_open")
                 )
             }
-
-            IconButton(
-                onClick = onClose,
-                modifier = Modifier
-                    .size(32.dp)
-                    .testTag("manual_search_close")
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Close,
-                    contentDescription = "Đóng tìm kiếm",
-                    tint = SepiaInkMuted,
-                    modifier = Modifier.size(17.dp)
-                )
-            }
-        }
-
-        // Row 2: Replace field + Thay + Tất cả + Thay nhanh (Upgrade 1.2)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp)
-        ) {
-            SepiaCompactInput(
-                value = replaceQuery,
-                onValueChange = onReplaceQueryChange,
-                placeholder = "Thay thế bằng…",
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("manual_replace_input")
-            )
-
-            SepiaSmallActionChip(
-                label = "Thay",
-                enabled = matchCount > 0 && searchQuery.isNotBlank(),
-                onClick = onReplaceOne,
-                modifier = Modifier.testTag("manual_replace_one")
-            )
-
-            SepiaSmallActionChip(
-                label = "Tất cả",
-                enabled = matchCount > 0 && searchQuery.isNotBlank(),
-                emphasized = true,
-                onClick = onReplaceAll,
-                modifier = Modifier.testTag("manual_replace_all")
-            )
-
-            SepiaSmallActionChip(
-                label = if (customReplaceCount > 0) "Nhanh ($customReplaceCount)" else "Nhanh",
-                enabled = true,
-                onClick = onOpenCustomReplace,
-                modifier = Modifier.testTag("manual_custom_replace_open")
-            )
         }
     }
-    HorizontalDivider(thickness = 0.8.dp, color = SepiaBorder)
 }
 
 @Composable
@@ -473,20 +511,38 @@ fun ManualTocOverlayDialog(
                         key = { _, item -> item.id }
                     ) { idx, item ->
                         val isCurrent = !item.isManualBookmark && item.chapterIndex == currentChapterIndex
-                        val startPadding = if (item.isManualBookmark) 18.dp else 0.dp
+                        val startPadding = if (item.isManualBookmark) 16.dp else 0.dp
+                        val rowShape = RoundedCornerShape(11.dp)
 
-                        Surface(
-                            shape = RoundedCornerShape(11.dp),
-                            color = when {
-                                isCurrent -> SepiaAccentSoft
-                                item.isManualBookmark -> SepiaCard
-                                else -> Color.Transparent
-                            },
-                            border = if (item.isManualBookmark) BorderStroke(0.6.dp, SepiaBorder) else null,
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(start = startPadding)
-                                .clip(RoundedCornerShape(11.dp))
+                                .padding(start = startPadding, bottom = 2.dp, end = if (isCurrent) 2.dp else 0.dp)
+                                .then(
+                                    if (isCurrent) {
+                                        Modifier.neoHardOffsetShadow(
+                                            cornerRadius = 11.dp,
+                                            offsetX = 2.dp,
+                                            offsetY = 2.dp,
+                                            shadowColor = SepiaInk
+                                        )
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                                .clip(rowShape)
+                                .background(
+                                    when {
+                                        isCurrent -> SepiaAmber
+                                        item.isManualBookmark -> SepiaCard
+                                        else -> SepiaCard
+                                    }
+                                )
+                                .border(
+                                    width = if (isCurrent) 1.5.dp else 1.2.dp,
+                                    color = if (isCurrent) SepiaInk else SepiaInk.copy(alpha = 0.72f),
+                                    shape = rowShape
+                                )
                                 .clickable(enabled = !isTocEditMode) {
                                     onSelectTarget(item.chapterIndex, item.paragraphIndex)
                                     onDismiss()
@@ -497,11 +553,12 @@ fun ManualTocOverlayDialog(
                                     .fillMaxWidth()
                                     .padding(
                                         start = 10.dp,
-                                        end = if (isTocEditMode) 4.dp else 10.dp,
-                                        top = 7.dp,
-                                        bottom = 7.dp
+                                        end = if (isTocEditMode) 6.dp else 10.dp,
+                                        top = 8.dp,
+                                        bottom = 8.dp
                                     ),
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
                                 if (item.isManualBookmark) {
                                     Icon(
@@ -510,22 +567,21 @@ fun ManualTocOverlayDialog(
                                         tint = SepiaAccent,
                                         modifier = Modifier.size(14.dp)
                                     )
-                                    Spacer(modifier = Modifier.width(6.dp))
                                 } else {
                                     Text(
                                         text = "${idx + 1}.",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = if (isCurrent) SepiaAccent else SepiaInkMuted,
-                                        modifier = Modifier.width(26.dp)
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (isCurrent) SepiaInk else SepiaInkMuted,
+                                        modifier = Modifier.width(24.dp)
                                     )
                                 }
 
                                 Text(
                                     text = item.title,
-                                    fontSize = if (item.isManualBookmark) 12.sp else 13.sp,
-                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
-                                    color = if (isCurrent) SepiaAccent else SepiaInk,
+                                    fontSize = if (item.isManualBookmark) 12.sp else 12.5.sp,
+                                    fontWeight = if (isCurrent) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                    color = SepiaInk,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f)
@@ -533,44 +589,65 @@ fun ManualTocOverlayDialog(
 
                                 if (isTocEditMode) {
                                     if (!item.isManualBookmark && item.chapterIndex in 0 until (totalChapters - 1)) {
-                                        IconButton(
+                                        NeoBrutalistPressBox(
                                             onClick = { onMergeChapterWithNext(item.chapterIndex) },
+                                            cornerRadius = 8.dp,
+                                            shadowOffset = 2.dp,
+                                            pressDepth = 1.5.dp,
+                                            borderWidth = 1.5.dp,
+                                            containerColor = SepiaBg,
+                                            borderColor = SepiaInk,
+                                            shadowColor = SepiaInk,
                                             modifier = Modifier
-                                                .size(32.dp)
+                                                .size(30.dp)
                                                 .testTag("toc_merge_${item.id}")
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Rounded.CallMerge,
                                                 contentDescription = "Gộp vào chương dưới",
                                                 tint = SepiaInk,
-                                                modifier = Modifier.size(16.dp)
+                                                modifier = Modifier.size(15.dp)
                                             )
                                         }
                                     }
-                                    IconButton(
+                                    NeoBrutalistPressBox(
                                         onClick = { renamingItem = item },
+                                        cornerRadius = 8.dp,
+                                        shadowOffset = 2.dp,
+                                        pressDepth = 1.5.dp,
+                                        borderWidth = 1.5.dp,
+                                        containerColor = SepiaAccentSoft,
+                                        borderColor = SepiaInk,
+                                        shadowColor = SepiaInk,
                                         modifier = Modifier
-                                            .size(32.dp)
+                                            .size(30.dp)
                                             .testTag("toc_rename_${item.id}")
                                     ) {
                                         Icon(
                                             imageVector = Icons.Rounded.Edit,
                                             contentDescription = "Sửa tên mục lục",
                                             tint = SepiaAccent,
-                                            modifier = Modifier.size(16.dp)
+                                            modifier = Modifier.size(15.dp)
                                         )
                                     }
-                                    IconButton(
+                                    NeoBrutalistPressBox(
                                         onClick = { onDeleteItem(item.id) },
+                                        cornerRadius = 8.dp,
+                                        shadowOffset = 2.dp,
+                                        pressDepth = 1.5.dp,
+                                        borderWidth = 1.5.dp,
+                                        containerColor = Color(0xFFFEE2E2),
+                                        borderColor = SepiaInk,
+                                        shadowColor = SepiaInk,
                                         modifier = Modifier
-                                            .size(32.dp)
+                                            .size(30.dp)
                                             .testTag("toc_delete_${item.id}")
                                     ) {
                                         Icon(
                                             imageVector = Icons.Rounded.DeleteOutline,
                                             contentDescription = "Xóa mục lục",
-                                            tint = Color(0xFFB3261E),
-                                            modifier = Modifier.size(17.dp)
+                                            tint = Color(0xFFDC2626),
+                                            modifier = Modifier.size(15.dp)
                                         )
                                     }
                                 }

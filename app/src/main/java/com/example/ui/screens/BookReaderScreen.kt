@@ -9,7 +9,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -23,6 +25,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -123,10 +126,18 @@ import com.example.ui.components.neoInkBorderColor
 import com.example.ui.components.neoPaperSurfaceColor
 import com.example.ui.components.neoSecondaryPaperColor
 import com.example.ui.theme.IosBlue
+import com.example.ui.theme.IosGreen
+import com.example.ui.theme.IosOrange
+import com.example.ui.theme.NeoInkDark
+import com.example.ui.theme.NeoInkLight
+import com.example.ui.theme.NeoShadowDark
+import com.example.ui.theme.NeoShadowLight
 import com.example.ui.theme.ReaderBrownInk
 import com.example.ui.theme.ReaderBrownPaper
 import com.example.ui.theme.ReaderCreamInk
 import com.example.ui.theme.ReaderCreamPaper
+import com.example.ui.theme.ReaderDarkInk
+import com.example.ui.theme.ReaderDarkPaper
 import com.example.ui.theme.ReaderFontRegistry
 import com.example.ui.theme.ReaderWhiteInk
 import com.example.ui.theme.ReaderWhitePaper
@@ -198,6 +209,7 @@ fun BookReaderScreen(
         onResult = { /* Service continues cleanly regardless */ }
     )
 
+    var showTopChrome by remember { mutableStateOf(true) }
     var showTocSheet by remember { mutableStateOf(false) }
     var showAppearancePopover by remember { mutableStateOf(false) }
     var showAudioBar by remember { mutableStateOf(false) }
@@ -227,23 +239,31 @@ fun BookReaderScreen(
     val latestSpeakingIdx by rememberUpdatedState(speakingParagraphIndex)
     val latestTrackedPara by rememberUpdatedState(currentTrackedParagraphIndex)
 
-    // Resolve paper & ink colors from selected theme
+    // Resolve paper & ink colors from selected theme (3 warm archival papers + Dark Night)
+    val isDarkReaderPaper = readerPrefs.paperTheme == ReaderPaperTheme.DARK_NIGHT
     val paperBg = when (readerPrefs.paperTheme) {
         ReaderPaperTheme.BOOK_BROWN -> ReaderBrownPaper
         ReaderPaperTheme.WARM_CREAM -> ReaderCreamPaper
         ReaderPaperTheme.PURE_WHITE -> ReaderWhitePaper
+        ReaderPaperTheme.DARK_NIGHT -> ReaderDarkPaper
     }
     val inkColor = when (readerPrefs.paperTheme) {
         ReaderPaperTheme.BOOK_BROWN -> ReaderBrownInk
         ReaderPaperTheme.WARM_CREAM -> ReaderCreamInk
         ReaderPaperTheme.PURE_WHITE -> ReaderWhiteInk
+        ReaderPaperTheme.DARK_NIGHT -> ReaderDarkInk
     }
-    val subtleInk = inkColor.copy(alpha = 0.58f)
+    val subtleInk = inkColor.copy(alpha = 0.60f)
     val subtleSurface = when (readerPrefs.paperTheme) {
-        ReaderPaperTheme.BOOK_BROWN -> Color(0xFFDAC5A0)
-        ReaderPaperTheme.WARM_CREAM -> Color(0xFFF1E7C8)
-        ReaderPaperTheme.PURE_WHITE -> Color(0xFFF2F2F7)
+        ReaderPaperTheme.BOOK_BROWN -> Color(0xFFDFD3BE)
+        ReaderPaperTheme.WARM_CREAM -> Color(0xFFEBE0C8)
+        ReaderPaperTheme.PURE_WHITE -> Color(0xFFEDE8DC)
+        ReaderPaperTheme.DARK_NIGHT -> Color(0xFF1F1F23)
     }
+    val keycapBg = if (isDarkReaderPaper) Color(0xFF1F1F23) else Color(0xFFFAF7F0)
+    val keycapBorder = if (isDarkReaderPaper) NeoInkDark else NeoInkLight
+    val keycapShadow = if (isDarkReaderPaper) NeoShadowDark else NeoShadowLight
+    val keycapIconTint = if (isDarkReaderPaper) ReaderDarkInk else NeoInkLight
 
     fun requestNotifPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -394,6 +414,7 @@ fun BookReaderScreen(
             .background(paperBg),
         contentAlignment = Alignment.TopCenter
     ) {
+        // 1. Reading Content Area (Full-bleed archival page; center tap toggles top 3D keycap bar)
         Column(
             modifier = Modifier
                 .widthIn(max = 680.dp)
@@ -401,160 +422,6 @@ fun BookReaderScreen(
                 .statusBarsPadding()
                 .navigationBarsPadding()
         ) {
-            // 1. Ultra-Minimalist Top Bar — STRICTLY 4 controls: Back | ☰ | + | 🎧
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .padding(horizontal = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                // Control 1: iOS Back arrow
-                IconButton(
-                    onClick = ::exitReader,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .testTag("reader_back_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.ArrowBackIosNew,
-                        contentDescription = "Quay lại thư viện",
-                        tint = inkColor,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                // Controls 2, 3, 4: ☰ TOC | + Appearance Popover | 🎧 Audio Pill
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    IconButton(
-                        onClick = {
-                            showAppearancePopover = false
-                            showTocSheet = true
-                        },
-                        modifier = Modifier
-                            .size(48.dp)
-                            .testTag("reader_toc_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Menu,
-                            contentDescription = "Mục lục",
-                            tint = inkColor,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { showAppearancePopover = !showAppearancePopover },
-                        modifier = Modifier
-                            .size(48.dp)
-                            .testTag("reader_appearance_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Add,
-                            contentDescription = "Tùy chỉnh chữ, lề và kiểu lật trang",
-                            tint = if (showAppearancePopover) IosBlue else inkColor,
-                            modifier = Modifier.size(21.dp)
-                        )
-                    }
-
-                    // Headphones button + live animated running indicator right next to it when audio is active
-                    Row(
-                        modifier = Modifier
-                            .height(48.dp)
-                            .clip(RoundedCornerShape(50))
-                            .clickable {
-                                showAppearancePopover = false
-                                if (!showAudioBar) {
-                                    showAudioBar = true
-                                    if (!isPlayingAudio) {
-                                        val startIdx = if (speakingParagraphIndex in readerState.paragraphs.indices) {
-                                            speakingParagraphIndex
-                                        } else {
-                                            currentVisibleParagraphIndex()
-                                        }
-                                        playFromParagraph(startIdx)
-                                    }
-                                } else {
-                                    showAudioBar = false
-                                }
-                            }
-                            .padding(horizontal = if (isAnyAudioPlaying) 10.dp else 14.dp)
-                            .testTag("reader_audio_button"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Headphones,
-                            contentDescription = "Nghe đọc sách",
-                            tint = if (showAudioBar || isAnyAudioPlaying) IosBlue else inkColor,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        if (isAnyAudioPlaying) {
-                            AnimatedAudioPlayingBars(
-                                color = IosBlue,
-                                maxHeight = 13.dp,
-                                barWidth = 2.3.dp,
-                                modifier = Modifier.testTag("reader_audio_running_indicator")
-                            )
-                        }
-                    }
-
-                    // Audio Settings button right beside Listen button: Gear icon + mini Headphones corner badge
-                    IconButton(
-                        onClick = {
-                            showAppearancePopover = false
-                            showTocSheet = false
-                            showAudioSettingsSheet = true
-                        },
-                        modifier = Modifier
-                            .size(48.dp)
-                            .testTag("reader_audio_settings_button")
-                    ) {
-                        val settingsTint = if (
-                            showAudioSettingsSheet ||
-                            readerPrefs.ambientSound != AmbientSoundTrack.NONE ||
-                            readerState.characterVoiceAssignments.isNotEmpty()
-                        ) {
-                            IosBlue
-                        } else {
-                            inkColor
-                        }
-                        Box(
-                            modifier = Modifier.size(24.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Settings,
-                                contentDescription = "Cài đặt nghe sách",
-                                tint = settingsTint,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.BottomEnd)
-                                    .size(12.dp)
-                                    .clip(CircleShape)
-                                    .background(paperBg),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Headphones,
-                                    contentDescription = null,
-                                    tint = settingsTint,
-                                    modifier = Modifier.size(9.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 2. Reading Content Area (Vertical Scroll OR Horizontal Page-Flip)
-            // Floating audio pill is now anchored cleanly at Bottom Center of the screen!
             BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -563,8 +430,12 @@ fun BookReaderScreen(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                         onClick = {
-                            if (showAppearancePopover) showAppearancePopover = false
-                            if (showAudioBar) showAudioBar = false
+                            if (showAppearancePopover || showAudioBar) {
+                                showAppearancePopover = false
+                                showAudioBar = false
+                            } else {
+                                showTopChrome = !showTopChrome
+                            }
                         }
                     )
             ) {
@@ -599,8 +470,8 @@ fun BookReaderScreen(
                             contentPadding = PaddingValues(
                                 start = pageMarginDp,
                                 end = pageMarginDp,
-                                top = 10.dp,
-                                bottom = 44.dp
+                                top = 56.dp,
+                                bottom = 68.dp
                             ),
                             verticalArrangement = Arrangement.spacedBy(paragraphGapDp)
                         ) {
@@ -633,11 +504,11 @@ fun BookReaderScreen(
                                     inkColor = inkColor,
                                     highlighted = isSpeakingThis,
                                     onClick = {
-                                        if (showAppearancePopover) {
+                                        if (showAppearancePopover || showAudioBar) {
                                             showAppearancePopover = false
-                                        }
-                                        if (showAudioBar) {
                                             showAudioBar = false
+                                        } else {
+                                            showTopChrome = !showTopChrome
                                         }
                                     }
                                 )
@@ -746,18 +617,15 @@ fun BookReaderScreen(
                                     .weight(1f)
                                     .pointerInput(pageEffect, pages.size) {
                                         detectTapGestures { offset ->
-                                            if (showAppearancePopover) {
+                                            if (showAppearancePopover || showAudioBar) {
                                                 showAppearancePopover = false
-                                                return@detectTapGestures
-                                            }
-                                            if (showAudioBar) {
                                                 showAudioBar = false
                                                 return@detectTapGestures
                                             }
+                                            val widthPx = size.width.toFloat().coerceAtLeast(1f)
+                                            val tapFraction = offset.x / widthPx
                                             // Hỗ trợ chạm mép trái/phải để chuyển trang khi dùng "Chạm lướt mờ" hoặc "Không hiệu ứng"
                                             if (pageEffect != HorizontalPageEffect.BOOK_FLIP) {
-                                                val widthPx = size.width.toFloat().coerceAtLeast(1f)
-                                                val tapFraction = offset.x / widthPx
                                                 when {
                                                     tapFraction < 0.28f && pagerState.currentPage > 0 -> {
                                                         coroutineScope.launch {
@@ -777,7 +645,12 @@ fun BookReaderScreen(
                                                             }
                                                         }
                                                     }
+                                                    else -> {
+                                                        showTopChrome = !showTopChrome
+                                                    }
                                                 }
+                                            } else {
+                                                showTopChrome = !showTopChrome
                                             }
                                         }
                                     }
@@ -816,8 +689,10 @@ fun BookReaderScreen(
                                             }
                                         }
                                         .padding(
-                                            horizontal = pageMarginDp,
-                                            vertical = 8.dp
+                                            start = pageMarginDp,
+                                            end = pageMarginDp,
+                                            top = 56.dp,
+                                            bottom = 8.dp
                                         ),
                                     verticalArrangement = Arrangement.spacedBy(paragraphGapDp)
                                 ) {
@@ -847,11 +722,11 @@ fun BookReaderScreen(
                                             inkColor = inkColor,
                                             highlighted = isSpeakingThis,
                                             onClick = {
-                                                if (showAppearancePopover) {
+                                                if (showAppearancePopover || showAudioBar) {
                                                     showAppearancePopover = false
-                                                }
-                                                if (showAudioBar) {
                                                     showAudioBar = false
+                                                } else {
+                                                    showTopChrome = !showTopChrome
                                                 }
                                             }
                                         )
@@ -937,7 +812,158 @@ fun BookReaderScreen(
             }
         }
 
-        // 3. Viên thuốc điều khiển nghe sách nổi ở PHÍA DƯỚI GIỮA MÀN HÌNH (kèm icon đồng hồ hẹn giờ tự tắt)
+        // 2. Auto-hiding Swiss Neo-Brutalist 3D Keycap Top Toolbar (32dp square 3D keycaps)
+        AnimatedVisibility(
+            visible = showTopChrome || showAppearancePopover,
+            enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { -it }) + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .widthIn(max = 680.dp)
+                .fillMaxWidth()
+                .statusBarsPadding()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Control 1: 3D Keycap Back (<)
+                Reader3DKeycapButton(
+                    onClick = ::exitReader,
+                    containerColor = keycapBg,
+                    borderColor = keycapBorder,
+                    shadowColor = keycapShadow,
+                    modifier = Modifier.testTag("reader_back_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.ArrowBackIosNew,
+                        contentDescription = "Quay lại thư viện",
+                        tint = keycapIconTint,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+
+                // Controls 2..5: ☰ TOC | + Appearance | 🎧 Listen TTS | ⚙️ Audio Settings
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Reader3DKeycapButton(
+                        onClick = {
+                            showAppearancePopover = false
+                            showTocSheet = true
+                        },
+                        containerColor = if (showTocSheet) IosOrange else keycapBg,
+                        borderColor = keycapBorder,
+                        shadowColor = keycapShadow,
+                        modifier = Modifier.testTag("reader_toc_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Menu,
+                            contentDescription = "Mục lục",
+                            tint = if (showTocSheet) NeoInkLight else keycapIconTint,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    Reader3DKeycapButton(
+                        onClick = { showAppearancePopover = !showAppearancePopover },
+                        containerColor = if (showAppearancePopover) IosBlue else keycapBg,
+                        borderColor = keycapBorder,
+                        shadowColor = keycapShadow,
+                        modifier = Modifier.testTag("reader_appearance_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Add,
+                            contentDescription = "Tùy chỉnh chữ, lề và kiểu lật trang",
+                            tint = if (showAppearancePopover) Color.White else keycapIconTint,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+
+                    // 🎧 Headphones 3D keycap (expands neatly with live bars when playing!)
+                    val audioActive = showAudioBar || isAnyAudioPlaying
+                    NeoBrutalistPressBox(
+                        onClick = {
+                            showAppearancePopover = false
+                            if (!showAudioBar) {
+                                showAudioBar = true
+                                if (!isPlayingAudio) {
+                                    val startIdx = if (speakingParagraphIndex in readerState.paragraphs.indices) {
+                                        speakingParagraphIndex
+                                    } else {
+                                        currentVisibleParagraphIndex()
+                                    }
+                                    playFromParagraph(startIdx)
+                                }
+                            } else {
+                                showAudioBar = false
+                            }
+                        },
+                        cornerRadius = 9.dp,
+                        shadowOffset = 2.dp,
+                        pressDepth = 2.dp,
+                        borderWidth = 1.5.dp,
+                        containerColor = if (audioActive) IosBlue else keycapBg,
+                        borderColor = keycapBorder,
+                        shadowColor = keycapShadow,
+                        modifier = Modifier
+                            .height(34.dp)
+                            .widthIn(min = 34.dp)
+                            .testTag("reader_audio_button")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = if (isAnyAudioPlaying) 8.dp else 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Headphones,
+                                contentDescription = "Nghe đọc sách",
+                                tint = if (audioActive) Color.White else keycapIconTint,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            if (isAnyAudioPlaying) {
+                                AnimatedAudioPlayingBars(
+                                    color = Color.White,
+                                    maxHeight = 12.dp,
+                                    barWidth = 2.2.dp,
+                                    modifier = Modifier.testTag("reader_audio_running_indicator")
+                                )
+                            }
+                        }
+                    }
+
+                    // ⚙️ Audio Settings 3D Keycap
+                    val settingsActive = showAudioSettingsSheet ||
+                        readerPrefs.ambientSound != AmbientSoundTrack.NONE ||
+                        readerState.characterVoiceAssignments.isNotEmpty()
+                    Reader3DKeycapButton(
+                        onClick = {
+                            showAppearancePopover = false
+                            showTocSheet = false
+                            showAudioSettingsSheet = true
+                        },
+                        containerColor = if (settingsActive) IosOrange else keycapBg,
+                        borderColor = keycapBorder,
+                        shadowColor = keycapShadow,
+                        modifier = Modifier.testTag("reader_audio_settings_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Settings,
+                            contentDescription = "Cài đặt nghe sách",
+                            tint = if (settingsActive) NeoInkLight else keycapIconTint,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // 3. Thẻ điều khiển Nghe Sách Mini nổi khối 3D ở PHÍA DƯỚI GIỮA MÀN HÌNH
         AnimatedVisibility(
             visible = showAudioBar,
             enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
@@ -945,9 +971,10 @@ fun BookReaderScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 12.dp)
+                .padding(horizontal = 12.dp, vertical = 14.dp)
         ) {
             IosFloatingAudioPill(
+                isDarkReaderPaper = isDarkReaderPaper,
                 isPlaying = isPlayingAudio,
                 speechRate = readerPrefs.speechRate,
                 voiceLabel = activeSpeakerName ?: readerPrefs.voiceProfile.shortLabel,
@@ -998,7 +1025,7 @@ fun BookReaderScreen(
             )
         }
 
-        // 4. Floating iOS Popover for "+" (Font chữ, Cỡ chữ 13..48sp, Scroll/Page mode + 3 hiệu ứng ngang, Margin, Line/Letter Spacing, 3 Paper themes)
+        // 4. Floating 3D Paper Popover for "+" (Font, A-/A+ Cỡ chữ, Lật trang, Lề/Giãn dòng, 4 thẻ vuông màu giấy)
         if (showAppearancePopover) {
             Box(
                 modifier = Modifier
@@ -1014,7 +1041,7 @@ fun BookReaderScreen(
                         .widthIn(max = 680.dp)
                         .fillMaxWidth()
                         .statusBarsPadding()
-                        .padding(top = 50.dp, end = 14.dp)
+                        .padding(top = 52.dp, end = 14.dp)
                         .align(Alignment.TopCenter),
                     contentAlignment = Alignment.TopEnd
                 ) {
@@ -1038,17 +1065,32 @@ fun BookReaderScreen(
                 }
             }
         }
-    }
 
-    // 5. iOS Bottom Sheet TOC (`RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)`)
-    if (showTocSheet) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
-            onDismissRequest = { showTocSheet = false },
-            sheetState = sheetState,
-            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-            containerColor = MaterialTheme.colorScheme.background,
-            contentColor = MaterialTheme.colorScheme.onSurface
+        // 5. 3D Notebook Left-Edge Sliding TOC Drawer (Bảng Mục lục dạng sổ tay trượt cạnh trái)
+        AnimatedVisibility(
+            visible = showTocSheet,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x66000000))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { showTocSheet = false }
+                    )
+            )
+        }
+        AnimatedVisibility(
+            visible = showTocSheet,
+            enter = slideInHorizontally(initialOffsetX = { -it }) + fadeIn(),
+            exit = slideOutHorizontally(targetOffsetX = { -it }) + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .fillMaxHeight()
         ) {
             val currentDensity = LocalDensity.current
             CompositionLocalProvider(
@@ -1057,15 +1099,17 @@ fun BookReaderScreen(
                     fontScale = currentDensity.fontScale.coerceAtMost(1.0f)
                 )
             ) {
-                ReaderTocBottomSheetContent(
+                ReaderTocNotebookDrawer(
                     bookTitle = readerState.book?.title.orEmpty(),
                     chapters = readerState.toc,
                     currentChapterIndex = readerState.currentChapterIndex,
+                    isDarkPaper = isDarkReaderPaper,
                     onSelectChapter = { idx ->
                         showTocSheet = false
                         val keepPlaying = isPlayingAudio
                         onSelectChapter(idx, 0, keepPlaying)
-                    }
+                    },
+                    onClose = { showTocSheet = false }
                 )
             }
         }
@@ -1113,7 +1157,12 @@ fun BookReaderScreen(
                             systemVoiceName = voiceName
                         )
                     },
-                    onToggleAdvancedCustom = onToggleAdvancedCustom,
+                    onToggleAdvancedCustom = { enabled ->
+                        if (enabled && isAnyAudioPlaying) {
+                            BookAudioPlaybackService.pause(context)
+                        }
+                        onToggleAdvancedCustom(enabled)
+                    },
                     onAdvancedPitchChanged = onAdvancedPitchChanged,
                     onAdvancedRateChanged = onAdvancedRateChanged,
                     onSentencePauseChanged = onSentencePauseChanged,
@@ -1307,11 +1356,43 @@ private fun ChapterFooterNavigation(
 }
 
 /**
- * Floating iOS Dynamic Island / Pill Audio Bar đặt ở phía dưới giữa màn hình.
- * Gồm: Prev | Play/Pause | Next | Speed | Voice | Icon Đồng hồ hẹn giờ tự tắt | Stop.
+ * 32dp x 32dp Swiss Neo-Brutalist 3D Rounded-Square Keycap Icon Button
+ * (`1.5.dp` solid ink border, `2.dp` hard offset shadow, tactile `translate(2dp, 2dp)` press depression).
+ */
+@Composable
+private fun Reader3DKeycapButton(
+    onClick: () -> Unit,
+    containerColor: Color,
+    borderColor: Color,
+    shadowColor: Color,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    NeoBrutalistPressBox(
+        onClick = onClick,
+        cornerRadius = 9.dp,
+        shadowOffset = 2.dp,
+        pressDepth = 2.dp,
+        borderWidth = 1.5.dp,
+        containerColor = containerColor,
+        borderColor = borderColor,
+        shadowColor = shadowColor,
+        modifier = modifier.size(34.dp)
+    ) {
+        content()
+    }
+}
+
+/**
+ * Thẻ điều khiển Nghe Sách Mini nổi khối 3D (Swiss Neo-Brutalist Art-Paper Floating Card)
+ * đặt gọn gàng ở phía dưới giữa màn hình:
+ * - 3 nút phím vuông nổi khối 3D: Lùi | Phát/Tạm dừng (Xanh Cobalt #1D5CD6) | Tiến
+ * - Nút viên thuốc 3D chỉnh Tốc độ (1.0x...) & Giọng đọc (Nữ 1, Nam...)
+ * - Nút Đồng hồ hẹn giờ tự tắt & Nút Dừng X
  */
 @Composable
 private fun IosFloatingAudioPill(
+    isDarkReaderPaper: Boolean,
     isPlaying: Boolean,
     speechRate: Float,
     voiceLabel: String,
@@ -1325,210 +1406,257 @@ private fun IosFloatingAudioPill(
     onSelectSleepTimerMinutes: (Int) -> Unit,
     onStopAndClose: () -> Unit
 ) {
-    val pillShape = RoundedCornerShape(50)
+    val cardShape = RoundedCornerShape(16.dp)
+    val cardBg = if (isDarkReaderPaper) Color(0xFF1F1F23) else Color(0xFFFAF7F0)
+    val keyBg = if (isDarkReaderPaper) Color(0xFF28282E) else Color(0xFFF3EFE6)
+    val inkColor = if (isDarkReaderPaper) Color(0xFFF4F1EA) else NeoInkLight
+    val borderColor = if (isDarkReaderPaper) NeoInkDark else NeoInkLight
+    val shadowColor = if (isDarkReaderPaper) NeoShadowDark else NeoShadowLight
     var showTimerMenu by remember { mutableStateOf(false) }
 
-    Row(
+    Column(
         modifier = Modifier
             .padding(end = 3.dp, bottom = 3.dp)
-            .height(44.dp)
             .neoHardOffsetShadow(
-                cornerRadius = 50.dp,
+                cornerRadius = 16.dp,
                 offsetX = 3.dp,
                 offsetY = 3.dp,
-                shadowColor = Color(0xFF09090B)
+                shadowColor = shadowColor
             )
-            .clip(pillShape)
-            .background(Color(0xFF18181B))
+            .clip(cardShape)
+            .background(cardBg)
             .border(
                 width = 1.5.dp,
-                color = Color(0xFF3F3F46),
-                shape = pillShape
+                color = borderColor,
+                shape = cardShape
             )
-            .padding(horizontal = 8.dp)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
             .testTag("reader_floating_audio_pill"),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .size(30.dp)
-                .clip(CircleShape)
-                .clickable(onClick = onPrevParagraph)
-                .testTag("audio_prev_button"),
-            contentAlignment = Alignment.Center
+        // Row 1: 3 Tactile 3D Keycaps (Lùi | Phát/Tạm dừng Xanh Cobalt | Tiến) + Speed + Voice + Timer + Stop
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Icon(
-                imageVector = Icons.Rounded.SkipPrevious,
-                contentDescription = "Lùi đoạn",
-                tint = Color.White,
-                modifier = Modifier.size(18.dp)
-            )
-        }
-
-        Box(
-            modifier = Modifier
-                .size(30.dp)
-                .clip(CircleShape)
-                .background(IosBlue)
-                .clickable(onClick = onTogglePlayPause)
-                .testTag("audio_play_pause_button"),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                contentDescription = if (isPlaying) "Tạm dừng" else "Phát",
-                tint = Color.White,
-                modifier = Modifier.size(18.dp)
-            )
-        }
-
-        Box(
-            modifier = Modifier
-                .size(30.dp)
-                .clip(CircleShape)
-                .clickable(onClick = onNextParagraph)
-                .testTag("audio_next_button"),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.SkipNext,
-                contentDescription = "Tới đoạn",
-                tint = Color.White,
-                modifier = Modifier.size(18.dp)
-            )
-        }
-
-        Box(
-            modifier = Modifier
-                .width(0.8.dp)
-                .height(16.dp)
-                .background(Color.White.copy(alpha = 0.22f))
-        )
-
-        Box(
-            modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .background(Color.White.copy(alpha = 0.14f))
-                .clickable(onClick = onCycleSpeed)
-                .padding(horizontal = 7.dp, vertical = 4.dp)
-                .testTag("audio_speed_button"),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = LibraryManager.formatSpeechRate(speechRate),
-                fontSize = 11.sp,
-                lineHeight = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color.White,
-                maxLines = 1,
-                softWrap = false
-            )
-        }
-
-        Box(
-            modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .background(Color.White.copy(alpha = 0.14f))
-                .clickable(onClick = onCycleVoice)
-                .padding(horizontal = 8.dp, vertical = 4.dp)
-                .widthIn(max = 76.dp)
-                .testTag("audio_voice_button"),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = voiceLabel,
-                fontSize = 11.sp,
-                lineHeight = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color.White,
-                maxLines = 1,
-                softWrap = false,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-
-        // Icon Đồng hồ hẹn giờ tự tắt nghe sách (Sleep Timer)
-        Box {
-            Row(
+            NeoBrutalistPressBox(
+                onClick = onPrevParagraph,
+                cornerRadius = 9.dp,
+                shadowOffset = 2.dp,
+                pressDepth = 2.dp,
+                borderWidth = 1.5.dp,
+                containerColor = keyBg,
+                borderColor = borderColor,
+                shadowColor = shadowColor,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .background(
-                        if (sleepTimerActive) IosBlue else Color.White.copy(alpha = 0.14f)
-                    )
-                    .clickable { showTimerMenu = true }
-                    .padding(
-                        horizontal = if (sleepTimerBadge != null) 7.dp else 6.dp,
-                        vertical = 4.dp
-                    )
-                    .testTag("audio_sleep_timer_button"),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    .size(34.dp)
+                    .testTag("audio_prev_button")
             ) {
                 Icon(
-                    imageVector = Icons.Rounded.Timer,
-                    contentDescription = "Hẹn giờ tự tắt nghe sách",
+                    imageVector = Icons.Rounded.SkipPrevious,
+                    contentDescription = "Lùi đoạn",
+                    tint = inkColor,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            NeoBrutalistPressBox(
+                onClick = onTogglePlayPause,
+                cornerRadius = 10.dp,
+                shadowOffset = 2.dp,
+                pressDepth = 2.dp,
+                borderWidth = 1.5.dp,
+                containerColor = IosBlue,
+                borderColor = borderColor,
+                shadowColor = shadowColor,
+                modifier = Modifier
+                    .size(36.dp)
+                    .testTag("audio_play_pause_button")
+            ) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                    contentDescription = if (isPlaying) "Tạm dừng" else "Phát",
                     tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            NeoBrutalistPressBox(
+                onClick = onNextParagraph,
+                cornerRadius = 9.dp,
+                shadowOffset = 2.dp,
+                pressDepth = 2.dp,
+                borderWidth = 1.5.dp,
+                containerColor = keyBg,
+                borderColor = borderColor,
+                shadowColor = shadowColor,
+                modifier = Modifier
+                    .size(34.dp)
+                    .testTag("audio_next_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.SkipNext,
+                    contentDescription = "Tới đoạn",
+                    tint = inkColor,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(20.dp)
+                    .background(borderColor.copy(alpha = 0.28f))
+            )
+
+            // 3D Speed Pill
+            NeoBrutalistPressBox(
+                onClick = onCycleSpeed,
+                isPill = true,
+                shadowOffset = 2.dp,
+                pressDepth = 2.dp,
+                borderWidth = 1.5.dp,
+                containerColor = keyBg,
+                borderColor = borderColor,
+                shadowColor = shadowColor,
+                modifier = Modifier
+                    .height(31.dp)
+                    .testTag("audio_speed_button")
+            ) {
+                Text(
+                    text = LibraryManager.formatSpeechRate(speechRate),
+                    fontSize = 11.5.sp,
+                    lineHeight = 14.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = inkColor,
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier.padding(horizontal = 9.dp)
+                )
+            }
+
+            // 3D Voice Pill
+            NeoBrutalistPressBox(
+                onClick = onCycleVoice,
+                isPill = true,
+                shadowOffset = 2.dp,
+                pressDepth = 2.dp,
+                borderWidth = 1.5.dp,
+                containerColor = keyBg,
+                borderColor = borderColor,
+                shadowColor = shadowColor,
+                modifier = Modifier
+                    .height(31.dp)
+                    .widthIn(max = 88.dp)
+                    .testTag("audio_voice_button")
+            ) {
+                Text(
+                    text = voiceLabel,
+                    fontSize = 11.5.sp,
+                    lineHeight = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = inkColor,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 9.dp)
+                )
+            }
+
+            // 3D Sleep Timer Keycap/Pill
+            Box {
+                NeoBrutalistPressBox(
+                    onClick = { showTimerMenu = true },
+                    isPill = true,
+                    shadowOffset = 2.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (sleepTimerActive) IosOrange else keyBg,
+                    borderColor = borderColor,
+                    shadowColor = shadowColor,
+                    modifier = Modifier
+                        .height(31.dp)
+                        .testTag("audio_sleep_timer_button")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = if (sleepTimerBadge != null) 8.dp else 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Timer,
+                            contentDescription = "Hẹn giờ tự tắt nghe sách",
+                            tint = if (sleepTimerActive) NeoInkLight else inkColor,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        if (sleepTimerBadge != null) {
+                            Text(
+                                text = sleepTimerBadge,
+                                fontSize = 10.5.sp,
+                                lineHeight = 13.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = NeoInkLight,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+                }
+
+                DropdownMenu(
+                    expanded = showTimerMenu,
+                    onDismissRequest = { showTimerMenu = false },
+                    containerColor = cardBg
+                ) {
+                    val options = listOf(
+                        BookAudioPlaybackService.SLEEP_TIMER_OFF to "Tắt hẹn giờ",
+                        15 to "Tắt sau 15 phút",
+                        30 to "Tắt sau 30 phút",
+                        45 to "Tắt sau 45 phút",
+                        60 to "Tắt sau 60 phút",
+                        BookAudioPlaybackService.SLEEP_TIMER_END_OF_CHAPTER to "Tắt khi hết chương này"
+                    )
+                    options.forEach { (mins, label) ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = label,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = inkColor
+                                )
+                            },
+                            onClick = {
+                                showTimerMenu = false
+                                onSelectSleepTimerMinutes(mins)
+                            }
+                        )
+                    }
+                }
+            }
+
+            // 3D Stop Keycap
+            NeoBrutalistPressBox(
+                onClick = onStopAndClose,
+                cornerRadius = 9.dp,
+                shadowOffset = 2.dp,
+                pressDepth = 2.dp,
+                borderWidth = 1.5.dp,
+                containerColor = keyBg,
+                borderColor = borderColor,
+                shadowColor = shadowColor,
+                modifier = Modifier
+                    .size(31.dp)
+                    .testTag("audio_stop_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Close,
+                    contentDescription = "Dừng đọc sách",
+                    tint = inkColor,
                     modifier = Modifier.size(14.dp)
                 )
-                if (sleepTimerBadge != null) {
-                    Text(
-                        text = sleepTimerBadge,
-                        fontSize = 10.sp,
-                        lineHeight = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        maxLines = 1
-                    )
-                }
             }
-
-            DropdownMenu(
-                expanded = showTimerMenu,
-                onDismissRequest = { showTimerMenu = false },
-                containerColor = Color(0xFF2C2C2E)
-            ) {
-                val options = listOf(
-                    BookAudioPlaybackService.SLEEP_TIMER_OFF to "Tắt hẹn giờ",
-                    15 to "Tắt sau 15 phút",
-                    30 to "Tắt sau 30 phút",
-                    45 to "Tắt sau 45 phút",
-                    60 to "Tắt sau 60 phút",
-                    BookAudioPlaybackService.SLEEP_TIMER_END_OF_CHAPTER to "Tắt khi hết chương này"
-                )
-                options.forEach { (mins, label) ->
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = label,
-                                fontSize = 12.sp,
-                                color = Color.White
-                            )
-                        },
-                        onClick = {
-                            showTimerMenu = false
-                            onSelectSleepTimerMinutes(mins)
-                        }
-                    )
-                }
-            }
-        }
-
-        Box(
-            modifier = Modifier
-                .size(24.dp)
-                .clip(CircleShape)
-                .background(Color.White.copy(alpha = 0.14f))
-                .clickable(onClick = onStopAndClose)
-                .testTag("audio_stop_button"),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.Close,
-                contentDescription = "Dừng đọc sách",
-                tint = Color.White,
-                modifier = Modifier.size(13.dp)
-            )
         }
     }
 }
@@ -1693,18 +1821,75 @@ private fun IosReaderAppearancePopover(
 
             HorizontalDivider(thickness = 0.8.dp, color = MaterialTheme.colorScheme.outline)
 
-            // 1. Font Size (13..48 sp) with `-`/`+` AND quick slider
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                PopoverStepperRow(
-                    label = "Cỡ chữ",
-                    valueText = prefs.fontSizeSp.toInt().toString(),
-                    canDecrease = prefs.fontSizeSp > LibraryManager.MIN_FONT_SIZE_SP,
-                    canIncrease = prefs.fontSizeSp < LibraryManager.MAX_FONT_SIZE_SP,
-                    decreaseTag = "reader_font_decrease_button",
-                    increaseTag = "reader_font_increase_button",
-                    onDecrease = onDecreaseFont,
-                    onIncrease = onIncreaseFont
-                )
+            // 1. Font Size (13..48 sp) with 3D A- / A+ keycaps AND quick slider
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Cỡ chữ (${prefs.fontSizeSp.toInt()}sp)",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = primaryInk
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val canDecrease = prefs.fontSizeSp > LibraryManager.MIN_FONT_SIZE_SP
+                        val canIncrease = prefs.fontSizeSp < LibraryManager.MAX_FONT_SIZE_SP
+                        NeoBrutalistPressBox(
+                            onClick = onDecreaseFont,
+                            enabled = canDecrease,
+                            cornerRadius = 9.dp,
+                            shadowOffset = 2.dp,
+                            pressDepth = 2.dp,
+                            borderWidth = 1.5.dp,
+                            containerColor = trayBg,
+                            borderColor = inkBorder,
+                            shadowColor = hardShadow,
+                            modifier = Modifier
+                                .width(44.dp)
+                                .height(32.dp)
+                                .testTag("reader_font_decrease_button")
+                        ) {
+                            Text(
+                                text = "A-",
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (canDecrease) primaryInk else secondaryInk.copy(alpha = 0.4f),
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                        NeoBrutalistPressBox(
+                            onClick = onIncreaseFont,
+                            enabled = canIncrease,
+                            cornerRadius = 9.dp,
+                            shadowOffset = 2.dp,
+                            pressDepth = 2.dp,
+                            borderWidth = 1.5.dp,
+                            containerColor = trayBg,
+                            borderColor = inkBorder,
+                            shadowColor = hardShadow,
+                            modifier = Modifier
+                                .width(44.dp)
+                                .height(32.dp)
+                                .testTag("reader_font_increase_button")
+                        ) {
+                            Text(
+                                text = "A+",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (canIncrease) primaryInk else secondaryInk.copy(alpha = 0.4f),
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+                }
                 Slider(
                     value = prefs.fontSizeSp,
                     onValueChange = onSetFontSize,
@@ -1841,43 +2026,59 @@ private fun IosReaderAppearancePopover(
 
             HorizontalDivider(thickness = 0.8.dp, color = MaterialTheme.colorScheme.outline)
 
-            // 6. Paper Color (3 circular swatches with crisp ink border)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            // 6. Paper Color (4 square 3D paper cards: Nâu sách cũ, Vàng ngả, Trắng ngà, Nền tối)
+            Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 Text(
-                    text = "Màu giấy",
+                    text = "Màu nền giấy",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = primaryInk
                 )
 
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    PaperSwatchCircle(
+                    PaperSwatchSquareCard(
                         color = ReaderBrownPaper,
+                        label = "Nâu",
+                        labelInk = ReaderBrownInk,
                         selected = prefs.paperTheme == ReaderPaperTheme.BOOK_BROWN,
-                        contentDescription = "Màu nâu sách",
+                        contentDescription = "Màu nâu sách cũ",
                         tag = "paper_theme_brown",
-                        onClick = { onSelectTheme(ReaderPaperTheme.BOOK_BROWN) }
+                        onClick = { onSelectTheme(ReaderPaperTheme.BOOK_BROWN) },
+                        modifier = Modifier.weight(1f)
                     )
-                    PaperSwatchCircle(
+                    PaperSwatchSquareCard(
                         color = ReaderCreamPaper,
+                        label = "Vàng",
+                        labelInk = ReaderCreamInk,
                         selected = prefs.paperTheme == ReaderPaperTheme.WARM_CREAM,
                         contentDescription = "Màu vàng ngả",
                         tag = "paper_theme_cream",
-                        onClick = { onSelectTheme(ReaderPaperTheme.WARM_CREAM) }
+                        onClick = { onSelectTheme(ReaderPaperTheme.WARM_CREAM) },
+                        modifier = Modifier.weight(1f)
                     )
-                    PaperSwatchCircle(
+                    PaperSwatchSquareCard(
                         color = ReaderWhitePaper,
+                        label = "Trắng",
+                        labelInk = ReaderWhiteInk,
                         selected = prefs.paperTheme == ReaderPaperTheme.PURE_WHITE,
-                        contentDescription = "Màu trắng",
+                        contentDescription = "Màu trắng ngà",
                         tag = "paper_theme_white",
-                        onClick = { onSelectTheme(ReaderPaperTheme.PURE_WHITE) }
+                        onClick = { onSelectTheme(ReaderPaperTheme.PURE_WHITE) },
+                        modifier = Modifier.weight(1f)
+                    )
+                    PaperSwatchSquareCard(
+                        color = ReaderDarkPaper,
+                        label = "Tối",
+                        labelInk = ReaderDarkInk,
+                        selected = prefs.paperTheme == ReaderPaperTheme.DARK_NIGHT,
+                        contentDescription = "Chế độ nền tối",
+                        tag = "paper_theme_dark",
+                        onClick = { onSelectTheme(ReaderPaperTheme.DARK_NIGHT) },
+                        modifier = Modifier.weight(1f)
                     )
                 }
             }
@@ -1921,15 +2122,15 @@ private fun PopoverStepperRow(
             NeoBrutalistPressBox(
                 onClick = onDecrease,
                 enabled = canDecrease,
-                isCircle = true,
+                cornerRadius = 8.dp,
                 shadowOffset = 2.dp,
-                pressDepth = 1.5.dp,
+                pressDepth = 2.dp,
                 borderWidth = 1.5.dp,
                 containerColor = trayBg,
                 borderColor = inkBorder,
                 shadowColor = hardShadow,
                 modifier = Modifier
-                    .size(29.dp)
+                    .size(30.dp)
                     .testTag(decreaseTag)
             ) {
                 Icon(
@@ -1942,10 +2143,10 @@ private fun PopoverStepperRow(
 
             Text(
                 text = valueText,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.ExtraBold,
                 color = primaryInk,
-                modifier = Modifier.width(34.dp),
+                modifier = Modifier.width(36.dp),
                 textAlign = TextAlign.Center,
                 maxLines = 1
             )
@@ -1953,15 +2154,15 @@ private fun PopoverStepperRow(
             NeoBrutalistPressBox(
                 onClick = onIncrease,
                 enabled = canIncrease,
-                isCircle = true,
+                cornerRadius = 8.dp,
                 shadowOffset = 2.dp,
-                pressDepth = 1.5.dp,
+                pressDepth = 2.dp,
                 borderWidth = 1.5.dp,
                 containerColor = trayBg,
                 borderColor = inkBorder,
                 shadowColor = hardShadow,
                 modifier = Modifier
-                    .size(29.dp)
+                    .size(30.dp)
                     .testTag(increaseTag)
             ) {
                 Icon(
@@ -1976,116 +2177,256 @@ private fun PopoverStepperRow(
 }
 
 @Composable
-private fun PaperSwatchCircle(
+private fun PaperSwatchSquareCard(
     color: Color,
+    label: String,
+    labelInk: Color,
     selected: Boolean,
     contentDescription: String,
     tag: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     NeoBrutalistPressBox(
         onClick = onClick,
-        isCircle = true,
+        cornerRadius = 9.dp,
         shadowOffset = 2.dp,
-        pressDepth = 1.5.dp,
+        pressDepth = 2.dp,
         borderWidth = if (selected) 2.dp else 1.5.dp,
         containerColor = color,
-        borderColor = if (selected) IosBlue else neoInkBorderColor(),
+        borderColor = neoInkBorderColor(),
         shadowColor = neoHardShadowColor(),
-        modifier = Modifier
-            .size(30.dp)
+        modifier = modifier
+            .height(38.dp)
             .testTag(tag)
     ) {
-        if (selected) {
-            Icon(
-                imageVector = Icons.Rounded.Check,
-                contentDescription = contentDescription,
-                tint = IosBlue,
-                modifier = Modifier.size(13.dp)
-            )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 4.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            if (selected) {
+                Box(
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(IosGreen)
+                        .border(1.2.dp, NeoInkLight, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Check,
+                        contentDescription = contentDescription,
+                        tint = Color.White,
+                        modifier = Modifier.size(13.dp)
+                    )
+                }
+            } else {
+                Text(
+                    text = label,
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = labelInk,
+                    maxLines = 1,
+                    softWrap = false
+                )
+            }
         }
     }
 }
 
+/**
+ * 3D Notebook Left-Edge Sliding TOC Drawer (Bảng Mục lục dạng sổ tay mở từ cạnh trái):
+ * - Art-paper page with crisp 1.5dp right ink border & 4dp solid offset shadow
+ * - Thin ink horizontal dividers between chapters
+ * - Active reading chapter highlighted as a raised 3D Amber Gold (#F5B82E) card block
+ */
 @Composable
-private fun ReaderTocBottomSheetContent(
+private fun ReaderTocNotebookDrawer(
     bookTitle: String,
     chapters: List<LibraryChapterMeta>,
     currentChapterIndex: Int,
-    onSelectChapter: (Int) -> Unit
+    isDarkPaper: Boolean,
+    onSelectChapter: (Int) -> Unit,
+    onClose: () -> Unit
 ) {
-    val primaryInk = MaterialTheme.colorScheme.onSurface
-    val secondaryInk = MaterialTheme.colorScheme.onSurfaceVariant
-    val dividerColor = MaterialTheme.colorScheme.outline
+    val drawerBg = if (isDarkPaper) Color(0xFF1F1F23) else Color(0xFFFAF7F0)
+    val drawerHeaderBg = if (isDarkPaper) Color(0xFF141416) else Color(0xFFF3EFE6)
+    val primaryInk = if (isDarkPaper) ReaderDarkInk else NeoInkLight
+    val secondaryInk = if (isDarkPaper) Color(0xFFA1A1AA) else Color(0xFF52525B)
+    val borderColor = if (isDarkPaper) NeoInkDark else NeoInkLight
+    val shadowColor = if (isDarkPaper) NeoShadowDark else NeoShadowLight
+    val dividerColor = if (isDarkPaper) Color(0xFF3F3F46) else Color(0xFFD6D0C4)
+    val drawerShape = RoundedCornerShape(topEnd = 16.dp, bottomEnd = 16.dp)
 
-    Column(
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .navigationBarsPadding()
-            .padding(horizontal = 16.dp, vertical = 4.dp)
-    ) {
-        Text(
-            text = "Mục lục",
-            fontSize = 15.sp,
-            fontWeight = FontWeight.ExtraBold,
-            color = primaryInk
-        )
-        if (bookTitle.isNotBlank()) {
-            Text(
-                text = bookTitle,
-                fontSize = 11.sp,
-                color = secondaryInk,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 2.dp, bottom = 10.dp)
+            .widthIn(min = 270.dp, max = 312.dp)
+            .fillMaxHeight()
+            .padding(end = 4.dp)
+            .neoHardOffsetShadow(
+                cornerRadius = 16.dp,
+                offsetX = 4.dp,
+                offsetY = 0.dp,
+                shadowColor = shadowColor
             )
-        }
-        HorizontalDivider(thickness = 1.dp, color = dividerColor)
-
-        LazyColumn(
+            .clip(drawerShape)
+            .background(drawerBg)
+            .border(1.5.dp, borderColor, drawerShape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = {}
+            )
+    ) {
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 400.dp)
-                .testTag("reader_toc_list"),
-            contentPadding = PaddingValues(vertical = 4.dp)
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
         ) {
-            itemsIndexed(
-                items = chapters,
-                key = { _, c -> "toc_${c.index}" }
-            ) { idx, chapter ->
-                val isCurrent = idx == currentChapterIndex
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(44.dp)
-                        .clickable { onSelectChapter(idx) }
-                        .padding(horizontal = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+            // Notebook Drawer Header
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(drawerHeaderBg)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = chapter.title,
-                        fontSize = 13.sp,
-                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
-                        color = if (isCurrent) IosBlue else primaryInk,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
+                        text = "Mục lục (${chapters.size})",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = primaryInk,
+                        maxLines = 1
                     )
-                    if (isCurrent) {
-                        Icon(
-                            imageVector = Icons.Rounded.Check,
-                            contentDescription = "Chương đang đọc",
-                            tint = IosBlue,
-                            modifier = Modifier.size(16.dp)
+                    if (bookTitle.isNotBlank()) {
+                        Text(
+                            text = bookTitle,
+                            fontSize = 11.sp,
+                            color = secondaryInk,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 2.dp)
                         )
                     }
                 }
-                if (idx < chapters.lastIndex) {
-                    HorizontalDivider(thickness = 0.6.dp, color = dividerColor)
+                Spacer(modifier = Modifier.width(8.dp))
+                Reader3DKeycapButton(
+                    onClick = onClose,
+                    containerColor = drawerBg,
+                    borderColor = borderColor,
+                    shadowColor = shadowColor,
+                    modifier = Modifier.testTag("reader_toc_close_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Đóng mục lục",
+                        tint = primaryInk,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            HorizontalDivider(thickness = 1.5.dp, color = borderColor)
+
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .testTag("reader_toc_list"),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                itemsIndexed(
+                    items = chapters,
+                    key = { _, c -> "toc_${c.index}" }
+                ) { idx, chapter ->
+                    val isCurrent = idx == currentChapterIndex
+                    if (isCurrent) {
+                        // Raised 3D Amber Gold block for currently reading chapter
+                        NeoBrutalistPressBox(
+                            onClick = { onSelectChapter(idx) },
+                            cornerRadius = 11.dp,
+                            shadowOffset = 2.5.dp,
+                            pressDepth = 2.dp,
+                            borderWidth = 1.5.dp,
+                            containerColor = IosOrange,
+                            borderColor = NeoInkLight,
+                            shadowColor = shadowColor,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 3.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 11.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "${idx + 1}.",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = NeoInkLight,
+                                    modifier = Modifier.width(28.dp)
+                                )
+                                Text(
+                                    text = chapter.title,
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = NeoInkLight,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Icon(
+                                    imageVector = Icons.Rounded.Check,
+                                    contentDescription = "Chương đang đọc",
+                                    tint = NeoInkLight,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onSelectChapter(idx) }
+                                    .padding(horizontal = 8.dp, vertical = 11.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "${idx + 1}.",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = secondaryInk,
+                                    modifier = Modifier.width(28.dp)
+                                )
+                                Text(
+                                    text = chapter.title,
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = primaryInk,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            if (idx < chapters.lastIndex) {
+                                HorizontalDivider(thickness = 0.8.dp, color = dividerColor)
+                            }
+                        }
+                    }
                 }
             }
         }
-        Spacer(modifier = Modifier.height(10.dp))
     }
 }
 

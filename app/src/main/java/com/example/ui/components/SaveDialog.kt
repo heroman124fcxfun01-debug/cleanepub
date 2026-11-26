@@ -122,9 +122,9 @@ fun SaveDialog(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Action 1: "Lưu mới" (Cobalt 3D Neo-Brutalist Pill)
+            // Action 1: "Lưu thành file mới" (Cobalt 3D Neo-Brutalist Pill)
             IosPrimaryButton(
-                text = "Lưu mới",
+                text = "Lưu thành file mới",
                 height = 44.dp,
                 onClick = { onSelectMode(SaveMode.KEEP_ORIGINAL) },
                 modifier = Modifier.testTag("action_sheet_keep"),
@@ -140,7 +140,7 @@ fun SaveDialog(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Action 2: "Lưu thay thế" (Tactile 3D Red-Tinted Paper Pill)
+            // Action 2: "Lưu ghi đè file gốc" (Tactile 3D Red-Tinted Paper Pill)
             val replaceBg = if (isDark) Color(0xFF47211B) else Color(0xFFFDE8E6)
             val replaceInk = if (isDark) Color(0xFFFF7A6B) else Color(0xFFDC2626)
 
@@ -169,8 +169,8 @@ fun SaveDialog(
                     )
                     Spacer(modifier = Modifier.width(7.dp))
                     Text(
-                        text = "Lưu thay thế",
-                        fontSize = 13.sp,
+                        text = "Lưu ghi đè file gốc",
+                        fontSize = 12.5.sp,
                         lineHeight = 16.sp,
                         fontWeight = FontWeight.Bold,
                         color = replaceInk,

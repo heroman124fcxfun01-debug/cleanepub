@@ -339,18 +339,7 @@ fun ReaderAudioSettingsSheetContent(
             }
 
             // =================================================================
-            // 2. GIỌNG GỐC TRÊN THIẾT BỊ (OFFLINE • ƯU TIÊN QUALITY_HIGH)
-            // =================================================================
-            DeviceOfflineVoicesSection(
-                availableDeviceVoices = availableDeviceVoices,
-                selectedSystemVoiceName = readerPrefs.selectedSystemVoiceName,
-                onSelectSystemVoice = onSelectSystemVoice,
-                onRefreshDeviceVoices = onRefreshDeviceVoices,
-                onPreviewSystemVoice = onPreviewSystemVoice
-            )
-
-            // =================================================================
-            // 3. TÙY CHỈNH NÂNG CAO (PITCH, TỐC ĐỘ, NGẮT NGHỈ GIỮA CÁC CÂU)
+            // 2. TÙY CHỈNH NÂNG CAO (Gọn 1/2 chiều cao • Bật mới sáng • Nghe thử & OK mới lưu)
             // =================================================================
             AdvancedCustomVoiceSettingsSection(
                 readerPrefs = readerPrefs,

@@ -3,6 +3,7 @@ package com.example.ui.components
 import android.content.Intent
 import android.speech.tts.TextToSpeech
 import android.widget.Toast
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -44,12 +46,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -57,6 +61,7 @@ import com.example.data.LibraryManager
 import com.example.data.ReaderPreferences
 import com.example.service.DeviceOfflineVoice
 import com.example.ui.theme.IosBlue
+import com.example.ui.theme.IosGreen
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -372,11 +377,9 @@ fun DeviceOfflineVoicesSection(
 }
 
 /**
- * Bảng "Tùy chỉnh nâng cao" với 3 thanh trượt chuyên sâu:
- * - Độ cao giọng (Pitch): 0.60f -> 1.40f (bước 0.05f)
- * - Tốc độ đọc (Speech Rate): 0.70f -> 1.80f (bước 0.05f)
- * - Thời gian ngắt nghỉ giữa các câu (Sentence Pause): 150ms -> 800ms
- * Kèm nút "Nghe thử" ngay khi kéo thanh trượt và nút "Khôi phục mặc định".
+ * Bảng "Tùy chỉnh nâng cao" thu gọn 1/2 chiều cao:
+ * - Mặc định tối mờ và khóa; khi bật công tắc mới sáng lên cho phép kéo chỉnh (đồng thời tắt đọc sách đang phát).
+ * - Kéo thanh trượt & bấm "Nghe thử" chỉ xem trước trên giá trị tạm, chỉ khi bấm "OK" mới lưu và áp dụng thay đổi.
  */
 @Composable
 fun AdvancedCustomVoiceSettingsSection(
@@ -388,16 +391,28 @@ fun AdvancedCustomVoiceSettingsSection(
     onPreviewAdvanced: (pitch: Float, rate: Float, pauseMs: Int) -> Unit,
     onResetDefaults: () -> Unit
 ) {
+    val context = LocalContext.current
     val cardBg = neoPaperSurfaceColor()
     val itemBg = neoSecondaryPaperColor()
     val borderCol = neoInkBorderColor()
+    val hardShadow = neoHardShadowColor()
     val primaryInk = MaterialTheme.colorScheme.onSurface
     val secondaryInk = MaterialTheme.colorScheme.onSurfaceVariant
 
-    // Trạng thái kéo mượt tại chỗ (đồng bộ theo readerPrefs và lưu ngay khi thả/thay đổi)
-    var sliderPitch by remember(readerPrefs.customPitch) { mutableFloatStateOf(readerPrefs.customPitch) }
-    var sliderRate by remember(readerPrefs.customSpeechRate) { mutableFloatStateOf(readerPrefs.customSpeechRate) }
-    var sliderPauseMs by remember(readerPrefs.sentencePauseMs) { mutableIntStateOf(readerPrefs.sentencePauseMs) }
+    val isEnabled = readerPrefs.advancedCustomEnabled
+    val controlsAlpha by animateFloatAsState(
+        targetValue = if (isEnabled) 1f else 0.40f,
+        label = "advanced_tts_enabled_alpha"
+    )
+
+    // Giá trị tạm khi kéo thanh trượt — chỉ lưu khi người dùng bấm nút OK!
+    var draftPitch by remember(readerPrefs.customPitch) { mutableFloatStateOf(readerPrefs.customPitch) }
+    var draftRate by remember(readerPrefs.customSpeechRate) { mutableFloatStateOf(readerPrefs.customSpeechRate) }
+    var draftPauseMs by remember(readerPrefs.sentencePauseMs) { mutableIntStateOf(readerPrefs.sentencePauseMs) }
+
+    val hasPendingChanges = draftPitch != readerPrefs.customPitch ||
+        draftRate != readerPrefs.customSpeechRate ||
+        draftPauseMs != readerPrefs.sentencePauseMs
 
     Column(
         modifier = Modifier
@@ -407,11 +422,11 @@ fun AdvancedCustomVoiceSettingsSection(
             .clip(RoundedCornerShape(14.dp))
             .background(cardBg)
             .border(1.5.dp, borderCol, RoundedCornerShape(14.dp))
-            .padding(12.dp)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
             .testTag("advanced_tts_settings_section"),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // Header + Công tắc bật/tắt chế độ Tùy chỉnh nâng cao
+        // Header gọn 1 dòng + Công tắc bật/tắt chế độ Tùy chỉnh nâng cao
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -420,42 +435,35 @@ fun AdvancedCustomVoiceSettingsSection(
             Row(
                 modifier = Modifier.weight(1f),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(7.dp)
             ) {
                 Box(
                     modifier = Modifier
-                        .size(28.dp)
+                        .size(24.dp)
                         .clip(CircleShape)
-                        .background(IosBlue.copy(alpha = 0.14f))
+                        .background(if (isEnabled) IosBlue else IosBlue.copy(alpha = 0.14f))
                         .border(1.2.dp, borderCol, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Tune,
                         contentDescription = null,
-                        tint = IosBlue,
-                        modifier = Modifier.size(14.dp)
+                        tint = if (isEnabled) Color.White else IosBlue,
+                        modifier = Modifier.size(13.dp)
                     )
                 }
-                Column {
-                    Text(
-                        text = "Tùy chỉnh nâng cao",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = primaryInk
-                    )
-                    Text(
-                        text = "Tinh chỉnh độ cao, tốc độ & nhịp thở giữa các câu",
-                        fontSize = 10.sp,
-                        color = secondaryInk,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                Text(
+                    text = "Tùy chỉnh nâng cao",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = primaryInk,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
 
             Switch(
-                checked = readerPrefs.advancedCustomEnabled,
+                checked = isEnabled,
                 onCheckedChange = onToggleAdvancedEnabled,
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White,
@@ -465,249 +473,244 @@ fun AdvancedCustomVoiceSettingsSection(
                     uncheckedBorderColor = Color.Transparent
                 ),
                 modifier = Modifier
-                    .scale(0.75f)
-                    .height(26.dp)
+                    .scale(0.70f)
+                    .height(22.dp)
                     .testTag("advanced_tts_mode_switch")
             )
         }
 
-        // Thẻ chứa 3 thanh trượt tinh chỉnh
+        // Khu vực 3 thanh trượt thu gọn 1/2 chiều cao — chỉ sáng và chỉnh được khi bật công tắc
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
+                .alpha(controlsAlpha)
+                .clip(RoundedCornerShape(11.dp))
                 .background(itemBg)
-                .border(1.5.dp, borderCol, RoundedCornerShape(12.dp))
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .border(1.5.dp, borderCol, RoundedCornerShape(11.dp))
+                .padding(horizontal = 9.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            // 1. Thanh trượt Độ cao giọng (Pitch): 0.60f -> 1.40f (bước 0.05f => 16 khoảng => 15 điểm giữa)
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Độ cao giọng (Pitch)",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = primaryInk
-                    )
-                    Text(
-                        text = String.format(Locale.US, "%.2fx", sliderPitch),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = IosBlue
-                    )
-                }
+            // 1. Độ cao giọng (Pitch): 0.60f -> 1.40f
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(24.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "Độ cao",
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = primaryInk,
+                    maxLines = 1,
+                    modifier = Modifier.width(56.dp)
+                )
                 Slider(
-                    value = sliderPitch,
+                    value = draftPitch,
+                    enabled = isEnabled,
                     onValueChange = { raw ->
-                        sliderPitch = LibraryManager.snapFloatStep(
+                        draftPitch = LibraryManager.snapFloatStep(
                             value = raw,
                             step = LibraryManager.STEP_ADVANCED_PITCH,
                             min = LibraryManager.MIN_ADVANCED_PITCH,
                             max = LibraryManager.MAX_ADVANCED_PITCH
                         )
                     },
-                    onValueChangeFinished = { onPitchChanged(sliderPitch) },
                     valueRange = LibraryManager.MIN_ADVANCED_PITCH..LibraryManager.MAX_ADVANCED_PITCH,
                     steps = 15,
                     colors = SliderDefaults.colors(
                         thumbColor = IosBlue,
                         activeTrackColor = IosBlue,
-                        inactiveTrackColor = Color(0xFFD1D1D6)
+                        inactiveTrackColor = Color(0xFFD1D1D6),
+                        disabledThumbColor = secondaryInk.copy(alpha = 0.5f),
+                        disabledActiveTrackColor = secondaryInk.copy(alpha = 0.4f)
                     ),
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(26.dp)
+                        .weight(1f)
+                        .height(20.dp)
                         .testTag("advanced_pitch_slider")
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("0.60 (Trầm)", fontSize = 9.sp, color = secondaryInk)
-                    Text("1.00 (Chuẩn)", fontSize = 9.sp, color = secondaryInk)
-                    Text("1.40 (Cao)", fontSize = 9.sp, color = secondaryInk)
-                }
+                Text(
+                    text = String.format(Locale.US, "%.2fx", draftPitch),
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = if (isEnabled) IosBlue else secondaryInk,
+                    textAlign = TextAlign.End,
+                    maxLines = 1,
+                    modifier = Modifier.width(42.dp)
+                )
             }
 
-            HorizontalDivider(thickness = 0.5.dp, color = borderCol)
-
-            // 2. Thanh trượt Tốc độ đọc (Speech Rate): 0.70f -> 1.80f (bước 0.05f => 22 khoảng => 21 điểm giữa)
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Tốc độ đọc (Speech Rate)",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = primaryInk
-                    )
-                    Text(
-                        text = String.format(Locale.US, "%.2fx", sliderRate),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = IosBlue
-                    )
-                }
+            // 2. Tốc độ đọc (Speech Rate): 0.70f -> 1.80f
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(24.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "Tốc độ",
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = primaryInk,
+                    maxLines = 1,
+                    modifier = Modifier.width(56.dp)
+                )
                 Slider(
-                    value = sliderRate,
+                    value = draftRate,
+                    enabled = isEnabled,
                     onValueChange = { raw ->
-                        sliderRate = LibraryManager.snapFloatStep(
+                        draftRate = LibraryManager.snapFloatStep(
                             value = raw,
                             step = LibraryManager.STEP_ADVANCED_RATE,
                             min = LibraryManager.MIN_ADVANCED_RATE,
                             max = LibraryManager.MAX_ADVANCED_RATE
                         )
                     },
-                    onValueChangeFinished = { onSpeechRateChanged(sliderRate) },
                     valueRange = LibraryManager.MIN_ADVANCED_RATE..LibraryManager.MAX_ADVANCED_RATE,
                     steps = 21,
                     colors = SliderDefaults.colors(
                         thumbColor = IosBlue,
                         activeTrackColor = IosBlue,
-                        inactiveTrackColor = Color(0xFFD1D1D6)
+                        inactiveTrackColor = Color(0xFFD1D1D6),
+                        disabledThumbColor = secondaryInk.copy(alpha = 0.5f),
+                        disabledActiveTrackColor = secondaryInk.copy(alpha = 0.4f)
                     ),
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(26.dp)
+                        .weight(1f)
+                        .height(20.dp)
                         .testTag("advanced_rate_slider")
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("0.70x (Chậm)", fontSize = 9.sp, color = secondaryInk)
-                    Text("1.00x (Chuẩn)", fontSize = 9.sp, color = secondaryInk)
-                    Text("1.80x (Nhanh)", fontSize = 9.sp, color = secondaryInk)
-                }
+                Text(
+                    text = String.format(Locale.US, "%.2fx", draftRate),
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = if (isEnabled) IosBlue else secondaryInk,
+                    textAlign = TextAlign.End,
+                    maxLines = 1,
+                    modifier = Modifier.width(42.dp)
+                )
             }
 
-            HorizontalDivider(thickness = 0.5.dp, color = borderCol)
-
-            // 3. Thanh trượt Thời gian ngắt nghỉ giữa các câu (Sentence Pause): 150ms -> 800ms (bước 50ms => 12 điểm giữa)
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Ngắt nghỉ giữa các câu",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = primaryInk
-                    )
-                    Text(
-                        text = "$sliderPauseMs ms",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = IosBlue
-                    )
-                }
+            // 3. Ngắt nghỉ giữa các câu: 150ms -> 800ms
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(24.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "Ngắt câu",
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = primaryInk,
+                    maxLines = 1,
+                    modifier = Modifier.width(56.dp)
+                )
                 Slider(
-                    value = sliderPauseMs.toFloat(),
+                    value = draftPauseMs.toFloat(),
+                    enabled = isEnabled,
                     onValueChange = { raw ->
                         val step = LibraryManager.STEP_SENTENCE_PAUSE_MS
-                        sliderPauseMs = ((raw / step).roundToInt() * step)
+                        draftPauseMs = ((raw / step).roundToInt() * step)
                             .coerceIn(LibraryManager.MIN_SENTENCE_PAUSE_MS, LibraryManager.MAX_SENTENCE_PAUSE_MS)
                     },
-                    onValueChangeFinished = { onSentencePauseChanged(sliderPauseMs) },
                     valueRange = LibraryManager.MIN_SENTENCE_PAUSE_MS.toFloat()..LibraryManager.MAX_SENTENCE_PAUSE_MS.toFloat(),
                     steps = 12,
                     colors = SliderDefaults.colors(
                         thumbColor = IosBlue,
                         activeTrackColor = IosBlue,
-                        inactiveTrackColor = Color(0xFFD1D1D6)
+                        inactiveTrackColor = Color(0xFFD1D1D6),
+                        disabledThumbColor = secondaryInk.copy(alpha = 0.5f),
+                        disabledActiveTrackColor = secondaryInk.copy(alpha = 0.4f)
                     ),
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(26.dp)
+                        .weight(1f)
+                        .height(20.dp)
                         .testTag("advanced_pause_slider")
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("150ms (Gấp)", fontSize = 9.sp, color = secondaryInk)
-                    Text("300ms (Tự nhiên)", fontSize = 9.sp, color = secondaryInk)
-                    Text("800ms (Khoan thai)", fontSize = 9.sp, color = secondaryInk)
-                }
+                Text(
+                    text = "${draftPauseMs}ms",
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = if (isEnabled) IosBlue else secondaryInk,
+                    textAlign = TextAlign.End,
+                    maxLines = 1,
+                    modifier = Modifier.width(42.dp)
+                )
             }
 
-            Spacer(modifier = Modifier.height(2.dp))
-
-            // Hàng nút bấm: "Nghe thử" & "Khôi phục mặc định"
+            // Hàng nút bấm gọn: Nghe thử (chỉ nghe tạm) | Mặc định | OK (xác nhận lưu)
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 3.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 NeoBrutalistPressBox(
-                    onClick = {
-                        onPitchChanged(sliderPitch)
-                        onSpeechRateChanged(sliderRate)
-                        onSentencePauseChanged(sliderPauseMs)
-                        onPreviewAdvanced(sliderPitch, sliderRate, sliderPauseMs)
-                    },
+                    onClick = { onPreviewAdvanced(draftPitch, draftRate, draftPauseMs) },
+                    enabled = isEnabled,
                     isPill = true,
-                    shadowOffset = 3.dp,
-                    pressDepth = 2.dp,
+                    shadowOffset = 2.dp,
+                    pressDepth = 1.5.dp,
                     borderWidth = 1.5.dp,
-                    containerColor = IosBlue,
+                    containerColor = cardBg,
                     borderColor = borderCol,
-                    shadowColor = neoHardShadowColor(),
+                    shadowColor = if (isEnabled) hardShadow else Color.Transparent,
                     modifier = Modifier
                         .weight(1f)
+                        .height(30.dp)
                         .testTag("advanced_tts_preview_button")
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                        modifier = Modifier.padding(horizontal = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.PlayArrow,
                             contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(15.dp)
+                            tint = IosBlue,
+                            modifier = Modifier.size(14.dp)
                         )
-                        Spacer(modifier = Modifier.size(4.dp))
+                        Spacer(modifier = Modifier.size(3.dp))
                         Text(
                             text = "Nghe thử",
-                            fontSize = 11.sp,
+                            fontSize = 10.5.sp,
                             fontWeight = FontWeight.Bold,
-                            color = Color.White
+                            color = primaryInk,
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
                 }
 
                 NeoBrutalistPressBox(
                     onClick = {
-                        sliderPitch = LibraryManager.DEFAULT_ADVANCED_PITCH
-                        sliderRate = LibraryManager.DEFAULT_ADVANCED_RATE
-                        sliderPauseMs = LibraryManager.DEFAULT_SENTENCE_PAUSE_MS
+                        draftPitch = LibraryManager.DEFAULT_ADVANCED_PITCH
+                        draftRate = LibraryManager.DEFAULT_ADVANCED_RATE
+                        draftPauseMs = LibraryManager.DEFAULT_SENTENCE_PAUSE_MS
                         onResetDefaults()
                     },
+                    enabled = isEnabled,
                     isPill = true,
-                    shadowOffset = 3.dp,
-                    pressDepth = 2.dp,
+                    shadowOffset = 2.dp,
+                    pressDepth = 1.5.dp,
                     borderWidth = 1.5.dp,
                     containerColor = cardBg,
                     borderColor = borderCol,
-                    shadowColor = neoHardShadowColor(),
+                    shadowColor = if (isEnabled) hardShadow else Color.Transparent,
                     modifier = Modifier
                         .weight(1f)
+                        .height(30.dp)
                         .testTag("advanced_tts_reset_button")
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                        modifier = Modifier.padding(horizontal = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
                     ) {
@@ -715,16 +718,63 @@ fun AdvancedCustomVoiceSettingsSection(
                             imageVector = Icons.Rounded.RestartAlt,
                             contentDescription = null,
                             tint = primaryInk,
-                            modifier = Modifier.size(15.dp)
+                            modifier = Modifier.size(13.dp)
                         )
-                        Spacer(modifier = Modifier.size(4.dp))
+                        Spacer(modifier = Modifier.size(3.dp))
                         Text(
-                            text = "Khôi phục mặc định",
-                            fontSize = 11.sp,
+                            text = "Mặc định",
+                            fontSize = 10.5.sp,
                             fontWeight = FontWeight.Bold,
                             color = primaryInk,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            softWrap = false
+                        )
+                    }
+                }
+
+                NeoBrutalistPressBox(
+                    onClick = {
+                        onPitchChanged(draftPitch)
+                        onSpeechRateChanged(draftRate)
+                        onSentencePauseChanged(draftPauseMs)
+                        Toast.makeText(
+                            context,
+                            "Đã áp dụng tùy chỉnh giọng đọc",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    enabled = isEnabled,
+                    isPill = true,
+                    shadowOffset = 2.dp,
+                    pressDepth = 1.5.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (hasPendingChanges) IosGreen else IosBlue,
+                    borderColor = borderCol,
+                    shadowColor = if (isEnabled) hardShadow else Color.Transparent,
+                    modifier = Modifier
+                        .weight(0.85f)
+                        .height(30.dp)
+                        .testTag("advanced_tts_ok_button")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Check,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.size(3.dp))
+                        Text(
+                            text = "OK",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White,
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
                 }
