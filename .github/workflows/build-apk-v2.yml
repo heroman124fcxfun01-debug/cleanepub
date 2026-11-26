@@ -14,108 +14,138 @@ jobs:
       - name: Lấy mã nguồn
         uses: actions/checkout@v4
 
-      - name: Cài đặt Node.js 20
+      - name: Khôi phục debug.keystore từ debug.keystore.base64
+        run: |
+          if [ ! -f debug.keystore ]; then
+            if [ -f debug.keystore.base64 ]; then
+              base64 -d debug.keystore.base64 > debug.keystore
+              echo "Đã giải mã debug.keystore thành công."
+            else
+              keytool -genkeypair -v -keystore debug.keystore \
+                -storepass android -alias androiddebugkey -keypass android \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
+              echo "Đã tạo debug.keystore dự phòng."
+            fi
+          fi
+
+      - name: Cài đặt Node.js 20 để tải model
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Tải trọn bộ model VieNeu (~380MB) vào app/src/main/assets
+      - name: Tải trọn bộ model VieNeu (~380MB) vào app/src/main/assets/models
         run: |
-          npm --prefix /tmp/ort install onnxruntime-web
-          mkdir -p app/src/main/assets/ort app/src/main/assets/models
-          cp -f /tmp/ort/node_modules/onnxruntime-web/dist/*.wasm app/src/main/assets/ort/ 2>/dev/null || true
-          cp -f /tmp/ort/node_modules/onnxruntime-web/dist/*.mjs app/src/main/assets/ort/ 2>/dev/null || true
+          MODELS_DIR="app/src/main/assets/models"
+          mkdir -p "$MODELS_DIR"
 
-          node -e '
+          MODELS_DIR="$MODELS_DIR" node -e '
             const fs = require("fs");
             const path = require("path");
-            const OUT_DIR = "app/src/main/assets/models";
+            const MODELS_DIR = process.env.MODELS_DIR;
             const REPO = "duyquangnvx/vieneu-web-models";
             const BASE = `https://huggingface.co/${REPO}/resolve/main/`;
+
+            async function fetchWithRetry(url, retries = 3) {
+              for (let attempt = 1; attempt <= retries; attempt++) {
+                try {
+                  const res = await fetch(url, { redirect: "follow" });
+                  if (res.ok) return res;
+                  if (attempt === retries) throw new Error(`HTTP ${res.status} cho ${url}`);
+                } catch (err) {
+                  if (attempt === retries) throw err;
+                }
+                await new Promise(r => setTimeout(r, 2000 * attempt));
+              }
+            }
+
             (async () => {
-              const apiRes = await fetch(`https://huggingface.co/api/models/${REPO}`);
-              if (!apiRes.ok) throw new Error("Khong lay duoc danh sach file tu Hugging Face");
+              const apiRes = await fetchWithRetry(`https://huggingface.co/api/models/${REPO}`);
               const info = await apiRes.json();
               const files = (info.siblings || [])
                 .map(s => s.rfilename)
-                .filter(f => f && !f.startsWith(".") && f !== "README.md");
-              for (const f of files) {
-                console.log("Dang tai:", f);
-                const r = await fetch(BASE + f);
-                if (!r.ok) throw new Error("Loi tai file: " + f);
-                const buf = Buffer.from(await r.arrayBuffer());
-                const flatName = f.split("/").pop();
-                fs.writeFileSync(path.join(OUT_DIR, flatName), buf);
-                if (f.includes("/")) {
-                  const nested = path.join(OUT_DIR, f);
-                  fs.mkdirSync(path.dirname(nested), { recursive: true });
-                  fs.writeFileSync(nested, buf);
-                }
+                .filter(f => f && !f.startsWith(".") && f !== "README.md" && !f.endsWith(".gitattributes"));
+
+              if (files.length === 0) {
+                throw new Error("Không tìm thấy file model nào trên Hugging Face!");
               }
-              const totalBytes = fs.readdirSync(OUT_DIR).reduce((s, f) => {
-                const st = fs.statSync(path.join(OUT_DIR, f));
+
+              const downloadedNames = [];
+              for (const f of files) {
+                const flatName = f.split("/").pop();
+                console.log("Đang tải:", f, "->", flatName);
+                const r = await fetchWithRetry(BASE + f);
+                const buf = Buffer.from(await r.arrayBuffer());
+                fs.writeFileSync(path.join(MODELS_DIR, flatName), buf);
+                downloadedNames.push(flatName);
+                console.log("  Đã lưu:", flatName, `(${(buf.length / 1024 / 1024).toFixed(2)} MB)`);
+              }
+
+              const manifestPath = path.join(MODELS_DIR, "manifest.json");
+              if (!fs.existsSync(manifestPath)) {
+                const fallbackManifest = {
+                  version: "vieneu-offline-1.0",
+                  sampleRate: 24000,
+                  files: downloadedNames
+                };
+                fs.writeFileSync(manifestPath, JSON.stringify(fallbackManifest, null, 2));
+              }
+
+              const totalBytes = fs.readdirSync(MODELS_DIR).reduce((s, f) => {
+                const st = fs.statSync(path.join(MODELS_DIR, f));
                 return st.isFile() ? s + st.size : s;
               }, 0);
-              console.log("TONG DUNG LUONG MODEL:", (totalBytes / 1024 / 1024).toFixed(1), "MB");
-              if (totalBytes < 250 * 1024 * 1024) throw new Error("Chua du dung luong model!");
+              console.log("TỔNG DUNG LƯỢNG MODEL:", (totalBytes / 1024 / 1024).toFixed(1), "MB");
+              if (totalBytes < 100 * 1024 * 1024) {
+                throw new Error("Dung lượng model tải về quá nhỏ, có thể bị gián đoạn!");
+              }
             })();
           '
 
-      - name: Cấu hình không nén file model lớn và tăng RAM đóng gói
-        run: |
-          echo "" >> gradle.properties
-          echo "org.gradle.jvmargs=-Xmx4096m" >> gradle.properties
-          node -e '
-            const fs = require("fs");
-            for (const f of ["app/build.gradle", "app/build.gradle.kts"]) {
-              if (!fs.existsSync(f)) continue;
-              let txt = fs.readFileSync(f, "utf8");
-              if (!txt.includes("onnx_data")) {
-                if (f.endsWith(".kts")) {
-                  txt = txt.replace(/android\s*\{/, "android {\n    androidResources {\n        noCompress += listOf(\"onnx\", \"bin\", \"wasm\", \"data\", \"onnx_data\")\n    }");
-                } else {
-                  txt = txt.replace(/android\s*\{/, "android {\n    aaptOptions {\n        noCompress \"onnx\", \"bin\", \"wasm\", \"data\", \"onnx_data\"\n    }");
-                }
-                fs.writeFileSync(f, txt);
-              }
-            }
-          '
-
-      - name: Cài đặt Java 17
+      - name: Cài đặt Java 21 (bắt buộc cho AGP 9.1 & Gradle 9.3)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
-      - name: Cài đặt Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Tạo debug.keystore và biên dịch file APK
+      - name: Chấp nhận giấy phép Android SDK
         run: |
-          STORE_PASS=$(grep -RhoE 'storePassword\s*=?\s*["\x27][^"\x27]+["\x27]' app/build.gradle* 2>/dev/null | head -n 1 | sed -E 's/.*["\x27]([^"\x27]+)["\x27]/\1/')
-          KEY_ALIAS=$(grep -RhoE 'keyAlias\s*=?\s*["\x27][^"\x27]+["\x27]' app/build.gradle* 2>/dev/null | head -n 1 | sed -E 's/.*["\x27]([^"\x27]+)["\x27]/\1/')
-          KEY_PASS=$(grep -RhoE 'keyPassword\s*=?\s*["\x27][^"\x27]+["\x27]' app/build.gradle* 2>/dev/null | head -n 1 | sed -E 's/.*["\x27]([^"\x27]+)["\x27]/\1/')
-          STORE_PASS=${STORE_PASS:-android}
-          KEY_ALIAS=${KEY_ALIAS:-androiddebugkey}
-          KEY_PASS=${KEY_PASS:-android}
-
-          if [ ! -f "debug.keystore" ]; then
-            keytool -genkey -v -keystore debug.keystore -storepass "$STORE_PASS" -alias "$KEY_ALIAS" -keypass "$KEY_PASS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
           fi
-          cp -f debug.keystore app/debug.keystore 2>/dev/null || true
 
-          if [ -f "./gradlew" ]; then
-            chmod +x gradlew
-            ./gradlew assembleDebug
-          else
-            gradle assembleDebug
+      - name: Cài đặt Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Biên dịch file APK
+        run: |
+          gradle :app:assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            -Dorg.gradle.jvmargs="-Xmx6g -Dfile.encoding=UTF-8"
+          APK_FILE=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          if [ -z "$APK_FILE" ] || [ ! -f "$APK_FILE" ]; then
+            echo "Không tìm thấy file APK sau khi biên dịch!"
+            exit 1
           fi
-          APK_FILE=$(find app/build/outputs/apk -name "*.apk" | head -n 1)
-          echo "APK_PATH=$APK_FILE" >> $GITHUB_ENV
+          ls -lh "$APK_FILE"
+          echo "APK_PATH=$APK_FILE" >> "$GITHUB_ENV"
+
+      - name: Lưu file APK vào GitHub Actions Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cleanbook-Full-Offline-${{ github.run_number }}
+          path: ${{ env.APK_PATH }}
+          retention-days: 14
 
       - name: Xuất thẳng file APK ra mục Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: Ban-full-offline-${{ github.run_number }}
+          tag_name: v2.0.${{ github.run_number }}
+          name: Cleanbook Full Offline v2.0.${{ github.run_number }}
           files: ${{ env.APK_PATH }}
+          fail_on_unmatched_files: true

@@ -266,12 +266,19 @@ class OfflineOnnxVoiceEngine(context: Context) {
                     }.getOrNull()
                 } else null
 
+                val bundledAssetFiles = runCatching {
+                    appContext.assets.list(ASSETS_MODELS_DIR)?.toList().orEmpty()
+                }.getOrDefault(emptyList())
+                    .filter { it.isNotBlank() && it != MANIFEST_FILE_NAME }
+
+                val filesToSync = (parsedAsset.allFiles + bundledAssetFiles).distinct()
+
                 val needsSync = cachedVersion != parsedAsset.version ||
-                    parsedAsset.allFiles.any { !File(modelCacheDir, it).exists() }
+                    filesToSync.any { !File(modelCacheDir, it.substringAfterLast('/')).exists() }
 
                 if (needsSync) {
                     modelCacheDir.mkdirs()
-                    parsedAsset.allFiles.forEach { fileName ->
+                    filesToSync.forEach { fileName ->
                         copyAssetModelFileToCache(fileName)
                     }
                     cachedManifestFile.writeText(assetManifestJson, Charsets.UTF_8)

@@ -61,6 +61,9 @@ android {
     compose = true
     buildConfig = true
   }
+  androidResources {
+    noCompress += listOf("onnx", "bin", "data", "onnx_data")
+  }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {
     includeInApk = false
