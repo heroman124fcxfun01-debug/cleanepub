@@ -19,29 +19,17 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Tải trọn bộ model VieNeu (~380MB) và file WASM vào thư mục web của Android
+      - name: Tải trọn bộ model VieNeu (~380MB) vào app/src/main/assets
         run: |
-          INDEX_PATH=$(find . -maxdepth 6 -name "index.html" -not -path "*/build/*" -not -path "*/.git/*" | head -n 1)
-          if [ -n "$INDEX_PATH" ]; then
-            WEB_ROOT=$(dirname "$INDEX_PATH")
-          elif [ -d "app/src/main/assets/public" ]; then
-            WEB_ROOT="app/src/main/assets/public"
-          elif [ -d "app/src/main/assets" ]; then
-            WEB_ROOT="app/src/main/assets"
-          else
-            WEB_ROOT="public"
-          fi
-          echo "Thu muc web duoc chon: $WEB_ROOT"
-
           npm --prefix /tmp/ort install onnxruntime-web
-          mkdir -p "$WEB_ROOT/ort" "$WEB_ROOT/models"
-          cp -f /tmp/ort/node_modules/onnxruntime-web/dist/*.wasm "$WEB_ROOT/ort/" 2>/dev/null || true
-          cp -f /tmp/ort/node_modules/onnxruntime-web/dist/*.mjs "$WEB_ROOT/ort/" 2>/dev/null || true
+          mkdir -p app/src/main/assets/ort app/src/main/assets/models
+          cp -f /tmp/ort/node_modules/onnxruntime-web/dist/*.wasm app/src/main/assets/ort/ 2>/dev/null || true
+          cp -f /tmp/ort/node_modules/onnxruntime-web/dist/*.mjs app/src/main/assets/ort/ 2>/dev/null || true
 
-          WEB_ROOT="$WEB_ROOT" node -e '
+          node -e '
             const fs = require("fs");
             const path = require("path");
-            const WEB_ROOT = process.env.WEB_ROOT;
+            const OUT_DIR = "app/src/main/assets/models";
             const REPO = "duyquangnvx/vieneu-web-models";
             const BASE = `https://huggingface.co/${REPO}/resolve/main/`;
             (async () => {
@@ -57,15 +45,15 @@ jobs:
                 if (!r.ok) throw new Error("Loi tai file: " + f);
                 const buf = Buffer.from(await r.arrayBuffer());
                 const flatName = f.split("/").pop();
-                fs.writeFileSync(path.join(WEB_ROOT, "models", flatName), buf);
+                fs.writeFileSync(path.join(OUT_DIR, flatName), buf);
                 if (f.includes("/")) {
-                  const nested = path.join(WEB_ROOT, "models", f);
+                  const nested = path.join(OUT_DIR, f);
                   fs.mkdirSync(path.dirname(nested), { recursive: true });
                   fs.writeFileSync(nested, buf);
                 }
               }
-              const totalBytes = fs.readdirSync(path.join(WEB_ROOT, "models")).reduce((s, f) => {
-                const st = fs.statSync(path.join(WEB_ROOT, "models", f));
+              const totalBytes = fs.readdirSync(OUT_DIR).reduce((s, f) => {
+                const st = fs.statSync(path.join(OUT_DIR, f));
                 return st.isFile() ? s + st.size : s;
               }, 0);
               console.log("TONG DUNG LUONG MODEL:", (totalBytes / 1024 / 1024).toFixed(1), "MB");
@@ -102,8 +90,20 @@ jobs:
       - name: Cài đặt Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Biên dịch file APK
+      - name: Tạo debug.keystore và biên dịch file APK
         run: |
+          STORE_PASS=$(grep -RhoE 'storePassword\s*=?\s*["\x27][^"\x27]+["\x27]' app/build.gradle* 2>/dev/null | head -n 1 | sed -E 's/.*["\x27]([^"\x27]+)["\x27]/\1/')
+          KEY_ALIAS=$(grep -RhoE 'keyAlias\s*=?\s*["\x27][^"\x27]+["\x27]' app/build.gradle* 2>/dev/null | head -n 1 | sed -E 's/.*["\x27]([^"\x27]+)["\x27]/\1/')
+          KEY_PASS=$(grep -RhoE 'keyPassword\s*=?\s*["\x27][^"\x27]+["\x27]' app/build.gradle* 2>/dev/null | head -n 1 | sed -E 's/.*["\x27]([^"\x27]+)["\x27]/\1/')
+          STORE_PASS=${STORE_PASS:-android}
+          KEY_ALIAS=${KEY_ALIAS:-androiddebugkey}
+          KEY_PASS=${KEY_PASS:-android}
+
+          if [ ! -f "debug.keystore" ]; then
+            keytool -genkey -v -keystore debug.keystore -storepass "$STORE_PASS" -alias "$KEY_ALIAS" -keypass "$KEY_PASS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          cp -f debug.keystore app/debug.keystore 2>/dev/null || true
+
           if [ -f "./gradlew" ]; then
             chmod +x gradlew
             ./gradlew assembleDebug
