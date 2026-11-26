@@ -38,7 +38,10 @@ import com.example.pipeline.TextCleaningEngine
 import com.example.pipeline.TocGenerator
 import com.example.service.EpubCleanForegroundService
 import com.example.service.ProcessingStateHolder
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -60,6 +63,29 @@ data class PendingImportMetadata(
     val source: SourceFileInfo,
     val metadata: EpubMetadata
 )
+
+sealed interface BatchCleanUiState {
+    data object Idle : BatchCleanUiState
+    data class Running(
+        val currentIndex: Int,
+        val totalCount: Int,
+        val currentBookName: String,
+        val currentBookProgress: Float,
+        val statusDetail: String,
+        val completedCount: Int,
+        val failedCount: Int,
+        val totalFixesSoFar: Int
+    ) : BatchCleanUiState
+
+    data class Completed(
+        val totalCount: Int,
+        val successCount: Int,
+        val failedCount: Int,
+        val totalFixes: Int,
+        val failedFileNames: List<String>,
+        val wasCancelled: Boolean
+    ) : BatchCleanUiState
+}
 
 data class ManualEditorUiState(
     val isLoading: Boolean = false,
@@ -154,12 +180,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     val manualEditorState: StateFlow<ManualEditorUiState> = _manualEditorState.asStateFlow()
 
+    private val _batchCleanState = MutableStateFlow<BatchCleanUiState>(BatchCleanUiState.Idle)
+    val batchCleanState: StateFlow<BatchCleanUiState> = _batchCleanState.asStateFlow()
+
     private val manualUndoStack = ArrayDeque<List<ManualChapterContent>>()
     private var lastUndoChapterIdx: Int = -1
     private var lastUndoParaIdx: Int = -1
     private var lastUndoTimestampMs: Long = 0L
     private var manualTocCounter: Int = 0
     private var activeSessionFileId: String? = null
+    private var batchCleanJob: Job? = null
 
     private fun getOrCreateActiveFileId(): String {
         val current = activeSessionFileId
@@ -406,6 +436,227 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cancelProcessing() {
         EpubCleanForegroundService.cancel(appContext)
+    }
+
+    /**
+     * Cleanbook Batch Mode: Automatically cleans & saves multiple selected EPUB/PDF books
+     * sequentially (4GB RAM safe) WITHOUT prompting "Sửa tiếp". Every book is recorded into
+     * "Tất cả các file" with full edit-state saved so the user can manually edit any book later.
+     */
+    fun startBatchAutoClean(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        if (_batchCleanState.value is BatchCleanUiState.Running) return
+
+        _homeErrorBanner.value = null
+        val validSources = uris.mapNotNull { uri ->
+            FilePathResolver.inspectSourceFile(appContext, uri)
+        }
+        if (validSources.isEmpty()) {
+            _homeErrorBanner.value = "Vui lòng chọn ít nhất một tệp .epub hoặc .pdf hợp lệ."
+            return
+        }
+
+        val options = _cleaningOptions.value
+        val customTree = _customSaveTreeUri.value
+        val total = validSources.size
+
+        batchCleanJob?.cancel()
+        batchCleanJob = viewModelScope.launch {
+            var successCount = 0
+            var failedCount = 0
+            var totalFixesAccum = 0
+            val failedNames = mutableListOf<String>()
+            var cancelled = false
+
+            try {
+                for ((idx, source) in validSources.withIndex()) {
+                    coroutineContext.ensureActive()
+                    _batchCleanState.value = BatchCleanUiState.Running(
+                        currentIndex = idx,
+                        totalCount = total,
+                        currentBookName = source.displayName,
+                        currentBookProgress = 0.02f,
+                        statusDetail = "Đang chuẩn bị sách ${idx + 1}/$total…",
+                        completedCount = successCount,
+                        failedCount = failedCount,
+                        totalFixesSoFar = totalFixesAccum
+                    )
+
+                    var sessionDirToClean: File? = null
+                    try {
+                        val pipeline = EpubCleanPipeline(appContext)
+                        val meta = withContext(Dispatchers.IO) {
+                            runCatching {
+                                EpubMetadataEditor.readMetadataFromSource(appContext, source)
+                            }.getOrNull()
+                        }
+                        coroutineContext.ensureActive()
+
+                        val snap = pipeline.run(
+                            source = source,
+                            metadata = meta,
+                            options = options,
+                            onUpdate = { update ->
+                                _batchCleanState.value = BatchCleanUiState.Running(
+                                    currentIndex = idx,
+                                    totalCount = total,
+                                    currentBookName = source.displayName,
+                                    currentBookProgress = update.progressFraction.coerceIn(0.02f, 0.90f),
+                                    statusDetail = update.statusDetail.ifBlank { "Đang làm sạch tự động…" },
+                                    completedCount = successCount,
+                                    failedCount = failedCount,
+                                    totalFixesSoFar = totalFixesAccum
+                                )
+                            }
+                        )
+                        coroutineContext.ensureActive()
+
+                        val workspace = snap.workspace
+                        if (snap.phase != ProcessingPhase.COMPLETED || workspace == null) {
+                            failedCount++
+                            failedNames.add(source.displayName)
+                            continue
+                        }
+                        sessionDirToClean = File(workspace.sessionDirPath)
+
+                        _batchCleanState.value = BatchCleanUiState.Running(
+                            currentIndex = idx,
+                            totalCount = total,
+                            currentBookName = source.displayName,
+                            currentBookProgress = 0.94f,
+                            statusDetail = "Đang đóng gói & lưu sách sạch…",
+                            completedCount = successCount,
+                            failedCount = failedCount,
+                            totalFixesSoFar = totalFixesAccum
+                        )
+
+                        val finalTempEpub = pipeline.rebuildEpubWithSelectedDiffs(
+                            workspace = workspace,
+                            diffs = snap.diffs,
+                            regenerateToc = snap.regenerateToc
+                        )
+
+                        val saveResult = withContext(Dispatchers.IO) {
+                            FilePathResolver.saveCleanedEpub(
+                                context = appContext,
+                                tempEpubFile = finalTempEpub,
+                                source = source,
+                                mode = SaveMode.KEEP_ORIGINAL,
+                                customTreeUri = customTree
+                            )
+                        }
+
+                        if (saveResult is SaveResult.Success) {
+                            val acceptedSpellingCount = snap.diffs.count { it.accepted }
+                            val bookFixes = snap.stats.junkLinksRemoved +
+                                snap.stats.whitespaceFixes +
+                                acceptedSpellingCount +
+                                snap.stats.mergedParagraphs +
+                                snap.stats.headersFootersRemoved +
+                                snap.stats.footnotesRemoved +
+                                snap.stats.unicodeSanitized +
+                                snap.stats.dialoguesFormatted
+                            val fileId = UUID.randomUUID().toString()
+                            val diffPairs = pipeline.extractDiffPairsFromReview(
+                                workspace = workspace,
+                                diffs = snap.diffs
+                            )
+
+                            val updatedHistory = withContext(Dispatchers.IO) {
+                                val chapters = pipeline.loadManualChapters(
+                                    workspace = workspace,
+                                    diffs = snap.diffs,
+                                    mode = ManualEditorMode.KEEP_CLEANED
+                                )
+                                val tocList = TocGenerator.buildEditableTocItems(
+                                    workspace = workspace,
+                                    regenerateToc = snap.regenerateToc
+                                )
+                                val savedStateFile = draftManager.saveEditState(
+                                    fileId = fileId,
+                                    sourceFile = source,
+                                    workspace = workspace,
+                                    metadata = snap.metadata,
+                                    mode = ManualEditorMode.KEEP_CLEANED,
+                                    chapters = chapters,
+                                    tocList = tocList,
+                                    manualTocEntries = emptyList(),
+                                    lastChapterIndex = 0,
+                                    lastParagraphIndex = 0,
+                                    savedFileUri = saveResult.savedUriString,
+                                    savedAbsolutePath = saveResult.savedAbsolutePath,
+                                    regenerateToc = snap.regenerateToc,
+                                    manualEditCount = 0
+                                )
+
+                                historyManager.addEntry(
+                                    entry = CleanedFileHistory(
+                                        id = fileId,
+                                        fileName = saveResult.outputFileName,
+                                        filePath = saveResult.savedAbsolutePath ?: saveResult.outputDisplayPath,
+                                        uriString = saveResult.savedUriString,
+                                        sourceType = source.fileType.label,
+                                        totalFixes = bookFixes,
+                                        junkLinksFixed = snap.stats.junkLinksRemoved,
+                                        whitespaceFixed = snap.stats.whitespaceFixes,
+                                        spellingFixed = acceptedSpellingCount,
+                                        timestampMillis = System.currentTimeMillis(),
+                                        status = FileRecordStatus.SAVED,
+                                        lastChapterIndex = 0,
+                                        totalChapters = chapters.size,
+                                        lastParagraphIndex = 0,
+                                        editStateFile = savedStateFile?.name
+                                    ),
+                                    diffPairs = diffPairs
+                                )
+                            }
+
+                            _recentFiles.value = updatedHistory
+                            successCount++
+                            totalFixesAccum += bookFixes
+                        } else {
+                            failedCount++
+                            failedNames.add(source.displayName)
+                        }
+                    } catch (ce: CancellationException) {
+                        cancelled = true
+                        throw ce
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Batch clean failed for ${source.displayName}", e)
+                        failedCount++
+                        failedNames.add(source.displayName)
+                    } finally {
+                        // Release temp session immediately after each book to keep 4GB RAM & storage clean
+                        if (sessionDirToClean != null) {
+                            withContext(Dispatchers.IO) {
+                                runCatching { sessionDirToClean.deleteRecursively() }
+                            }
+                        }
+                    }
+                }
+            } catch (_: CancellationException) {
+                cancelled = true
+            } finally {
+                _batchCleanState.value = BatchCleanUiState.Completed(
+                    totalCount = total,
+                    successCount = successCount,
+                    failedCount = failedCount,
+                    totalFixes = totalFixesAccum,
+                    failedFileNames = failedNames,
+                    wasCancelled = cancelled
+                )
+            }
+        }
+    }
+
+    fun cancelBatchAutoClean() {
+        batchCleanJob?.cancel()
+    }
+
+    fun dismissBatchCleanState() {
+        if (_batchCleanState.value !is BatchCleanUiState.Running) {
+            _batchCleanState.value = BatchCleanUiState.Idle
+        }
     }
 
     fun resetProcessingSession() {

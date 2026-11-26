@@ -87,7 +87,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
@@ -127,7 +126,9 @@ import com.example.ui.components.AddManualTocDialog
 import com.example.ui.components.CustomReplaceDialog
 import com.example.ui.components.IosSaveSuccessDialog
 import com.example.ui.components.ManualTocOverlayDialog
+import com.example.ui.components.NeoBrutalistPressBox
 import com.example.ui.components.SaveDialog
+import com.example.ui.components.neoHardOffsetShadow
 import com.example.ui.components.SepiaAccent
 import com.example.ui.components.SepiaAccentSoft
 import com.example.ui.components.SepiaActiveParagraphBg
@@ -1024,20 +1025,21 @@ fun ExitConfirmDialog(
             usePlatformDefaultWidth = false
         )
     ) {
-        Surface(
-            shape = dialogShape,
-            color = SepiaBg,
-            border = BorderStroke(1.dp, SepiaBorder),
+        Box(
             modifier = Modifier
                 .padding(horizontal = 24.dp)
-                .widthIn(max = 360.dp)
+                .widthIn(max = 364.dp)
                 .fillMaxWidth()
-                .shadow(
-                    elevation = 16.dp,
-                    shape = dialogShape,
-                    ambientColor = Color.Black.copy(alpha = 0.22f),
-                    spotColor = Color.Black.copy(alpha = 0.34f)
+                .padding(end = 5.dp, bottom = 5.dp)
+                .neoHardOffsetShadow(
+                    cornerRadius = 18.dp,
+                    offsetX = 5.dp,
+                    offsetY = 5.dp,
+                    shadowColor = SepiaInk
                 )
+                .clip(dialogShape)
+                .background(SepiaBg)
+                .border(1.8.dp, SepiaInk, dialogShape)
         ) {
             Column(
                 modifier = Modifier
@@ -1051,7 +1053,8 @@ fun ExitConfirmDialog(
                         .clip(CircleShape)
                         .background(
                             if (isArmed) Color(0x26FF3B30) else Color(0x24E67E22)
-                        ),
+                        )
+                        .border(1.5.dp, SepiaInk, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -1091,61 +1094,61 @@ fun ExitConfirmDialog(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // Option 1: 2-Step Confirmation Pill Button — "Hủy sửa chữa" (Discard, keep original)
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = discardButtonBg,
-                    border = if (isArmed) null else BorderStroke(1.dp, Color(0xFFFFA58A)),
+                NeoBrutalistPressBox(
+                    onClick = {
+                        if (confirmStep == 0) {
+                            confirmStep = 1
+                        } else {
+                            confirmStep = 0
+                            onDiscardAndExit()
+                        }
+                    },
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = discardButtonBg,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(44.dp)
-                        .clip(RoundedCornerShape(50))
-                        .clickable {
-                            if (confirmStep == 0) {
-                                confirmStep = 1
-                            } else {
-                                confirmStep = 0
-                                onDiscardAndExit()
-                            }
-                        }
+                        .height(47.dp)
                         .testTag("exit_confirm_two_step_button")
                 ) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = if (isArmed) "Bấm lần nữa để xác nhận hủy" else "Hủy sửa chữa (giữ bản gốc)",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = discardButtonTextColor,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        )
-                    }
+                    Text(
+                        text = if (isArmed) "Bấm lần nữa để xác nhận hủy" else "Hủy sửa chữa (giữ bản gốc)",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = discardButtonTextColor,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
 
                 // Option 2 (Below): Save current editing state as Draft and return to Home
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = SepiaAccent,
+                NeoBrutalistPressBox(
+                    onClick = {
+                        confirmStep = 0
+                        onSaveAndExit()
+                    },
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = SepiaAccent,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(44.dp)
-                        .clip(RoundedCornerShape(50))
-                        .clickable {
-                            confirmStep = 0
-                            onSaveAndExit()
-                        }
+                        .height(47.dp)
                         .testTag("exit_save_and_home_button")
                 ) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 14.dp),
+                        modifier = Modifier.padding(horizontal = 14.dp),
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -1159,7 +1162,7 @@ fun ExitConfirmDialog(
                         Text(
                             text = "Về màn hình chính và lưu",
                             fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             color = Color.White,
                             maxLines = 1,
                             softWrap = false,
@@ -1234,17 +1237,22 @@ private fun SepiaTopBar(
             }
 
             // Top-Left 2: Compact Pill "Lưu"
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = SepiaAccent,
+            NeoBrutalistPressBox(
+                onClick = onSaveClick,
+                enabled = !isSaving,
+                isPill = true,
+                shadowOffset = 2.5.dp,
+                pressDepth = 2.dp,
+                borderWidth = 1.5.dp,
+                containerColor = SepiaAccent,
+                borderColor = SepiaInk,
+                shadowColor = SepiaInk,
                 modifier = Modifier
-                    .height(27.dp)
-                    .clip(RoundedCornerShape(50))
-                    .clickable(enabled = !isSaving, onClick = onSaveClick)
+                    .height(30.dp)
                     .testTag("manual_save_button")
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 8.dp),
+                    modifier = Modifier.padding(horizontal = 9.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
@@ -1258,7 +1266,7 @@ private fun SepiaTopBar(
                     Text(
                         text = if (isSaving) "Lưu…" else "Lưu",
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontWeight = FontWeight.Bold,
                         color = Color.White,
                         maxLines = 1,
                         softWrap = false
@@ -1299,24 +1307,27 @@ private fun SepiaTopBar(
             Spacer(modifier = Modifier.weight(1f))
 
             // Top-Right 1: Compact Pill "Sửa"
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = if (isEditMode) SepiaAccent else SepiaCard,
-                border = if (isEditMode) null else BorderStroke(0.9.dp, SepiaBorder),
+            NeoBrutalistPressBox(
+                onClick = onToggleEdit,
+                isPill = true,
+                shadowOffset = 2.5.dp,
+                pressDepth = 2.dp,
+                borderWidth = 1.5.dp,
+                containerColor = if (isEditMode) SepiaAccent else SepiaCard,
+                borderColor = SepiaInk,
+                shadowColor = SepiaInk,
                 modifier = Modifier
-                    .height(27.dp)
-                    .clip(RoundedCornerShape(50))
-                    .clickable(onClick = onToggleEdit)
+                    .height(30.dp)
                     .testTag("manual_edit_toggle_button")
             ) {
                 Box(
-                    modifier = Modifier.padding(horizontal = 8.dp),
+                    modifier = Modifier.padding(horizontal = 9.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = "Sửa",
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontWeight = FontWeight.Bold,
                         color = if (isEditMode) Color.White else SepiaInk,
                         maxLines = 1,
                         softWrap = false
@@ -1431,45 +1442,49 @@ private fun SepiaTopBar(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = SepiaChrome,
-                                border = BorderStroke(0.8.dp, SepiaBorder),
+                            NeoBrutalistPressBox(
+                                onClick = onDecreaseFont,
+                                isPill = false,
+                                cornerRadius = 10.dp,
+                                shadowOffset = 3.dp,
+                                pressDepth = 2.dp,
+                                borderWidth = 1.5.dp,
+                                containerColor = SepiaChrome,
+                                borderColor = SepiaInk,
+                                shadowColor = SepiaInk,
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(36.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .clickable(onClick = onDecreaseFont)
+                                    .height(39.dp)
                                     .testTag("manual_font_decrease")
                             ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Text(
-                                        text = "a",
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = SepiaInk
-                                    )
-                                }
+                                Text(
+                                    text = "a",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = SepiaInk
+                                )
                             }
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = SepiaChrome,
-                                border = BorderStroke(0.8.dp, SepiaBorder),
+                            NeoBrutalistPressBox(
+                                onClick = onIncreaseFont,
+                                isPill = false,
+                                cornerRadius = 10.dp,
+                                shadowOffset = 3.dp,
+                                pressDepth = 2.dp,
+                                borderWidth = 1.5.dp,
+                                containerColor = SepiaChrome,
+                                borderColor = SepiaInk,
+                                shadowColor = SepiaInk,
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(36.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .clickable(onClick = onIncreaseFont)
+                                    .height(39.dp)
                                     .testTag("manual_font_increase")
                             ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Text(
-                                        text = "A",
-                                        fontSize = 18.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = SepiaInk
-                                    )
-                                }
+                                Text(
+                                    text = "A",
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = SepiaInk
+                                )
                             }
                         }
                     }
@@ -2367,13 +2382,17 @@ private fun ChapterNavFooter(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Surface(
-            shape = RoundedCornerShape(50),
-            color = if (chapterIndex > 0) SepiaChrome else Color.Transparent,
-            border = if (chapterIndex > 0) BorderStroke(0.8.dp, SepiaBorder) else null,
-            modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .clickable(enabled = chapterIndex > 0) { onSelectChapter(chapterIndex - 1) }
+        val hasPrev = chapterIndex > 0
+        NeoBrutalistPressBox(
+            onClick = { onSelectChapter(chapterIndex - 1) },
+            enabled = hasPrev,
+            isPill = true,
+            shadowOffset = if (hasPrev) 3.dp else 0.dp,
+            pressDepth = 2.dp,
+            borderWidth = 1.5.dp,
+            containerColor = if (hasPrev) SepiaCard else Color.Transparent,
+            borderColor = if (hasPrev) SepiaInk else SepiaBorder,
+            shadowColor = if (hasPrev) SepiaInk else Color.Transparent
         ) {
             Row(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
@@ -2382,25 +2401,29 @@ private fun ChapterNavFooter(
                 Icon(
                     imageVector = Icons.AutoMirrored.Rounded.NavigateBefore,
                     contentDescription = null,
-                    tint = if (chapterIndex > 0) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f),
+                    tint = if (hasPrev) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f),
                     modifier = Modifier.size(16.dp)
                 )
                 Text(
                     text = "Chương trước",
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (chapterIndex > 0) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f)
+                    fontWeight = FontWeight.Bold,
+                    color = if (hasPrev) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f)
                 )
             }
         }
 
-        Surface(
-            shape = RoundedCornerShape(50),
-            color = if (chapterIndex < totalChapters - 1) SepiaChrome else Color.Transparent,
-            border = if (chapterIndex < totalChapters - 1) BorderStroke(0.8.dp, SepiaBorder) else null,
-            modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .clickable(enabled = chapterIndex < totalChapters - 1) { onSelectChapter(chapterIndex + 1) }
+        val hasNext = chapterIndex < totalChapters - 1
+        NeoBrutalistPressBox(
+            onClick = { onSelectChapter(chapterIndex + 1) },
+            enabled = hasNext,
+            isPill = true,
+            shadowOffset = if (hasNext) 3.dp else 0.dp,
+            pressDepth = 2.dp,
+            borderWidth = 1.5.dp,
+            containerColor = if (hasNext) SepiaCard else Color.Transparent,
+            borderColor = if (hasNext) SepiaInk else SepiaBorder,
+            shadowColor = if (hasNext) SepiaInk else Color.Transparent
         ) {
             Row(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
@@ -2409,13 +2432,13 @@ private fun ChapterNavFooter(
                 Text(
                     text = "Chương sau",
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (chapterIndex < totalChapters - 1) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f)
+                    fontWeight = FontWeight.Bold,
+                    color = if (hasNext) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f)
                 )
                 Icon(
                     imageVector = Icons.AutoMirrored.Rounded.NavigateNext,
                     contentDescription = null,
-                    tint = if (chapterIndex < totalChapters - 1) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f),
+                    tint = if (hasNext) SepiaInk else SepiaInkMuted.copy(alpha = 0.4f),
                     modifier = Modifier.size(16.dp)
                 )
             }
@@ -2488,20 +2511,17 @@ private fun QuickSaveReplaceRuleChipBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = SepiaCard,
-                border = BorderStroke(1.dp, SepiaAccent.copy(alpha = 0.65f)),
+            NeoBrutalistPressBox(
+                onClick = onSaveRule,
+                isPill = true,
+                shadowOffset = 3.dp,
+                pressDepth = 2.dp,
+                borderWidth = 1.5.dp,
+                containerColor = SepiaCard,
+                borderColor = SepiaInk,
+                shadowColor = SepiaInk,
                 modifier = Modifier
                     .weight(1f, fill = false)
-                    .shadow(
-                        elevation = 3.dp,
-                        shape = RoundedCornerShape(50),
-                        ambientColor = Color.Black.copy(alpha = 0.08f),
-                        spotColor = Color.Black.copy(alpha = 0.12f)
-                    )
-                    .clip(RoundedCornerShape(50))
-                    .clickable(onClick = onSaveRule)
                     .testTag("manual_quick_save_rule_chip")
             ) {
                 Row(

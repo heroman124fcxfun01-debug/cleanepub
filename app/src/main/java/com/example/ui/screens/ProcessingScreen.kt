@@ -50,15 +50,22 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.border
+import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.pipeline.PipelineStep
 import com.example.pipeline.ProcessingPhase
 import com.example.pipeline.ProcessingSnapshot
 import com.example.pipeline.StepState
+import com.example.ui.components.Ios3DSurfacePillButton
 import com.example.ui.components.IosCard
 import com.example.ui.components.IosHairlineDivider
 import com.example.ui.components.IosPrimaryButton
 import com.example.ui.components.IosSectionHeader
+import com.example.ui.components.NeoBrutalistPressBox
+import com.example.ui.components.neoHardOffsetShadow
+import com.example.ui.components.neoHardShadowColor
+import com.example.ui.components.neoInkBorderColor
 import com.example.ui.theme.JetBrainsMonoFamily
 
 @Composable
@@ -109,20 +116,27 @@ fun ProcessingScreen(
                         ) {
                             Text(
                                 text = stringResource(R.string.processing_title),
-                                style = MaterialTheme.typography.headlineMedium,
-                                color = MaterialTheme.colorScheme.onBackground
+                                fontSize = 21.sp,
+                                lineHeight = 25.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.onBackground,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             if (snapshot.phase == ProcessingPhase.RUNNING) {
                                 Surface(
                                     shape = RoundedCornerShape(50),
-                                    color = MaterialTheme.colorScheme.primaryContainer
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    border = BorderStroke(1.5.dp, neoInkBorderColor())
                                 ) {
                                     Text(
                                         text = stringResource(R.string.processing_background_badge),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                                     )
                                 }
                             }
@@ -160,12 +174,16 @@ fun ProcessingScreen(
                             if (snapshot.stats.totalChapters > 0) {
                                 Surface(
                                     shape = RoundedCornerShape(50),
-                                    color = MaterialTheme.colorScheme.surfaceVariant
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    border = BorderStroke(1.2.dp, neoInkBorderColor())
                                 ) {
                                     Text(
                                         text = "${snapshot.stats.totalChapters} chương",
                                         style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        softWrap = false,
                                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                                     )
                                 }
@@ -204,10 +222,11 @@ fun ProcessingScreen(
                             Surface(
                                 shape = RoundedCornerShape(50),
                                 color = MaterialTheme.colorScheme.surfaceVariant,
+                                border = BorderStroke(1.2.dp, neoInkBorderColor()),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Icon(
@@ -220,6 +239,7 @@ fun ProcessingScreen(
                                     Text(
                                         text = "${ctx.genre} · Bảo vệ ${ctx.properNouns.size} tên riêng",
                                         style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
                                         color = MaterialTheme.colorScheme.onSurface,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
@@ -266,12 +286,22 @@ fun ProcessingScreen(
                 // Error Banner (if failed)
                 if (snapshot.phase == ProcessingPhase.ERROR && !snapshot.errorMessage.isNullOrBlank()) {
                     item(key = "error_card") {
-                        Surface(
-                            shape = RoundedCornerShape(22.dp),
-                            color = MaterialTheme.colorScheme.errorContainer,
-                            modifier = Modifier.fillMaxWidth()
+                        val errShape = RoundedCornerShape(14.dp)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(end = 3.dp, bottom = 3.dp)
+                                .neoHardOffsetShadow(
+                                    cornerRadius = 14.dp,
+                                    offsetX = 3.dp,
+                                    offsetY = 3.dp,
+                                    shadowColor = neoHardShadowColor()
+                                )
+                                .clip(errShape)
+                                .background(MaterialTheme.colorScheme.errorContainer)
+                                .border(1.5.dp, neoInkBorderColor(), errShape)
                         ) {
-                            Column(modifier = Modifier.padding(16.dp)) {
+                            Column(modifier = Modifier.padding(14.dp)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(
                                         imageVector = Icons.Rounded.Error,
@@ -284,7 +314,7 @@ fun ProcessingScreen(
                                         text = "Xử lý gặp sự cố",
                                         style = MaterialTheme.typography.titleSmall,
                                         color = MaterialTheme.colorScheme.error,
-                                        fontWeight = FontWeight.SemiBold
+                                        fontWeight = FontWeight.Bold
                                     )
                                 }
                                 Spacer(modifier = Modifier.height(6.dp))
@@ -335,19 +365,26 @@ fun ProcessingScreen(
             ) {
                 when (snapshot.phase) {
                     ProcessingPhase.RUNNING -> {
-                        OutlinedButton(
+                        NeoBrutalistPressBox(
                             onClick = onCancelClick,
+                            isPill = true,
+                            shadowOffset = 3.dp,
+                            pressDepth = 2.dp,
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            borderColor = neoInkBorderColor(),
+                            shadowColor = neoHardShadowColor(),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(50.dp)
-                                .testTag("cancel_processing_button"),
-                            shape = RoundedCornerShape(50),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f))
+                                .height(49.dp)
+                                .testTag("cancel_processing_button")
                         ) {
                             Text(
                                 text = stringResource(R.string.processing_cancel),
-                                style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.error
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -357,22 +394,17 @@ fun ProcessingScreen(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            OutlinedButton(
+                            Ios3DSurfacePillButton(
+                                text = stringResource(R.string.processing_back_home),
+                                height = 46.dp,
                                 onClick = onBackHomeClick,
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(52.dp)
-                                    .testTag("processing_back_home_button"),
-                                shape = RoundedCornerShape(50),
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-                            ) {
-                                Text(
-                                    text = stringResource(R.string.processing_back_home),
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
+                                    .testTag("processing_back_home_button")
+                            )
                             IosPrimaryButton(
                                 text = stringResource(R.string.processing_retry),
+                                height = 46.dp,
                                 onClick = onRetryClick,
                                 modifier = Modifier
                                     .weight(1f)
@@ -403,16 +435,17 @@ private fun LiveMetricCard(
     ) {
         Box(
             modifier = Modifier
-                .size(32.dp)
-                .clip(CircleShape)
-                .background(iconBg),
+                .size(30.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(iconBg)
+                .border(1.2.dp, neoInkBorderColor(), RoundedCornerShape(8.dp)),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
                 tint = iconTint,
-                modifier = Modifier.size(17.dp)
+                modifier = Modifier.size(16.dp)
             )
         }
         Spacer(modifier = Modifier.height(8.dp))

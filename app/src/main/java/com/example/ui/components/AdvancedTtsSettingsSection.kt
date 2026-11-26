@@ -29,6 +29,7 @@ import androidx.compose.material.icons.rounded.SpeakerPhone
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
@@ -78,20 +79,23 @@ fun DeviceOfflineVoicesSection(
     onPreviewSystemVoice: (String?) -> Unit
 ) {
     val context = LocalContext.current
-    val cardBg = Color(0xFFF2F2F7)
-    val itemBg = Color(0xFFFFFFFF)
-    val borderCol = Color(0xFFE5E5EA)
-    val primaryInk = Color(0xFF1C1C1E)
-    val secondaryInk = Color(0xFF6E6E73)
-    val highQualityGreen = Color(0xFF1E8E3E)
+    val cardBg = neoPaperSurfaceColor()
+    val itemBg = neoSecondaryPaperColor()
+    val borderCol = neoInkBorderColor()
+    val primaryInk = MaterialTheme.colorScheme.onSurface
+    val secondaryInk = MaterialTheme.colorScheme.onSurfaceVariant
+    val highQualityGreen = Color(0xFF16A34A)
 
     val highQualityCount = availableDeviceVoices.count { it.isHighQuality }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(end = 3.dp, bottom = 3.dp)
+            .neoHardOffsetShadow(cornerRadius = 14.dp, offsetX = 3.dp, offsetY = 3.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(cardBg)
+            .border(1.5.dp, borderCol, RoundedCornerShape(14.dp))
             .padding(12.dp)
             .testTag("device_offline_voices_section"),
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -109,9 +113,10 @@ fun DeviceOfflineVoicesSection(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(26.dp)
+                        .size(28.dp)
                         .clip(CircleShape)
-                        .background(IosBlue.copy(alpha = 0.12f)),
+                        .background(IosBlue.copy(alpha = 0.14f))
+                        .border(1.2.dp, borderCol, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -144,15 +149,10 @@ fun DeviceOfflineVoicesSection(
                 }
             }
 
-            Box(
-                modifier = Modifier
-                    .size(28.dp)
-                    .clip(CircleShape)
-                    .background(itemBg)
-                    .border(0.5.dp, borderCol, CircleShape)
-                    .clickable(onClick = onRefreshDeviceVoices)
-                    .testTag("refresh_device_voices_button"),
-                contentAlignment = Alignment.Center
+            Ios3DCircleIconButton(
+                onClick = onRefreshDeviceVoices,
+                size = 30.dp,
+                modifier = Modifier.testTag("refresh_device_voices_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Refresh,
@@ -169,7 +169,7 @@ fun DeviceOfflineVoicesSection(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
                 .background(itemBg)
-                .border(0.5.dp, borderCol, RoundedCornerShape(12.dp))
+                .border(1.5.dp, borderCol, RoundedCornerShape(12.dp))
         ) {
             // Tùy chọn mặc định: Tự động chọn giọng chất lượng cao nhất theo hồ sơ Nam/Nữ
             val isAutoSelected = selectedSystemVoiceName.isNullOrBlank()
@@ -278,14 +278,18 @@ fun DeviceOfflineVoicesSection(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Box(
+                        NeoBrutalistPressBox(
+                            onClick = { onPreviewSystemVoice(voice.voiceName) },
+                            isCircle = true,
+                            shadowOffset = 2.dp,
+                            pressDepth = 1.5.dp,
+                            borderWidth = 1.2.dp,
+                            containerColor = cardBg,
+                            borderColor = borderCol,
+                            shadowColor = neoHardShadowColor(),
                             modifier = Modifier
-                                .size(26.dp)
-                                .clip(CircleShape)
-                                .background(cardBg)
-                                .clickable { onPreviewSystemVoice(voice.voiceName) }
-                                .testTag("device_voice_preview_$idx"),
-                            contentAlignment = Alignment.Center
+                                .size(28.dp)
+                                .testTag("device_voice_preview_$idx")
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.PlayArrow,
@@ -309,34 +313,37 @@ fun DeviceOfflineVoicesSection(
         }
 
         // Nút gọi Intent hệ thống ACTION_INSTALL_TTS_DATA để tải thêm gói giọng tiếng Việt chất lượng cao
-        Surface(
-            shape = RoundedCornerShape(50),
-            color = itemBg,
-            border = BorderStroke(0.6.dp, IosBlue.copy(alpha = 0.45f)),
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(50))
-                .clickable {
-                    val installIntent = Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).apply {
+        NeoBrutalistPressBox(
+            onClick = {
+                val installIntent = Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                val launched = runCatching {
+                    context.startActivity(installIntent)
+                    true
+                }.getOrDefault(false)
+                if (!launched) {
+                    val fallbackIntent = Intent("com.android.settings.TTS_SETTINGS").apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
-                    val launched = runCatching {
-                        context.startActivity(installIntent)
-                        true
-                    }.getOrDefault(false)
-                    if (!launched) {
-                        val fallbackIntent = Intent("com.android.settings.TTS_SETTINGS").apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        }
-                        runCatching { context.startActivity(fallbackIntent) }.onFailure {
-                            Toast.makeText(
-                                context,
-                                "Vui lòng mở Cài đặt Android → Chuyển văn bản thành giọng nói để tải thêm giọng tiếng Việt.",
-                                Toast.LENGTH_LONG
-                            ).show()
-                        }
+                    runCatching { context.startActivity(fallbackIntent) }.onFailure {
+                        Toast.makeText(
+                            context,
+                            "Vui lòng mở Cài đặt Android → Chuyển văn bản thành giọng nói để tải thêm giọng tiếng Việt.",
+                            Toast.LENGTH_LONG
+                        ).show()
                     }
                 }
+            },
+            isPill = true,
+            shadowOffset = 3.dp,
+            pressDepth = 2.dp,
+            borderWidth = 1.5.dp,
+            containerColor = cardBg,
+            borderColor = borderCol,
+            shadowColor = neoHardShadowColor(),
+            modifier = Modifier
+                .fillMaxWidth()
                 .testTag("install_tts_data_button")
         ) {
             Row(
@@ -356,7 +363,7 @@ fun DeviceOfflineVoicesSection(
                 Text(
                     text = "Tải thêm giọng chất lượng cao",
                     fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.Bold,
                     color = IosBlue
                 )
             }
@@ -381,11 +388,11 @@ fun AdvancedCustomVoiceSettingsSection(
     onPreviewAdvanced: (pitch: Float, rate: Float, pauseMs: Int) -> Unit,
     onResetDefaults: () -> Unit
 ) {
-    val cardBg = Color(0xFFF2F2F7)
-    val itemBg = Color(0xFFFFFFFF)
-    val borderCol = Color(0xFFE5E5EA)
-    val primaryInk = Color(0xFF1C1C1E)
-    val secondaryInk = Color(0xFF6E6E73)
+    val cardBg = neoPaperSurfaceColor()
+    val itemBg = neoSecondaryPaperColor()
+    val borderCol = neoInkBorderColor()
+    val primaryInk = MaterialTheme.colorScheme.onSurface
+    val secondaryInk = MaterialTheme.colorScheme.onSurfaceVariant
 
     // Trạng thái kéo mượt tại chỗ (đồng bộ theo readerPrefs và lưu ngay khi thả/thay đổi)
     var sliderPitch by remember(readerPrefs.customPitch) { mutableFloatStateOf(readerPrefs.customPitch) }
@@ -395,8 +402,11 @@ fun AdvancedCustomVoiceSettingsSection(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(end = 3.dp, bottom = 3.dp)
+            .neoHardOffsetShadow(cornerRadius = 14.dp, offsetX = 3.dp, offsetY = 3.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(cardBg)
+            .border(1.5.dp, borderCol, RoundedCornerShape(14.dp))
             .padding(12.dp)
             .testTag("advanced_tts_settings_section"),
         verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -414,9 +424,10 @@ fun AdvancedCustomVoiceSettingsSection(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(26.dp)
+                        .size(28.dp)
                         .clip(CircleShape)
-                        .background(IosBlue.copy(alpha = 0.12f)),
+                        .background(IosBlue.copy(alpha = 0.14f))
+                        .border(1.2.dp, borderCol, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -466,7 +477,7 @@ fun AdvancedCustomVoiceSettingsSection(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
                 .background(itemBg)
-                .border(0.5.dp, borderCol, RoundedCornerShape(12.dp))
+                .border(1.5.dp, borderCol, RoundedCornerShape(12.dp))
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
@@ -638,18 +649,22 @@ fun AdvancedCustomVoiceSettingsSection(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = IosBlue,
+                NeoBrutalistPressBox(
+                    onClick = {
+                        onPitchChanged(sliderPitch)
+                        onSpeechRateChanged(sliderRate)
+                        onSentencePauseChanged(sliderPauseMs)
+                        onPreviewAdvanced(sliderPitch, sliderRate, sliderPauseMs)
+                    },
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = IosBlue,
+                    borderColor = borderCol,
+                    shadowColor = neoHardShadowColor(),
                     modifier = Modifier
                         .weight(1f)
-                        .clip(RoundedCornerShape(50))
-                        .clickable {
-                            onPitchChanged(sliderPitch)
-                            onSpeechRateChanged(sliderRate)
-                            onSentencePauseChanged(sliderPauseMs)
-                            onPreviewAdvanced(sliderPitch, sliderRate, sliderPauseMs)
-                        }
                         .testTag("advanced_tts_preview_button")
                 ) {
                     Row(
@@ -667,25 +682,28 @@ fun AdvancedCustomVoiceSettingsSection(
                         Text(
                             text = "Nghe thử",
                             fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             color = Color.White
                         )
                     }
                 }
 
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = cardBg,
-                    border = BorderStroke(0.5.dp, borderCol),
+                NeoBrutalistPressBox(
+                    onClick = {
+                        sliderPitch = LibraryManager.DEFAULT_ADVANCED_PITCH
+                        sliderRate = LibraryManager.DEFAULT_ADVANCED_RATE
+                        sliderPauseMs = LibraryManager.DEFAULT_SENTENCE_PAUSE_MS
+                        onResetDefaults()
+                    },
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = cardBg,
+                    borderColor = borderCol,
+                    shadowColor = neoHardShadowColor(),
                     modifier = Modifier
                         .weight(1f)
-                        .clip(RoundedCornerShape(50))
-                        .clickable {
-                            sliderPitch = LibraryManager.DEFAULT_ADVANCED_PITCH
-                            sliderRate = LibraryManager.DEFAULT_ADVANCED_RATE
-                            sliderPauseMs = LibraryManager.DEFAULT_SENTENCE_PAUSE_MS
-                            onResetDefaults()
-                        }
                         .testTag("advanced_tts_reset_button")
                 ) {
                     Row(
@@ -696,14 +714,14 @@ fun AdvancedCustomVoiceSettingsSection(
                         Icon(
                             imageVector = Icons.Rounded.RestartAlt,
                             contentDescription = null,
-                            tint = secondaryInk,
+                            tint = primaryInk,
                             modifier = Modifier.size(15.dp)
                         )
                         Spacer(modifier = Modifier.size(4.dp))
                         Text(
                             text = "Khôi phục mặc định",
                             fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             color = primaryInk,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis

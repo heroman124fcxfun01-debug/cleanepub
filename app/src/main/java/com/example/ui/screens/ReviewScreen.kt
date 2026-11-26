@@ -71,22 +71,25 @@ import com.example.pipeline.ProcessingSnapshot
 import com.example.pipeline.SaveMode
 import com.example.pipeline.TocInspectionResult
 import com.example.ui.SaveUiState
+import com.example.ui.components.Ios3DCircleIconButton
+import com.example.ui.components.Ios3DSurfacePillButton
 import com.example.ui.components.IosCard
 import com.example.ui.components.IosFloatingDialog
 import com.example.ui.components.IosHairlineDivider
 import com.example.ui.components.IosPrimaryButton
 import com.example.ui.components.IosSaveSuccessDialog
 import com.example.ui.components.IosSectionHeader
+import com.example.ui.components.NeoBrutalistPressBox
 import com.example.ui.components.SaveDialog
+import com.example.ui.components.neoHardOffsetShadow
+import com.example.ui.components.neoHardShadowColor
+import com.example.ui.components.neoInkBorderColor
+import com.example.ui.components.neoPaperSurfaceColor
 import com.example.ui.theme.IosGreen
 import com.example.ui.theme.IosOrange
-import com.example.ui.theme.IosPillBorderBottomLight
-import com.example.ui.theme.IosPillBottomDark
-import com.example.ui.theme.IosPillBottomLight
-import com.example.ui.theme.IosPillTopDark
-import com.example.ui.theme.IosPillTopLight
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.LocalIsDarkTheme
+import com.example.ui.theme.NeoEmeraldShadow
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -128,32 +131,32 @@ fun ReviewScreen(
                 .fillMaxSize()
                 .statusBarsPadding()
         ) {
-            // Top Bar (iOS minimalist + compact Metadata Edit button)
+            // Top Bar (Swiss Neo-Brutalist 3D Back Stamp + Title + Metadata Pill)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                IconButton(
+                Ios3DCircleIconButton(
                     onClick = onFinishToHome,
-                    modifier = Modifier
-                        .size(44.dp)
-                        .testTag("review_back_button")
+                    size = 36.dp,
+                    modifier = Modifier.testTag("review_back_button")
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Rounded.ArrowBackIos,
                         contentDescription = stringResource(R.string.cd_back),
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp)
+                        tint = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(15.dp)
                     )
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = stringResource(R.string.review_title),
-                        fontSize = 18.sp,
+                        fontSize = 19.sp,
                         lineHeight = 22.sp,
-                        fontWeight = FontWeight.Bold,
+                        fontWeight = FontWeight.ExtraBold,
                         color = MaterialTheme.colorScheme.onBackground,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -162,21 +165,22 @@ fun ReviewScreen(
                         text = snapshot.metadata?.title?.ifBlank { snapshot.sourceFile?.displayName.orEmpty() }
                             ?: snapshot.sourceFile?.displayName.orEmpty(),
                         fontSize = 11.sp,
-                        lineHeight = 15.sp,
+                        lineHeight = 14.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
                 if (snapshot.metadata != null) {
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        modifier = Modifier
-                            .padding(end = 6.dp)
-                            .clip(RoundedCornerShape(50))
-                            .testTag("review_edit_metadata_button")
-                            .clickable(onClick = onEditMetadataClick)
+                    NeoBrutalistPressBox(
+                        onClick = onEditMetadataClick,
+                        isPill = true,
+                        shadowOffset = 3.dp,
+                        pressDepth = 2.dp,
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        borderColor = neoInkBorderColor(),
+                        shadowColor = neoHardShadowColor(),
+                        modifier = Modifier.testTag("review_edit_metadata_button")
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -187,14 +191,15 @@ fun ReviewScreen(
                                 imageVector = Icons.Rounded.Edit,
                                 contentDescription = "Sửa Metadata",
                                 tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier.size(13.dp)
                             )
                             Text(
                                 text = "Metadata",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -338,13 +343,18 @@ fun ReviewScreen(
                 // Save Error Alert (if saving failed)
                 if (saveUiState is SaveUiState.Error) {
                     item(key = "save_error") {
-                        Surface(
-                            shape = RoundedCornerShape(50),
-                            color = MaterialTheme.colorScheme.errorContainer,
-                            modifier = Modifier.fillMaxWidth()
+                        val errShape = RoundedCornerShape(14.dp)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(end = 3.dp, bottom = 3.dp)
+                                .neoHardOffsetShadow(cornerRadius = 14.dp, offsetX = 3.dp, offsetY = 3.dp)
+                                .clip(errShape)
+                                .background(MaterialTheme.colorScheme.errorContainer)
+                                .border(1.5.dp, neoInkBorderColor(), errShape)
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
@@ -355,7 +365,7 @@ fun ReviewScreen(
                                     modifier = Modifier.weight(1f)
                                 )
                                 TextButton(onClick = onDismissSaveError) {
-                                    Text("Đóng", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                                    Text("Đóng", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error)
                                 }
                             }
                         }
@@ -368,12 +378,14 @@ fun ReviewScreen(
                         title = "${stringResource(R.string.review_section_diffs)} (${snapshot.diffs.size})",
                         trailing = if (snapshot.diffs.isNotEmpty()) {
                             {
-                                Surface(
-                                    shape = RoundedCornerShape(50),
-                                    color = MaterialTheme.colorScheme.primaryContainer,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(50))
-                                        .clickable { onSetAllDiffs(!allSelected) }
+                                NeoBrutalistPressBox(
+                                    onClick = { onSetAllDiffs(!allSelected) },
+                                    isPill = true,
+                                    shadowOffset = 3.dp,
+                                    pressDepth = 2.dp,
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    borderColor = neoInkBorderColor(),
+                                    shadowColor = neoHardShadowColor()
                                 ) {
                                     Text(
                                         text = if (allSelected) {
@@ -383,8 +395,10 @@ fun ReviewScreen(
                                         },
                                         fontSize = 11.sp,
                                         color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                                     )
                                 }
                             }
@@ -552,42 +566,23 @@ private fun ContinueEdit3DPillButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val isDark = LocalIsDarkTheme.current
-    val pillShape = RoundedCornerShape(50)
+    val inkBorder = neoInkBorderColor()
+    val paperBg = neoPaperSurfaceColor()
 
-    val bgBrush = Brush.verticalGradient(
-        colors = if (isDark) {
-            listOf(Color(0xFF3A3A3E), Color(0xFF28282B))
-        } else {
-            listOf(Color(0xFFFFFFFF), Color(0xFFECEEF3))
-        }
-    )
-
-    val borderBrush = Brush.verticalGradient(
-        colors = if (isDark) {
-            listOf(Color.White.copy(alpha = 0.24f), Color.White.copy(alpha = 0.06f))
-        } else {
-            listOf(Color.White.copy(alpha = 0.96f), IosPillBorderBottomLight)
-        }
-    )
-
-    Box(
-        modifier = modifier
-            .height(46.dp)
-            .shadow(
-                elevation = if (enabled) 6.dp else 1.dp,
-                shape = pillShape,
-                ambientColor = Color.Black.copy(alpha = 0.10f),
-                spotColor = Color.Black.copy(alpha = 0.16f)
-            )
-            .clip(pillShape)
-            .background(brush = bgBrush)
-            .border(width = 1.dp, brush = borderBrush, shape = pillShape)
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 14.dp),
+    NeoBrutalistPressBox(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier.height(48.dp),
+        isPill = true,
+        shadowOffset = 3.dp,
+        pressDepth = 2.dp,
+        containerColor = if (enabled) paperBg else MaterialTheme.colorScheme.surfaceVariant,
+        borderColor = if (enabled) inkBorder else inkBorder.copy(alpha = 0.4f),
+        shadowColor = neoHardShadowColor(),
         contentAlignment = Alignment.Center
     ) {
         Row(
+            modifier = Modifier.padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
@@ -595,14 +590,14 @@ private fun ContinueEdit3DPillButton(
                 imageVector = Icons.Rounded.EditNote,
                 contentDescription = null,
                 tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp)
+                modifier = Modifier.size(17.dp)
             )
             Spacer(modifier = Modifier.width(6.dp))
             Text(
                 text = text,
-                fontSize = 15.sp,
-                lineHeight = 19.sp,
-                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp,
+                lineHeight = 16.sp,
+                fontWeight = FontWeight.Bold,
                 color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 softWrap = false,
@@ -654,13 +649,16 @@ private fun ContinueEditModeDialog(
             Spacer(modifier = Modifier.height(14.dp))
 
             // Option 1: Giữ những gì đã sửa
-            Surface(
-                shape = pillShape,
-                color = MaterialTheme.colorScheme.primaryContainer,
+            NeoBrutalistPressBox(
+                onClick = { onSelectMode(ManualEditorMode.KEEP_CLEANED) },
+                cornerRadius = 14.dp,
+                shadowOffset = 3.dp,
+                pressDepth = 2.dp,
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                borderColor = neoInkBorderColor(),
+                shadowColor = neoHardShadowColor(),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(pillShape)
-                    .clickable { onSelectMode(ManualEditorMode.KEEP_CLEANED) }
                     .testTag("continue_edit_keep_cleaned")
             ) {
                 Row(
@@ -672,8 +670,9 @@ private fun ContinueEditModeDialog(
                     Box(
                         modifier = Modifier
                             .size(32.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f))
+                            .border(1.2.dp, neoInkBorderColor(), RoundedCornerShape(8.dp)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
@@ -687,9 +686,9 @@ private fun ContinueEditModeDialog(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "Giữ những gì đã sửa",
-                            fontSize = 14.sp,
-                            lineHeight = 18.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 13.sp,
+                            lineHeight = 16.sp,
+                            fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -709,13 +708,16 @@ private fun ContinueEditModeDialog(
             Spacer(modifier = Modifier.height(10.dp))
 
             // Option 2: Giữ nguyên
-            Surface(
-                shape = pillShape,
-                color = MaterialTheme.colorScheme.surfaceVariant,
+            NeoBrutalistPressBox(
+                onClick = { onSelectMode(ManualEditorMode.KEEP_ORIGINAL) },
+                cornerRadius = 14.dp,
+                shadowOffset = 3.dp,
+                pressDepth = 2.dp,
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                borderColor = neoInkBorderColor(),
+                shadowColor = neoHardShadowColor(),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(pillShape)
-                    .clickable { onSelectMode(ManualEditorMode.KEEP_ORIGINAL) }
                     .testTag("continue_edit_keep_original")
             ) {
                 Row(
@@ -727,8 +729,9 @@ private fun ContinueEditModeDialog(
                     Box(
                         modifier = Modifier
                             .size(32.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)),
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(neoPaperSurfaceColor())
+                            .border(1.2.dp, neoInkBorderColor(), RoundedCornerShape(8.dp)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
@@ -742,9 +745,9 @@ private fun ContinueEditModeDialog(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "Giữ nguyên",
-                            fontSize = 14.sp,
-                            lineHeight = 18.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 13.sp,
+                            lineHeight = 16.sp,
+                            fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -763,19 +766,15 @@ private fun ContinueEditModeDialog(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            TextButton(
+            Ios3DSurfacePillButton(
+                text = "Hủy",
+                height = 40.dp,
+                recessed = true,
                 onClick = onDismiss,
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("continue_edit_cancel")
-            ) {
-                Text(
-                    text = "Hủy",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            )
         }
     }
 }
@@ -792,65 +791,38 @@ private fun RegenerateToc3DPill(
     onToggle: (Boolean) -> Unit
 ) {
     val isDark = LocalIsDarkTheme.current
-    val pillShape = RoundedCornerShape(50)
+    val inkBorder = neoInkBorderColor()
     val hasSufficient = tocInspection?.hasSufficientToc == true
     val statusText = tocInspection?.statusSummary ?: "Chưa có / Thiếu mục lục"
     val statusColor = if (hasSufficient) IosGreen else IosOrange
 
-    val surfaceBrush = Brush.verticalGradient(
-        colors = if (isDark) {
-            listOf(IosPillTopDark, IosPillBottomDark)
-        } else {
-            listOf(IosPillTopLight, IosPillBottomLight)
-        }
-    )
-
-    val bevelBorderBrush = Brush.verticalGradient(
-        colors = if (isDark) {
-            listOf(
-                Color.White.copy(alpha = 0.22f),
-                if (regenerateToc) MaterialTheme.colorScheme.primary.copy(alpha = 0.30f) else Color.White.copy(alpha = 0.05f)
-            )
-        } else {
-            listOf(
-                Color.White.copy(alpha = 0.96f),
-                if (regenerateToc) MaterialTheme.colorScheme.primary.copy(alpha = 0.28f) else IosPillBorderBottomLight
-            )
-        }
-    )
-
-    Box(
+    NeoBrutalistPressBox(
+        onClick = { onToggle(!regenerateToc) },
         modifier = Modifier
             .fillMaxWidth()
-            .shadow(
-                elevation = 5.dp,
-                shape = pillShape,
-                ambientColor = Color.Black.copy(alpha = 0.08f),
-                spotColor = Color.Black.copy(alpha = 0.14f)
-            )
-            .clip(pillShape)
-            .background(brush = surfaceBrush)
-            .border(
-                width = 1.dp,
-                brush = bevelBorderBrush,
-                shape = pillShape
-            )
-            .clickable { onToggle(!regenerateToc) }
-            .testTag("review_toc_toggle_pill")
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .testTag("review_toc_toggle_pill"),
+        cornerRadius = 14.dp,
+        shadowOffset = 3.dp,
+        pressDepth = 2.dp,
+        containerColor = neoPaperSurfaceColor(),
+        borderColor = inkBorder,
+        shadowColor = if (regenerateToc && !isDark) NeoEmeraldShadow else neoHardShadowColor()
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
                     .size(30.dp)
-                    .clip(CircleShape)
+                    .clip(RoundedCornerShape(8.dp))
                     .background(
                         if (hasSufficient) MaterialTheme.colorScheme.secondaryContainer
                         else MaterialTheme.colorScheme.tertiaryContainer
-                    ),
+                    )
+                    .border(1.2.dp, inkBorder, RoundedCornerShape(8.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
@@ -867,8 +839,8 @@ private fun RegenerateToc3DPill(
                 Text(
                     text = "Làm lại mục lục",
                     fontSize = 13.sp,
-                    lineHeight = 17.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = 16.sp,
+                    fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     softWrap = false,
@@ -878,7 +850,7 @@ private fun RegenerateToc3DPill(
                     text = statusText,
                     fontSize = 11.sp,
                     lineHeight = 14.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontWeight = FontWeight.SemiBold,
                     color = statusColor,
                     maxLines = 1,
                     softWrap = false,
@@ -896,7 +868,7 @@ private fun RegenerateToc3DPill(
                     .testTag("review_toc_switch"),
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White,
-                    checkedTrackColor = MaterialTheme.colorScheme.secondary,
+                    checkedTrackColor = IosGreen,
                     uncheckedThumbColor = Color.White,
                     uncheckedTrackColor = MaterialTheme.colorScheme.outline,
                     uncheckedBorderColor = Color.Transparent

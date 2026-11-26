@@ -1,16 +1,22 @@
 package com.example.ui.screens
 
-import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -19,8 +25,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -32,34 +38,43 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.MenuBook
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowBackIosNew
-import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.AutoStories
+import androidx.compose.material.icons.rounded.Category
 import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Cloud
+import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.CollectionsBookmark
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,10 +85,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -85,26 +99,65 @@ import com.example.data.BookCollection
 import com.example.data.LibraryBook
 import com.example.data.LibraryManager
 import com.example.ui.LibraryImportFlowState
-import com.example.ui.components.IosFloatingDialog
+import com.example.ui.components.AddBooksToCollectionDialog
+import com.example.ui.components.CreateCollectionDialog
+import com.example.ui.components.Ios3DCircleIconButton
 import com.example.ui.components.IosPrimaryButton
+import com.example.ui.components.LibraryBookCoverThumbnail
+import com.example.ui.components.LibraryImportFlowDialogs
+import com.example.ui.components.LibraryInfoStatsDialog
+import com.example.ui.components.NeoBrutalistPressBox
+import com.example.ui.components.NeoPaperStackContainer
+import com.example.ui.components.PickCollectionForBookDialog
+import com.example.ui.components.neoHardOffsetShadow
+import com.example.ui.components.neoHardShadowColor
+import com.example.ui.components.neoInkBorderColor
+import com.example.ui.components.neoPaperSurfaceColor
+import com.example.ui.components.neoSecondaryPaperColor
 import com.example.ui.theme.IosBlue
 import com.example.ui.theme.IosDarkBlue
-import com.example.ui.theme.IosGreen
-import com.example.ui.theme.IosGreenSoft
-import com.example.ui.theme.IosHairline
+import com.example.ui.theme.IosOrange
 import com.example.ui.theme.IosRed
 import com.example.ui.theme.IosSeparator
+import com.example.ui.theme.LibraryCloudAccent
+import com.example.ui.theme.LibraryCoralRed
+import com.example.ui.theme.LibraryCoralSoft
+import com.example.ui.theme.LibraryCoralText
 import com.example.ui.theme.LocalIsDarkTheme
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.io.File
+import com.example.ui.theme.NeoInkLight
+import kotlin.math.roundToInt
 
-private enum class LibraryTab(val label: String) {
-    ALL("Tất cả sách"),
-    RECENT("Đọc gần đây"),
-    COLLECTIONS("Bộ sưu tập")
+private enum class LibraryFilterMode(val label: String) {
+    BOOK_VAULT("Kho sách"),
+    BOOKS("Sách"),
+    AUTHORS("Tác giả"),
+    SERIES("Bộ sách"),
+    GENRES("Thể loại"),
+    FORMATS("Định dạng"),
+    COLLECTIONS("Sưu tập")
 }
 
+private enum class LibrarySortOption(val label: String) {
+    RECENT("Đọc gần đây"),
+    NEWEST("Mới thêm gần nhất"),
+    TITLE_AZ("Tên sách A–Z"),
+    AUTHOR_AZ("Tác giả A–Z"),
+    PROGRESS_DESC("Tiến độ đọc cao nhất")
+}
+
+private enum class LibraryReadStatusFilter(val label: String) {
+    ALL("Tất cả"),
+    READING("Đang đọc"),
+    UNREAD("Chưa đọc"),
+    COMPLETED("Đã đọc xong")
+}
+
+private data class LibraryGroupDrillDown(
+    val title: String,
+    val books: List<LibraryBook>
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BookLibraryScreen(
     books: List<LibraryBook>,
@@ -113,11 +166,13 @@ fun BookLibraryScreen(
     importFlowState: LibraryImportFlowState = LibraryImportFlowState.Idle,
     cleaningProgressPercent: Int = 0,
     cleaningStatusMessage: String = "",
-    onBackClick: () -> Unit,
     onImportBookClick: () -> Unit,
     onOpenReaderGeneralSettingsClick: () -> Unit = {},
     onConfirmCleanBeforeImport: () -> Unit = {},
     onConfirmDirectImportNoClean: () -> Unit = {},
+    onConfirmBatchClean: () -> Unit = {},
+    onConfirmBatchNoClean: () -> Unit = {},
+    onCancelBatchImport: () -> Unit = {},
     onCancelAutoClean: () -> Unit = {},
     onContinueEditCleanedBook: () -> Unit = {},
     onAcceptCleanedBookOk: () -> Unit = {},
@@ -131,35 +186,82 @@ fun BookLibraryScreen(
 ) {
     val isDark = LocalIsDarkTheme.current
     val accentBlue = if (isDark) IosDarkBlue else IosBlue
-    val cardBorderColor = if (isDark) Color(0xFF2C2C2E) else IosSeparator
-    val dividerColor = if (isDark) Color(0xFF2C2C2E) else Color(0xFFE5E5EA)
+    val surfaceColor = MaterialTheme.colorScheme.surface
+    val subtleBorder = if (isDark) Color(0xFF2C2C2E) else Color(0xFFE5E7EB)
+    val dividerColor = if (isDark) Color(0xFF262629) else Color(0xFFF3F4F6)
+    val pillTrackColor = if (isDark) Color(0xFF1C1C1E) else Color(0xFFF3F4F6)
 
-    var selectedTab by remember { mutableStateOf(LibraryTab.ALL) }
+    var searchQuery by remember { mutableStateOf("") }
+    var activeFilter by remember { mutableStateOf(LibraryFilterMode.BOOKS) }
+    var sortOption by remember { mutableStateOf(LibrarySortOption.RECENT) }
+    var statusFilter by remember { mutableStateOf(LibraryReadStatusFilter.ALL) }
+
     var openedCollectionId by remember { mutableStateOf<String?>(null) }
+    var drillDownGroup by remember { mutableStateOf<LibraryGroupDrillDown?>(null) }
+
+    var isMultiSelectMode by remember { mutableStateOf(false) }
+    var selectedBookIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    var showInfoDialog by remember { mutableStateOf(false) }
+    var showFilterSheet by remember { mutableStateOf(false) }
+    var showQuickLinkMenu by remember { mutableStateOf(false) }
     var showCreateCollectionDialog by remember { mutableStateOf(false) }
     var pickerTargetCollection by remember { mutableStateOf<BookCollection?>(null) }
-    var assignCollectionBook by remember { mutableStateOf<LibraryBook?>(null) }
+    var assignCollectionBooks by remember { mutableStateOf<List<LibraryBook>?>(null) }
 
     val activeCollection = remember(collections, openedCollectionId) {
         collections.firstOrNull { it.id == openedCollectionId }
     }
 
-    // Hardware/gesture back pops collection detail first, otherwise exits library
-    BackHandler {
-        if (openedCollectionId != null) {
-            openedCollectionId = null
-        } else {
-            onBackClick()
+    // Back gesture exits multi-select or sub-views cleanly
+    BackHandler(enabled = isMultiSelectMode || openedCollectionId != null || drillDownGroup != null) {
+        when {
+            isMultiSelectMode -> {
+                isMultiSelectMode = false
+                selectedBookIds = emptySet()
+            }
+            openedCollectionId != null -> openedCollectionId = null
+            drillDownGroup != null -> drillDownGroup = null
         }
     }
 
-    val allSortedBooks = remember(books) { LibraryManager.sortAllBooks(books) }
-    val recentSortedBooks = remember(books) { LibraryManager.sortRecentlyRead(books) }
+    // Filtered + Sorted list of books
+    val processedBooks = remember(books, searchQuery, sortOption, statusFilter) {
+        val query = searchQuery.trim().lowercase()
+        val filtered = books.filter { book ->
+            val matchesQuery = query.isEmpty() ||
+                book.title.lowercase().contains(query) ||
+                book.author.lowercase().contains(query) ||
+                book.sourceType.lowercase().contains(query)
+            val pct = computeBookProgressPercent(book)
+            val matchesStatus = when (statusFilter) {
+                LibraryReadStatusFilter.ALL -> true
+                LibraryReadStatusFilter.READING -> pct in 1..99
+                LibraryReadStatusFilter.UNREAD -> pct == 0
+                LibraryReadStatusFilter.COMPLETED -> pct >= 100
+            }
+            matchesQuery && matchesStatus
+        }
+
+        when (sortOption) {
+            LibrarySortOption.RECENT -> filtered.sortedWith(
+                compareByDescending<LibraryBook> { it.lastOpenedAtMillis }
+                    .thenByDescending { it.addedAtMillis }
+            )
+            LibrarySortOption.NEWEST -> LibraryManager.sortAllBooks(filtered)
+            LibrarySortOption.TITLE_AZ -> filtered.sortedBy { it.title.lowercase() }
+            LibrarySortOption.AUTHOR_AZ -> filtered.sortedBy {
+                it.author.ifBlank { "zzz" }.lowercase()
+            }
+            LibrarySortOption.PROGRESS_DESC -> filtered.sortedByDescending { computeBookProgressPercent(it) }
+        }
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
+            .background(MaterialTheme.colorScheme.background)
+            .testTag("book_library_screen"),
         contentAlignment = Alignment.TopCenter
     ) {
         Column(
@@ -168,132 +270,520 @@ fun BookLibraryScreen(
                 .fillMaxSize()
                 .statusBarsPadding()
                 .navigationBarsPadding()
+                .padding(start = 16.dp, end = 16.dp, top = 12.dp)
         ) {
-            // 1. Minimalist iOS Navigation Bar (Back | Title | + Import)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .padding(horizontal = 6.dp)
-            ) {
-                IconButton(
-                    onClick = {
-                        if (openedCollectionId != null) {
-                            openedCollectionId = null
-                        } else {
-                            onBackClick()
-                        }
-                    },
+            // 1. Swiss Neo-Brutalist Header: Crisp 21.sp Bold "Thư viện sách" + (i) | 3D Inked 4-icon Action Pill
+            if (activeCollection != null || drillDownGroup != null) {
+                val subTitle = activeCollection?.name ?: drillDownGroup?.title.orEmpty()
+                Row(
                     modifier = Modifier
-                        .align(Alignment.CenterStart)
-                        .size(48.dp)
-                        .testTag("library_back_button")
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.ArrowBackIosNew,
-                        contentDescription = "Quay lại",
-                        tint = accentBlue,
-                        modifier = Modifier.size(18.dp)
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .clickable {
+                                openedCollectionId = null
+                                drillDownGroup = null
+                            }
+                            .padding(vertical = 6.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.ArrowBackIosNew,
+                            contentDescription = "Quay lại",
+                            tint = accentBlue,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = subTitle,
+                            fontSize = 19.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    if (activeCollection != null) {
+                        NeoBrutalistPressBox(
+                            onClick = { pickerTargetCollection = activeCollection },
+                            isPill = true,
+                            shadowOffset = 2.5.dp,
+                            pressDepth = 1.8.dp,
+                            containerColor = IosOrange,
+                            modifier = Modifier
+                                .height(34.dp)
+                                .testTag("collection_detail_add_books_button")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Add,
+                                    contentDescription = "Thêm sách",
+                                    tint = NeoInkLight,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    text = "Thêm sách",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = NeoInkLight,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = "Thư viện sách",
+                            fontSize = 21.sp,
+                            lineHeight = 25.sp,
+                            letterSpacing = (-0.4).sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag("library_header_title")
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .clickable { showInfoDialog = true }
+                                .testTag("library_info_button"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Info,
+                                contentDescription = "Thông tin thư viện",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    // Top-right Swiss Neo-Brutalist 3D Inked Pill with 4 quick action icons
+                    Box {
+                        Box(
+                            modifier = Modifier
+                                .padding(end = 3.dp, bottom = 3.dp)
+                                .neoHardOffsetShadow(
+                                    cornerRadius = 999.dp,
+                                    offsetX = 3.dp,
+                                    offsetY = 3.dp
+                                )
+                                .clip(RoundedCornerShape(50))
+                                .background(neoPaperSurfaceColor())
+                                .border(1.5.dp, neoInkBorderColor(), RoundedCornerShape(50))
+                                .testTag("library_quick_action_pill")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(1.dp)
+                            ) {
+                                LibraryHeaderPillActionIcon(
+                                    icon = Icons.Rounded.Checklist,
+                                    contentDescription = "Chọn nhiều sách",
+                                    tint = if (isMultiSelectMode) LibraryCoralRed else MaterialTheme.colorScheme.onSurface,
+                                    highlighted = isMultiSelectMode,
+                                    testTagName = "library_select_mode_button",
+                                    onClick = {
+                                        isMultiSelectMode = !isMultiSelectMode
+                                        if (!isMultiSelectMode) selectedBookIds = emptySet()
+                                    }
+                                )
+                                LibraryHeaderPillActionIcon(
+                                    icon = Icons.Rounded.CloudDownload,
+                                    contentDescription = "Cài đặt trình đọc & tải sách",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                    highlighted = false,
+                                    testTagName = "library_reader_general_settings_button",
+                                    onClick = onOpenReaderGeneralSettingsClick
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .clip(CircleShape)
+                                        .clickable(enabled = !isImporting, onClick = onImportBookClick)
+                                        .testTag("library_import_book_button"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (isImporting) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(15.dp),
+                                            strokeWidth = 2.dp,
+                                            color = accentBlue
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Add,
+                                            contentDescription = "Quét 1 hoặc nhiều sách EPUB / PDF",
+                                            tint = MaterialTheme.colorScheme.onSurface,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                                LibraryHeaderPillActionIcon(
+                                    icon = Icons.Rounded.Link,
+                                    contentDescription = "Gắn liên kết & quét nhiều sách",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                    highlighted = false,
+                                    testTagName = "library_link_menu_button",
+                                    onClick = { showQuickLinkMenu = true }
+                                )
+                            }
+                        }
+
+                        DropdownMenu(
+                            expanded = showQuickLinkMenu,
+                            onDismissRequest = { showQuickLinkMenu = false },
+                            modifier = Modifier.background(surfaceColor)
+                        ) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = "Cài đặt chung đọc & âm thanh",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Settings,
+                                        contentDescription = null,
+                                        tint = accentBlue,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                },
+                                onClick = {
+                                    showQuickLinkMenu = false
+                                    onOpenReaderGeneralSettingsClick()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = "Tạo bộ sưu tập mới",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Rounded.CollectionsBookmark,
+                                        contentDescription = null,
+                                        tint = LibraryCoralRed,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                },
+                                onClick = {
+                                    showQuickLinkMenu = false
+                                    showCreateCollectionDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = "Quét & nhập nhiều sách",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = accentBlue
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Add,
+                                        contentDescription = null,
+                                        tint = accentBlue,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                },
+                                onClick = {
+                                    showQuickLinkMenu = false
+                                    onImportBookClick()
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // 2. Small Stats Subtitle right beneath Header Title
+                Spacer(modifier = Modifier.height(1.dp))
+                Text(
+                    text = "${books.size} cuốn sách · EPUB, PDF & MOBI",
+                    fontSize = 11.5.sp,
+                    lineHeight = 15.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag("library_stats_subtitle")
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // 3. Neo-Brutalist 3D Inked Search Pill + Circular Filter Stamp Button
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 3.dp, bottom = 3.dp)
+                            .height(38.dp)
+                            .neoHardOffsetShadow(cornerRadius = 999.dp, offsetX = 3.dp, offsetY = 3.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(neoPaperSurfaceColor())
+                            .border(1.5.dp, neoInkBorderColor(), RoundedCornerShape(50))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Search,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(7.dp))
+                            Box(
+                                modifier = Modifier.weight(1f),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                if (searchQuery.isEmpty()) {
+                                    Text(
+                                        text = "Tên sách, tác giả, bộ sách...",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                BasicTextField(
+                                    value = searchQuery,
+                                    onValueChange = { searchQuery = it },
+                                    singleLine = true,
+                                    textStyle = TextStyle(
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    ),
+                                    cursorBrush = SolidColor(IosBlue),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("library_search_input")
+                                )
+                            }
+                            if (searchQuery.isNotEmpty()) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                                        .clickable { searchQuery = "" },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Close,
+                                        contentDescription = "Xóa tìm kiếm",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    val hasActiveSortOrStatus = sortOption != LibrarySortOption.RECENT ||
+                        statusFilter != LibraryReadStatusFilter.ALL
+                    Ios3DCircleIconButton(
+                        onClick = { showFilterSheet = true },
+                        size = 38.dp,
+                        highlighted = hasActiveSortOrStatus,
+                        highlightBg = IosOrange,
+                        modifier = Modifier.testTag("library_filter_sliders_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Tune,
+                            contentDescription = "Bộ lọc & sắp xếp",
+                            tint = if (hasActiveSortOrStatus) NeoInkLight else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(9.dp))
+
+                // 4. Two Rows of Swiss Neo-Brutalist Inked Pill Filter Chips
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val isVaultSelected = activeFilter == LibraryFilterMode.BOOK_VAULT
+                    NeoBrutalistPressBox(
+                        onClick = { activeFilter = LibraryFilterMode.BOOK_VAULT },
+                        isPill = true,
+                        shadowOffset = 2.5.dp,
+                        pressDepth = 1.8.dp,
+                        containerColor = if (isVaultSelected) IosOrange else neoPaperSurfaceColor(),
+                        modifier = Modifier
+                            .height(36.dp)
+                            .testTag("library_chip_book_vault")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Cloud,
+                                contentDescription = null,
+                                tint = if (isVaultSelected) NeoInkLight else LibraryCloudAccent,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "Kho sách",
+                                fontSize = 11.5.sp,
+                                lineHeight = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isVaultSelected) NeoInkLight else MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+
+                    ConnectedFilterPillGroup(
+                        items = listOf(
+                            LibraryFilterMode.BOOKS,
+                            LibraryFilterMode.AUTHORS,
+                            LibraryFilterMode.SERIES
+                        ),
+                        selected = activeFilter,
+                        trackColor = pillTrackColor,
+                        onSelect = { activeFilter = it },
+                        modifier = Modifier.weight(1f)
                     )
                 }
 
-                Text(
-                    text = activeCollection?.name ?: "Thư viện sách",
-                    fontSize = 15.sp,
-                    lineHeight = 20.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .padding(horizontal = 56.dp)
+                Spacer(modifier = Modifier.height(7.dp))
+
+                // Row 2: Connected group ["Thể loại", "Định dạng", "Sưu tập"]
+                ConnectedFilterPillGroup(
+                    items = listOf(
+                        LibraryFilterMode.GENRES,
+                        LibraryFilterMode.FORMATS,
+                        LibraryFilterMode.COLLECTIONS
+                    ),
+                    selected = activeFilter,
+                    trackColor = pillTrackColor,
+                    onSelect = { activeFilter = it },
+                    modifier = Modifier.fillMaxWidth()
                 )
+            }
 
-                if (activeCollection != null) {
-                    // Inside a collection: top-right "+" quickly adds books to this collection
-                    IconButton(
-                        onClick = { pickerTargetCollection = activeCollection },
-                        modifier = Modifier
-                            .align(Alignment.CenterEnd)
-                            .size(48.dp)
-                            .testTag("collection_detail_add_books_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Add,
-                            contentDescription = "Thêm sách vào bộ sưu tập",
-                            tint = accentBlue,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                } else {
+            // Multi-select batch toolbar when active
+            AnimatedVisibility(visible = isMultiSelectMode) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = if (isDark) Color(0xFF1C1C1E) else Color(0xFFF3F4F6),
+                    border = BorderStroke(0.8.dp, subtleBorder),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp)
+                ) {
                     Row(
-                        modifier = Modifier.align(Alignment.CenterEnd),
-                        verticalAlignment = Alignment.CenterVertically
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        // Bánh răng cài đặt chung cho chỗ đọc sách (ngay cạnh dấu +)
-                        IconButton(
-                            onClick = onOpenReaderGeneralSettingsClick,
-                            modifier = Modifier
-                                .size(48.dp)
-                                .testTag("library_reader_general_settings_button")
+                        Text(
+                            text = "Đã chọn ${selectedBookIds.size} sách",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Settings,
-                                contentDescription = "Cài đặt chung cho trình đọc sách",
-                                tint = accentBlue,
-                                modifier = Modifier.size(19.dp)
-                            )
-                        }
-
-                        IconButton(
-                            onClick = { if (!isImporting) onImportBookClick() },
-                            enabled = !isImporting,
-                            modifier = Modifier
-                                .size(48.dp)
-                                .testTag("library_import_book_button")
-                        ) {
-                            if (isImporting) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp,
-                                    color = accentBlue
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Rounded.Add,
-                                    contentDescription = "Nhập sách EPUB / PDF",
-                                    tint = accentBlue,
-                                    modifier = Modifier.size(20.dp)
-                                )
+                            if (selectedBookIds.isNotEmpty()) {
+                                TextButton(
+                                    onClick = {
+                                        val selectedBooks = books.filter { it.id in selectedBookIds }
+                                        assignCollectionBooks = selectedBooks
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Sưu tập", fontSize = 12.sp, color = accentBlue, fontWeight = FontWeight.SemiBold)
+                                }
+                                TextButton(
+                                    onClick = {
+                                        selectedBookIds.forEach { onDeleteBook(it) }
+                                        selectedBookIds = emptySet()
+                                        isMultiSelectMode = false
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Xóa", fontSize = 12.sp, color = IosRed, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                            TextButton(
+                                onClick = {
+                                    isMultiSelectMode = false
+                                    selectedBookIds = emptySet()
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text("Xong", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                             }
                         }
                     }
                 }
             }
 
-            // 2. iOS Segmented Control (hidden when drilled into a specific Collection)
-            if (activeCollection == null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp)
-                ) {
-                    IosLibrarySegmentedControl(
-                        selectedTab = selectedTab,
-                        onSelectTab = { selectedTab = it }
-                    )
-                }
-            } else {
-                Spacer(modifier = Modifier.height(6.dp))
-            }
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // 3. Main Content Area
-            Column(
+            // 5. Main Scrollable Content Area (with bottom padding 96.dp for Floating Bottom Nav Bar)
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .padding(horizontal = 16.dp, vertical = 6.dp)
             ) {
                 when {
                     activeCollection != null -> {
@@ -305,77 +795,154 @@ fun BookLibraryScreen(
                             LibraryEmptyStateCard(
                                 icon = Icons.Rounded.CollectionsBookmark,
                                 title = "Bộ sưu tập chưa có sách",
-                                subtitle = "Bấm dấu + ở góc trên phải để chọn sách thêm vào bộ sưu tập này.",
+                                subtitle = "Bấm \"+ Thêm sách\" ở góc trên để thêm sách vào bộ sưu tập này.",
                                 actionLabel = "+ Thêm sách",
                                 onActionClick = { pickerTargetCollection = activeCollection }
                             )
                         } else {
-                            CompactInsetBookList(
+                            ModernBookVerticalList(
                                 books = booksInCollection,
-                                collections = collections,
-                                cardBorderColor = cardBorderColor,
+                                isMultiSelectMode = isMultiSelectMode,
+                                selectedBookIds = selectedBookIds,
                                 dividerColor = dividerColor,
+                                deleteLabel = "Gỡ khỏi bộ sưu tập",
+                                onToggleSelect = { id ->
+                                    selectedBookIds = if (id in selectedBookIds) selectedBookIds - id else selectedBookIds + id
+                                },
                                 onOpenBook = onOpenBook,
-                                onAssignToCollection = { assignCollectionBook = it },
+                                onAddToCollection = { assignCollectionBooks = listOf(it) },
                                 onDeleteBook = { bookId ->
                                     val remaining = activeCollection.bookIds.filterNot { it == bookId }.toSet()
                                     onSetCollectionBooks(activeCollection.id, remaining)
+                                }
+                            )
+                        }
+                    }
+
+                    drillDownGroup != null -> {
+                        val groupBooks = drillDownGroup?.books.orEmpty()
+                        ModernBookVerticalList(
+                            books = groupBooks,
+                            isMultiSelectMode = isMultiSelectMode,
+                            selectedBookIds = selectedBookIds,
+                            dividerColor = dividerColor,
+                            deleteLabel = "Xóa khỏi thư viện",
+                            onToggleSelect = { id ->
+                                selectedBookIds = if (id in selectedBookIds) selectedBookIds - id else selectedBookIds + id
+                            },
+                            onOpenBook = onOpenBook,
+                            onAddToCollection = { assignCollectionBooks = listOf(it) },
+                            onDeleteBook = onDeleteBook
+                        )
+                    }
+
+                    activeFilter == LibraryFilterMode.BOOKS || activeFilter == LibraryFilterMode.BOOK_VAULT -> {
+                        if (processedBooks.isEmpty()) {
+                            LibraryEmptyStateCard(
+                                icon = Icons.Rounded.AutoStories,
+                                title = if (searchQuery.isNotBlank()) "Không tìm thấy sách phù hợp" else "Thư viện sách trống",
+                                subtitle = if (searchQuery.isNotBlank()) {
+                                    "Thử nhập từ khóa khác hoặc xóa bộ lọc tìm kiếm."
+                                } else {
+                                    "Bấm dấu + ở góc trên bên phải để thêm sách EPUB hoặc PDF đọc hoàn toàn ngoại tuyến."
                                 },
-                                deleteLabel = "Gỡ khỏi bộ sưu tập"
-                            )
-                        }
-                    }
-
-                    selectedTab == LibraryTab.ALL -> {
-                        if (allSortedBooks.isEmpty()) {
-                            LibraryEmptyStateCard(
-                                icon = Icons.Rounded.AutoStories,
-                                title = "Thư viện sách trống",
-                                subtitle = "Bấm dấu + ở góc phải phía trên để thêm sách EPUB hoặc PDF đọc hoàn toàn ngoại tuyến.",
-                                actionLabel = "+ Nhập sách",
-                                onActionClick = onImportBookClick
+                                actionLabel = if (searchQuery.isNotBlank()) "Xóa tìm kiếm" else "+ Nhập sách",
+                                onActionClick = {
+                                    if (searchQuery.isNotBlank()) {
+                                        searchQuery = ""
+                                    } else {
+                                        onImportBookClick()
+                                    }
+                                }
                             )
                         } else {
-                            CompactInsetBookList(
-                                books = allSortedBooks,
-                                collections = collections,
-                                cardBorderColor = cardBorderColor,
+                            ModernBookVerticalList(
+                                books = processedBooks,
+                                isMultiSelectMode = isMultiSelectMode,
+                                selectedBookIds = selectedBookIds,
                                 dividerColor = dividerColor,
+                                deleteLabel = "Xóa khỏi thư viện",
+                                onToggleSelect = { id ->
+                                    selectedBookIds = if (id in selectedBookIds) selectedBookIds - id else selectedBookIds + id
+                                },
                                 onOpenBook = onOpenBook,
-                                onAssignToCollection = { assignCollectionBook = it },
-                                onDeleteBook = onDeleteBook,
-                                deleteLabel = "Xóa khỏi thư viện"
+                                onAddToCollection = { assignCollectionBooks = listOf(it) },
+                                onDeleteBook = onDeleteBook
                             )
                         }
                     }
 
-                    selectedTab == LibraryTab.RECENT -> {
-                        if (recentSortedBooks.isEmpty()) {
-                            LibraryEmptyStateCard(
-                                icon = Icons.Rounded.AutoStories,
-                                title = "Chưa có sách đọc gần đây",
-                                subtitle = "Những cuốn sách bạn mở đọc sẽ tự động xuất hiện tại đây theo thời gian đọc gần nhất."
-                            )
-                        } else {
-                            CompactInsetBookList(
-                                books = recentSortedBooks,
-                                collections = collections,
-                                cardBorderColor = cardBorderColor,
-                                dividerColor = dividerColor,
-                                onOpenBook = onOpenBook,
-                                onAssignToCollection = { assignCollectionBook = it },
-                                onDeleteBook = onDeleteBook,
-                                deleteLabel = "Xóa khỏi thư viện"
-                            )
+                    activeFilter == LibraryFilterMode.AUTHORS -> {
+                        val authorGroups = remember(processedBooks) {
+                            processedBooks
+                                .groupBy { it.author.ifBlank { "Chưa rõ tác giả" } }
+                                .entries
+                                .sortedByDescending { it.value.size }
                         }
+                        LibraryCategoryGroupList(
+                            icon = Icons.Rounded.Person,
+                            emptyTitle = "Chưa có dữ liệu tác giả",
+                            emptySubtitle = "Thêm sách EPUB hoặc PDF vào thư viện để tự động phân nhóm theo tác giả.",
+                            groups = authorGroups.map { it.key to it.value },
+                            subtleBorder = subtleBorder,
+                            dividerColor = dividerColor,
+                            onOpenGroup = { title, items ->
+                                drillDownGroup = LibraryGroupDrillDown(title, items)
+                            }
+                        )
                     }
 
-                    selectedTab == LibraryTab.COLLECTIONS -> {
+                    activeFilter == LibraryFilterMode.FORMATS -> {
+                        val formatGroups = remember(processedBooks) {
+                            processedBooks
+                                .groupBy { it.sourceType.uppercase().ifBlank { "EPUB" } }
+                                .entries
+                                .sortedByDescending { it.value.size }
+                        }
+                        LibraryCategoryGroupList(
+                            icon = Icons.Rounded.Description,
+                            emptyTitle = "Chưa có định dạng sách nào",
+                            emptySubtitle = "Thư viện hỗ trợ đọc ngoại tuyến sách định dạng EPUB và PDF.",
+                            groups = formatGroups.map { "Định dạng ${it.key}" to it.value },
+                            subtleBorder = subtleBorder,
+                            dividerColor = dividerColor,
+                            onOpenGroup = { title, items ->
+                                drillDownGroup = LibraryGroupDrillDown(title, items)
+                            }
+                        )
+                    }
+
+                    activeFilter == LibraryFilterMode.GENRES -> {
+                        val genreGroups = remember(processedBooks) {
+                            buildList {
+                                val reading = processedBooks.filter { computeBookProgressPercent(it) in 1..99 }
+                                val unread = processedBooks.filter { computeBookProgressPercent(it) == 0 }
+                                val done = processedBooks.filter { computeBookProgressPercent(it) >= 100 }
+                                if (reading.isNotEmpty()) add("Đang đọc dở" to reading)
+                                if (unread.isNotEmpty()) add("Sách mới chưa đọc" to unread)
+                                if (done.isNotEmpty()) add("Đã đọc hoàn tất" to done)
+                            }
+                        }
+                        LibraryCategoryGroupList(
+                            icon = Icons.Rounded.Category,
+                            emptyTitle = "Chưa có phân loại sách",
+                            emptySubtitle = "Sách của bạn sẽ tự động được phân nhóm theo trạng thái đọc tại đây.",
+                            groups = genreGroups,
+                            subtleBorder = subtleBorder,
+                            dividerColor = dividerColor,
+                            onOpenGroup = { title, items ->
+                                drillDownGroup = LibraryGroupDrillDown(title, items)
+                            }
+                        )
+                    }
+
+                    activeFilter == LibraryFilterMode.SERIES || activeFilter == LibraryFilterMode.COLLECTIONS -> {
                         CollectionsTabContent(
                             collections = collections,
-                            cardBorderColor = cardBorderColor,
+                            subtleBorder = subtleBorder,
                             dividerColor = dividerColor,
                             accentBlue = accentBlue,
+                            isSeriesMode = activeFilter == LibraryFilterMode.SERIES,
                             onCreateCollectionClick = { showCreateCollectionDialog = true },
                             onOpenCollection = { openedCollectionId = it.id },
                             onAddBooksToCollectionClick = { pickerTargetCollection = it },
@@ -385,6 +952,165 @@ fun BookLibraryScreen(
                 }
             }
         }
+    }
+
+    // Bottom Sheet: Sort, Read Status Filter & Direct jump to Reader General Settings
+    if (showFilterSheet) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { showFilterSheet = false },
+            sheetState = sheetState,
+            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+            containerColor = surfaceColor
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 18.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Sắp xếp & Bộ lọc",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    TextButton(
+                        onClick = {
+                            sortOption = LibrarySortOption.RECENT
+                            statusFilter = LibraryReadStatusFilter.ALL
+                        }
+                    ) {
+                        Text("Đặt lại", fontSize = 13.sp, color = LibraryCoralRed, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+
+                Text(
+                    text = "Trạng thái đọc",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    LibraryReadStatusFilter.entries.forEach { st ->
+                        val active = st == statusFilter
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = if (active) LibraryCoralSoft else pillTrackColor,
+                            border = BorderStroke(
+                                0.8.dp,
+                                if (active) LibraryCoralRed.copy(alpha = 0.45f) else Color.Transparent
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(34.dp)
+                                .clip(RoundedCornerShape(50))
+                                .clickable { statusFilter = st }
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = st.label,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (active) LibraryCoralText else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Text(
+                    text = "Sắp xếp danh sách",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = pillTrackColor,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        LibrarySortOption.entries.forEachIndexed { idx, opt ->
+                            val selected = opt == sortOption
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(44.dp)
+                                    .clickable { sortOption = opt }
+                                    .padding(horizontal = 14.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = opt.label,
+                                    fontSize = 13.sp,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (selected) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Check,
+                                        contentDescription = "Đang chọn",
+                                        tint = LibraryCoralRed,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                            if (idx < LibrarySortOption.entries.lastIndex) {
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(horizontal = 14.dp),
+                                    thickness = 0.6.dp,
+                                    color = subtleBorder
+                                )
+                            }
+                        }
+                    }
+                }
+
+                IosPrimaryButton(
+                    text = "Cài đặt chung trình đọc & âm thanh",
+                    height = 46.dp,
+                    onClick = {
+                        showFilterSheet = false
+                        onOpenReaderGeneralSettingsClick()
+                    },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Rounded.Settings,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+        }
+    }
+
+    // Dialog: Library Info Stats
+    if (showInfoDialog) {
+        LibraryInfoStatsDialog(
+            books = books,
+            collectionsCount = collections.size,
+            onOpenReaderSettings = onOpenReaderGeneralSettingsClick,
+            onDismiss = { showInfoDialog = false }
+        )
     }
 
     // Dialog 1: Create new Collection
@@ -403,7 +1129,7 @@ fun BookLibraryScreen(
     if (targetCol != null) {
         AddBooksToCollectionDialog(
             collection = targetCol,
-            allBooks = allSortedBooks,
+            allBooks = LibraryManager.sortAllBooks(books),
             onSaveSelection = { selectedIds ->
                 onSetCollectionBooks(targetCol.id, selectedIds)
                 pickerTargetCollection = null
@@ -412,31 +1138,44 @@ fun BookLibraryScreen(
         )
     }
 
-    // Dialog 3: Quick add a single book to an existing Collection
-    val bookToAssign = assignCollectionBook
-    if (bookToAssign != null) {
+    // Dialog 3: Quick add 1 or multiple books to an existing Collection
+    val booksToAssign = assignCollectionBooks
+    if (!booksToAssign.isNullOrEmpty()) {
+        val label = if (booksToAssign.size == 1) {
+            booksToAssign.first().title
+        } else {
+            "${booksToAssign.size} cuốn sách đã chọn"
+        }
         PickCollectionForBookDialog(
-            book = bookToAssign,
+            titleLabel = label,
+            existingBookIds = booksToAssign.map { it.id }.toSet(),
             collections = collections,
             onSelectCollection = { col ->
-                onAddBookToCollection(col.id, bookToAssign.id)
-                assignCollectionBook = null
+                booksToAssign.forEach { b -> onAddBookToCollection(col.id, b.id) }
+                assignCollectionBooks = null
+                if (isMultiSelectMode) {
+                    isMultiSelectMode = false
+                    selectedBookIds = emptySet()
+                }
             },
             onCreateNewClick = {
-                assignCollectionBook = null
+                assignCollectionBooks = null
                 showCreateCollectionDialog = true
             },
-            onDismiss = { assignCollectionBook = null }
+            onDismiss = { assignCollectionBooks = null }
         )
     }
 
-    // Dialog 4: Clean-on-Import Workflow (Ask Có/Không -> Spinning Auto-Clean -> Sửa tiếp / OK)
+    // Dialog 4: Clean-on-Import Workflow (Single Book + Multi-Book Batch)
     LibraryImportFlowDialogs(
         flowState = importFlowState,
         cleaningProgressPercent = cleaningProgressPercent,
         cleaningStatusMessage = cleaningStatusMessage,
         onConfirmClean = onConfirmCleanBeforeImport,
         onConfirmNoClean = onConfirmDirectImportNoClean,
+        onConfirmBatchClean = onConfirmBatchClean,
+        onConfirmBatchNoClean = onConfirmBatchNoClean,
+        onCancelBatch = onCancelBatchImport,
         onCancelClean = onCancelAutoClean,
         onContinueEdit = onContinueEditCleanedBook,
         onFinishOk = onAcceptCleanedBookOk,
@@ -445,180 +1184,330 @@ fun BookLibraryScreen(
 }
 
 @Composable
-private fun IosLibrarySegmentedControl(
-    selectedTab: LibraryTab,
-    onSelectTab: (LibraryTab) -> Unit
+private fun LibraryHeaderPillActionIcon(
+    icon: ImageVector,
+    contentDescription: String,
+    tint: Color,
+    highlighted: Boolean,
+    testTagName: String,
+    onClick: () -> Unit
 ) {
-    val isDark = LocalIsDarkTheme.current
-    val trackColor = if (isDark) Color(0xFF1C1C1E) else Color(0xFFE5E5EA)
-    val thumbColor = if (isDark) Color(0xFF3A3A3C) else Color(0xFFFFFFFF)
-
-    Row(
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .height(32.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(trackColor)
-            .padding(2.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .size(32.dp)
+            .clip(CircleShape)
+            .background(if (highlighted) LibraryCoralSoft else Color.Transparent)
+            .clickable(onClick = onClick)
+            .testTag(testTagName),
+        contentAlignment = Alignment.Center
     ) {
-        LibraryTab.entries.forEach { tab ->
-            val selected = tab == selectedTab
-            val bg by animateColorAsState(
-                targetValue = if (selected) thumbColor else Color.Transparent,
-                animationSpec = tween(160),
-                label = "seg_bg_${tab.name}"
-            )
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .then(
-                        if (selected) {
-                            Modifier.shadow(
-                                elevation = 2.dp,
-                                shape = RoundedCornerShape(8.dp),
-                                ambientColor = Color.Black.copy(alpha = 0.08f),
-                                spotColor = Color.Black.copy(alpha = 0.12f)
-                            )
-                        } else {
-                            Modifier
-                        }
-                    )
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(bg)
-                    .clickable { onSelectTab(tab) }
-                    .testTag("library_tab_${tab.name.lowercase()}"),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = tab.label,
-                    fontSize = 11.sp,
-                    lineHeight = 14.sp,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                    color = if (selected) {
-                        MaterialTheme.colorScheme.onSurface
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = Modifier.size(17.dp)
+        )
     }
 }
 
-/**
- * Ultra-compact iOS Inset Grouped Book List:
- * - Rounded `14.dp` surface container (`#FFFFFF` / `#1C1C1E`, `0.5.dp` hairline border)
- * - Row height strictly `40.dp` (`padding(horizontal = 10.dp, vertical = 4.dp)`)
- * - Left mini cover `20.dp x 30.dp` (`RoundedCornerShape(4.dp)`, subtle shadow)
- * - Single-line book title `12.sp` `FontWeight.Medium` (`maxLines = 1`, `Ellipsis`)
- * - `0.5.dp` divider indented to align precisely with the book title (`start = 40.dp`)
- */
 @Composable
-private fun CompactInsetBookList(
-    books: List<LibraryBook>,
-    collections: List<BookCollection>,
-    cardBorderColor: Color,
-    dividerColor: Color,
-    onOpenBook: (LibraryBook) -> Unit,
-    onAssignToCollection: (LibraryBook) -> Unit,
-    onDeleteBook: (String) -> Unit,
-    deleteLabel: String
+private fun ConnectedFilterPillGroup(
+    items: List<LibraryFilterMode>,
+    selected: LibraryFilterMode,
+    trackColor: Color,
+    onSelect: (LibraryFilterMode) -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val isDark = LocalIsDarkTheme.current
-    val shape = RoundedCornerShape(14.dp)
+    val selectedIdx = items.indexOf(selected)
+    val ink = neoInkBorderColor()
 
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .shadow(
-                elevation = if (isDark) 2.dp else 3.dp,
-                shape = shape,
-                ambientColor = Color.Black.copy(alpha = if (isDark) 0.25f else 0.05f),
-                spotColor = Color.Black.copy(alpha = if (isDark) 0.35f else 0.08f)
-            ),
-        shape = shape,
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(0.5.dp, cardBorderColor)
+    Box(
+        modifier = modifier
+            .padding(end = 2.5.dp, bottom = 2.5.dp)
+            .height(34.dp)
+            .neoHardOffsetShadow(cornerRadius = 999.dp, offsetX = 2.5.dp, offsetY = 2.5.dp)
+            .clip(RoundedCornerShape(50))
+            .background(neoSecondaryPaperColor())
+            .border(width = 1.5.dp, color = ink, shape = RoundedCornerShape(50))
+            .padding(2.5.dp)
     ) {
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("library_books_list"),
-            contentPadding = PaddingValues(vertical = 2.dp)
-        ) {
-            itemsIndexed(
-                items = books,
-                key = { _, item -> item.id }
-            ) { index, book ->
-                CompactBookRow(
-                    book = book,
-                    showCollectionAction = collections.isNotEmpty() || deleteLabel == "Xóa khỏi thư viện",
-                    deleteLabel = deleteLabel,
-                    onClick = { onOpenBook(book) },
-                    onAddToCollectionClick = { onAssignToCollection(book) },
-                    onDeleteClick = { onDeleteBook(book.id) }
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val segWidth = maxWidth / items.size.coerceAtLeast(1)
+            if (selectedIdx >= 0) {
+                val animatedOffset by animateDpAsState(
+                    targetValue = segWidth * selectedIdx,
+                    animationSpec = spring(
+                        dampingRatio = 0.80f,
+                        stiffness = 500f
+                    ),
+                    label = "filter_thumb_slide"
                 )
-                if (index < books.lastIndex) {
-                    HorizontalDivider(
-                        modifier = Modifier.padding(start = 40.dp, end = 10.dp),
-                        thickness = 0.5.dp,
-                        color = dividerColor
+                Box(
+                    modifier = Modifier
+                        .offset(x = animatedOffset)
+                        .width(segWidth)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(50))
+                        .background(IosOrange)
+                        .border(1.2.dp, if (isDark) NeoInkLight else ink, RoundedCornerShape(50))
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                items.forEach { mode ->
+                    val isSelected = mode == selected
+                    val textColor by animateColorAsState(
+                        targetValue = if (isSelected) {
+                            NeoInkLight
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        animationSpec = tween(150),
+                        label = "filter_text_${mode.name}"
                     )
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(50))
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = { onSelect(mode) }
+                            )
+                            .testTag("library_chip_${mode.name.lowercase()}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = mode.label,
+                            fontSize = 11.5.sp,
+                            lineHeight = 14.sp,
+                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.SemiBold,
+                            color = textColor,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }
     }
 }
 
+/**
+ * Modern iOS vertical book list matching reference design:
+ * - Rounded book cover thumbnail on left (`50.dp x 72.dp`)
+ * - Bold black title (`15.sp`), gray author subtitle (`13.sp`)
+ * - Coral-red linear reading progress bar + percentage + soft pink pill tag with red text
+ * - Three-dot overflow menu (`•••`) on far right
+ * - Generous bottom content padding (`96.dp`) to clear the Floating Bottom Navigation Pill
+ */
 @Composable
-private fun CompactBookRow(
-    book: LibraryBook,
-    showCollectionAction: Boolean,
+private fun ModernBookVerticalList(
+    books: List<LibraryBook>,
+    isMultiSelectMode: Boolean,
+    selectedBookIds: Set<String>,
+    dividerColor: Color,
     deleteLabel: String,
+    onToggleSelect: (String) -> Unit,
+    onOpenBook: (LibraryBook) -> Unit,
+    onAddToCollection: (LibraryBook) -> Unit,
+    onDeleteBook: (String) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("library_books_list"),
+        contentPadding = PaddingValues(top = 4.dp, bottom = 98.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        itemsIndexed(
+            items = books,
+            key = { _, item -> item.id }
+        ) { _, book ->
+            ModernBookRowItem(
+                book = book,
+                isMultiSelectMode = isMultiSelectMode,
+                isSelected = book.id in selectedBookIds,
+                deleteLabel = deleteLabel,
+                modifier = Modifier.animateItem(),
+                onClick = {
+                    if (isMultiSelectMode) {
+                        onToggleSelect(book.id)
+                    } else {
+                        onOpenBook(book)
+                    }
+                },
+                onAddToCollectionClick = { onAddToCollection(book) },
+                onDeleteClick = { onDeleteBook(book.id) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModernBookRowItem(
+    book: LibraryBook,
+    isMultiSelectMode: Boolean,
+    isSelected: Boolean,
+    deleteLabel: String,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onAddToCollectionClick: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
+    val isDark = LocalIsDarkTheme.current
     var menuExpanded by remember { mutableStateOf(false) }
 
-    Row(
-        modifier = Modifier
+    val progressPercent = remember(book.lastChapterIndex, book.chapterCount, book.lastOpenedAtMillis) {
+        computeBookProgressPercent(book)
+    }
+    val progressFraction = (progressPercent / 100f).coerceIn(0f, 1f)
+    val chapterBadgeText = remember(book.lastChapterIndex, book.chapterCount, book.sourceType) {
+        if (book.chapterCount > 0) {
+            "Ch. ${(book.lastChapterIndex + 1).coerceAtMost(book.chapterCount)}/${book.chapterCount}"
+        } else {
+            book.sourceType.uppercase().ifBlank { "EPUB" }
+        }
+    }
+
+    val ink = neoInkBorderColor()
+    val hardShadow = neoHardShadowColor()
+
+    NeoBrutalistPressBox(
+        onClick = onClick,
+        isPill = false,
+        cornerRadius = 14.dp,
+        shadowOffset = 3.dp,
+        pressDepth = 2.dp,
+        borderWidth = 1.5.dp,
+        containerColor = neoPaperSurfaceColor(),
+        borderColor = ink,
+        shadowColor = hardShadow,
+        contentAlignment = Alignment.CenterStart,
+        modifier = modifier
             .fillMaxWidth()
-            .height(40.dp)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 4.dp)
-            .testTag("library_book_row_${book.id}"),
-        verticalAlignment = Alignment.CenterVertically
+            .height(94.dp)
+            .testTag("library_book_row_${book.id}")
     ) {
-        AppleBooksMiniCover(
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(vertical = 9.dp, horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+        if (isMultiSelectMode) {
+            Checkbox(
+                checked = isSelected,
+                onCheckedChange = { onClick() },
+                colors = CheckboxDefaults.colors(checkedColor = LibraryCoralRed),
+                modifier = Modifier.padding(end = 4.dp)
+            )
+        }
+
+        // Left: Rounded Book Cover Thumbnail
+        LibraryBookCoverThumbnail(
             title = book.title,
-            coverPath = book.coverPath
+            coverPath = book.coverPath,
+            width = 50.dp,
+            height = 72.dp,
+            cornerRadius = 8.dp
         )
 
-        Spacer(modifier = Modifier.width(10.dp))
+        Spacer(modifier = Modifier.width(13.dp))
 
-        Text(
-            text = book.title,
-            fontSize = 12.sp,
-            lineHeight = 15.sp,
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
+        // Center: Bold Title, Gray Author, Coral-Red Progress Bar + % + Soft Pink Pill Tag
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            Text(
+                text = book.title,
+                fontSize = 15.sp,
+                lineHeight = 19.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
 
+            Text(
+                text = book.author.ifBlank { "Chưa rõ tác giả" },
+                fontSize = 13.sp,
+                lineHeight = 16.sp,
+                fontWeight = FontWeight.Normal,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Spacer(modifier = Modifier.height(3.dp))
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Coral-red progress bar
+                Box(
+                    modifier = Modifier
+                        .width(86.dp)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(if (isDark) Color(0xFF2C2C2E) else Color(0xFFE5E7EB))
+                ) {
+                    if (progressFraction > 0f) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth(progressFraction.coerceAtLeast(0.06f))
+                                .clip(RoundedCornerShape(50))
+                                .background(LibraryCoralRed)
+                        )
+                    }
+                }
+
+                // Percentage label
+                Text(
+                    text = "$progressPercent%",
+                    fontSize = 12.sp,
+                    lineHeight = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false
+                )
+
+                // Soft pink pill badge with red text (e.g., Ch. 3/20)
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (isDark) Color(0xFF3E1820) else LibraryCoralSoft
+                ) {
+                    Text(
+                        text = chapterBadgeText,
+                        fontSize = 10.sp,
+                        lineHeight = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (isDark) Color(0xFFFF8096) else LibraryCoralText,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.width(4.dp))
+
+        // Far right: Three-dot button (•••)
         Box {
             Box(
                 modifier = Modifier
-                    .size(28.dp)
+                    .size(36.dp)
                     .clip(CircleShape)
                     .clickable { menuExpanded = true }
                     .testTag("library_book_menu_${book.id}"),
@@ -627,8 +1516,8 @@ private fun CompactBookRow(
                 Icon(
                     imageVector = Icons.Rounded.MoreHoriz,
                     contentDescription = "Tùy chọn sách",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    modifier = Modifier.size(16.dp)
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(19.dp)
                 )
             }
 
@@ -637,34 +1526,54 @@ private fun CompactBookRow(
                 onDismissRequest = { menuExpanded = false },
                 modifier = Modifier.background(MaterialTheme.colorScheme.surface)
             ) {
-                if (showCollectionAction) {
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = "Thêm vào bộ sưu tập",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Rounded.CollectionsBookmark,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        },
-                        onClick = {
-                            menuExpanded = false
-                            onAddToCollectionClick()
-                        }
-                    )
-                }
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = "Đọc sách",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.MenuBook,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        onClick()
+                    }
+                )
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = "Thêm vào bộ sưu tập",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Rounded.CollectionsBookmark,
+                            contentDescription = null,
+                            tint = LibraryCoralRed,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        onAddToCollectionClick()
+                    }
+                )
                 DropdownMenuItem(
                     text = {
                         Text(
                             text = deleteLabel,
-                            fontSize = 12.sp,
+                            fontSize = 13.sp,
                             color = IosRed
                         )
                     },
@@ -673,7 +1582,7 @@ private fun CompactBookRow(
                             imageVector = Icons.Rounded.DeleteOutline,
                             contentDescription = null,
                             tint = IosRed,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(17.dp)
                         )
                     },
                     onClick = {
@@ -683,83 +1592,104 @@ private fun CompactBookRow(
                 )
             }
         }
+        }
     }
 }
 
-/**
- * Apple Books Mini Cover Thumbnail (`20.dp x 30.dp`, `RoundedCornerShape(4.dp)`, subtle shadow).
- * Decodes compressed cover thumbnail asynchronously off the main thread; falls back to an
- * understated minimalist initial-letter cover when the book has no cover artwork.
- */
 @Composable
-private fun AppleBooksMiniCover(
-    title: String,
-    coverPath: String?
+private fun LibraryCategoryGroupList(
+    icon: ImageVector,
+    emptyTitle: String,
+    emptySubtitle: String,
+    groups: List<Pair<String, List<LibraryBook>>>,
+    subtleBorder: Color,
+    dividerColor: Color,
+    onOpenGroup: (String, List<LibraryBook>) -> Unit
 ) {
-    var bitmap by remember(coverPath) { mutableStateOf<ImageBitmap?>(null) }
-
-    LaunchedEffect(coverPath) {
-        bitmap = if (!coverPath.isNullOrBlank()) {
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    val file = File(coverPath)
-                    if (file.exists()) {
-                        BitmapFactory.decodeFile(file.absolutePath)?.asImageBitmap()
-                    } else {
-                        null
-                    }
-                }.getOrNull()
-            }
-        } else {
-            null
-        }
-    }
-
-    val coverShape = RoundedCornerShape(4.dp)
-    val initial = remember(title) {
-        title.trim().firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "S"
-    }
-    val gradientColors = remember(title) {
-        val palettes = listOf(
-            listOf(Color(0xFF5B8DEF), Color(0xFF3A66C9)),
-            listOf(Color(0xFFE08B55), Color(0xFFB96432)),
-            listOf(Color(0xFF58A883), Color(0xFF397C5E)),
-            listOf(Color(0xFF9378D4), Color(0xFF6B52AD)),
-            listOf(Color(0xFF6B7B8C), Color(0xFF475563))
+    val inkBorder = neoInkBorderColor()
+    val hardShadow = neoHardShadowColor()
+    if (groups.isEmpty()) {
+        LibraryEmptyStateCard(
+            icon = icon,
+            title = emptyTitle,
+            subtitle = emptySubtitle
         )
-        palettes[(title.hashCode().and(0x7fffffff)) % palettes.size]
-    }
-
-    Box(
-        modifier = Modifier
-            .size(width = 20.dp, height = 30.dp)
-            .shadow(
-                elevation = 2.dp,
-                shape = coverShape,
-                ambientColor = Color.Black.copy(alpha = 0.14f),
-                spotColor = Color.Black.copy(alpha = 0.22f)
-            )
-            .clip(coverShape)
-            .background(Brush.verticalGradient(gradientColors)),
-        contentAlignment = Alignment.Center
-    ) {
-        val img = bitmap
-        if (img != null) {
-            Image(
-                bitmap = img,
-                contentDescription = "Bìa sách $title",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Text(
-                text = initial,
-                fontSize = 10.sp,
-                lineHeight = 12.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White,
-                maxLines = 1
-            )
+    } else {
+        val cardShape = RoundedCornerShape(14.dp)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(end = 3.dp, bottom = 3.dp)
+                .neoHardOffsetShadow(
+                    shadowColor = hardShadow,
+                    offsetX = 3.dp,
+                    offsetY = 3.dp,
+                    cornerRadius = 14.dp
+                )
+                .clip(cardShape)
+                .background(neoPaperSurfaceColor())
+                .border(1.5.dp, inkBorder, cardShape)
+        ) {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(top = 4.dp, bottom = 98.dp)
+            ) {
+                itemsIndexed(groups) { idx, (label, groupBooks) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(54.dp)
+                            .clickable { onOpenGroup(label, groupBooks) }
+                            .padding(horizontal = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(neoSecondaryPaperColor())
+                                .border(1.2.dp, inkBorder, RoundedCornerShape(8.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = null,
+                                tint = LibraryCoralRed,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = label,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "${groupBooks.size} cuốn sách",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Rounded.ChevronRight,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    if (idx < groups.lastIndex) {
+                        HorizontalDivider(
+                            modifier = Modifier.padding(start = 60.dp, end = 14.dp),
+                            thickness = 0.7.dp,
+                            color = dividerColor
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -767,58 +1697,55 @@ private fun AppleBooksMiniCover(
 @Composable
 private fun CollectionsTabContent(
     collections: List<BookCollection>,
-    cardBorderColor: Color,
+    subtleBorder: Color,
     dividerColor: Color,
     accentBlue: Color,
+    isSeriesMode: Boolean,
     onCreateCollectionClick: () -> Unit,
     onOpenCollection: (BookCollection) -> Unit,
     onAddBooksToCollectionClick: (BookCollection) -> Unit,
     onDeleteCollection: (String) -> Unit
 ) {
-    val isDark = LocalIsDarkTheme.current
+    val inkBorder = neoInkBorderColor()
+    val hardShadow = neoHardShadowColor()
+    val createLabel = if (isSeriesMode) "Tạo bộ sách mới" else "Tạo bộ sưu tập"
 
     Column(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Compact "+ Tạo bộ sưu tập" iOS Pill button
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.Start
         ) {
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = if (isDark) Color(0xFF1C1C1E) else Color.White,
-                border = BorderStroke(0.5.dp, cardBorderColor),
-                modifier = Modifier
-                    .shadow(
-                        elevation = 3.dp,
-                        shape = RoundedCornerShape(50),
-                        ambientColor = Color.Black.copy(alpha = 0.06f),
-                        spotColor = Color.Black.copy(alpha = 0.10f)
-                    )
-                    .clip(RoundedCornerShape(50))
-                    .clickable(onClick = onCreateCollectionClick)
-                    .testTag("create_collection_pill_button")
+            NeoBrutalistPressBox(
+                onClick = onCreateCollectionClick,
+                isPill = true,
+                shadowOffset = 2.5.dp,
+                pressDepth = 1.8.dp,
+                containerColor = neoPaperSurfaceColor(),
+                borderColor = inkBorder,
+                shadowColor = hardShadow,
+                modifier = Modifier.testTag("create_collection_pill_button")
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                    modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Add,
                         contentDescription = null,
-                        tint = accentBlue,
-                        modifier = Modifier.size(14.dp)
+                        tint = LibraryCoralRed,
+                        modifier = Modifier.size(15.dp)
                     )
                     Text(
-                        text = "Tạo bộ sưu tập",
+                        text = createLabel,
                         fontSize = 12.sp,
-                        lineHeight = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = accentBlue,
-                        maxLines = 1
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -827,29 +1754,30 @@ private fun CollectionsTabContent(
         if (collections.isEmpty()) {
             LibraryEmptyStateCard(
                 icon = Icons.Rounded.CollectionsBookmark,
-                title = "Chưa có bộ sưu tập nào",
-                subtitle = "Tạo bộ sưu tập để nhóm các cuốn sách yêu thích theo thể loại hoặc chủ đề."
+                title = if (isSeriesMode) "Chưa có bộ sách nào" else "Chưa có bộ sưu tập nào",
+                subtitle = "Tạo bộ sách hoặc bộ sưu tập để nhóm các tác phẩm yêu thích theo chủ đề."
             )
         } else {
             val shape = RoundedCornerShape(14.dp)
-            Surface(
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .shadow(
-                        elevation = if (isDark) 2.dp else 3.dp,
-                        shape = shape,
-                        ambientColor = Color.Black.copy(alpha = 0.05f),
-                        spotColor = Color.Black.copy(alpha = 0.08f)
-                    ),
-                shape = shape,
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(0.5.dp, cardBorderColor)
+                    .padding(end = 3.dp, bottom = 3.dp)
+                    .neoHardOffsetShadow(
+                        shadowColor = hardShadow,
+                        offsetX = 3.dp,
+                        offsetY = 3.dp,
+                        cornerRadius = 14.dp
+                    )
+                    .clip(shape)
+                    .background(neoPaperSurfaceColor())
+                    .border(1.5.dp, inkBorder, shape)
             ) {
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("collections_list"),
-                    contentPadding = PaddingValues(vertical = 2.dp)
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 98.dp)
                 ) {
                     itemsIndexed(
                         items = collections,
@@ -859,39 +1787,36 @@ private fun CollectionsTabContent(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(46.dp)
+                                .height(54.dp)
                                 .clickable { onOpenCollection(col) }
-                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                                .padding(horizontal = 12.dp, vertical = 4.dp)
                                 .testTag("collection_row_${col.id}"),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.Folder,
                                 contentDescription = null,
-                                tint = accentBlue,
-                                modifier = Modifier.size(18.dp)
+                                tint = LibraryCoralRed,
+                                modifier = Modifier.size(20.dp)
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = col.name,
-                                    fontSize = 12.sp,
-                                    lineHeight = 15.sp,
+                                    fontSize = 14.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.onSurface,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
-                                    text = "${col.bookIds.size} sách",
-                                    fontSize = 10.sp,
-                                    lineHeight = 13.sp,
+                                    text = "${col.bookIds.size} cuốn sách",
+                                    fontSize = 11.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1
                                 )
                             }
 
-                            // Compact "+ Thêm sách" pill
                             Surface(
                                 shape = RoundedCornerShape(50),
                                 color = accentBlue.copy(alpha = 0.12f),
@@ -902,12 +1827,11 @@ private fun CollectionsTabContent(
                             ) {
                                 Text(
                                     text = "+ Thêm sách",
-                                    fontSize = 10.sp,
-                                    lineHeight = 13.sp,
+                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = accentBlue,
                                     maxLines = 1,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
                                 )
                             }
 
@@ -916,7 +1840,7 @@ private fun CollectionsTabContent(
                             Box {
                                 Box(
                                     modifier = Modifier
-                                        .size(26.dp)
+                                        .size(28.dp)
                                         .clip(CircleShape)
                                         .clickable { colMenuOpen = true },
                                     contentAlignment = Alignment.Center
@@ -925,7 +1849,7 @@ private fun CollectionsTabContent(
                                         imageVector = Icons.Rounded.MoreHoriz,
                                         contentDescription = "Tùy chọn bộ sưu tập",
                                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(15.dp)
+                                        modifier = Modifier.size(16.dp)
                                     )
                                 }
                                 DropdownMenu(
@@ -934,9 +1858,7 @@ private fun CollectionsTabContent(
                                     modifier = Modifier.background(MaterialTheme.colorScheme.surface)
                                 ) {
                                     DropdownMenuItem(
-                                        text = {
-                                            Text("Xóa bộ sưu tập", fontSize = 12.sp, color = IosRed)
-                                        },
+                                        text = { Text("Xóa bộ sưu tập", fontSize = 12.sp, color = IosRed) },
                                         leadingIcon = {
                                             Icon(
                                                 imageVector = Icons.Rounded.DeleteOutline,
@@ -957,13 +1879,13 @@ private fun CollectionsTabContent(
                                 imageVector = Icons.Rounded.ChevronRight,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(17.dp)
                             )
                         }
                         if (index < collections.lastIndex) {
                             HorizontalDivider(
-                                modifier = Modifier.padding(start = 36.dp, end = 10.dp),
-                                thickness = 0.5.dp,
+                                modifier = Modifier.padding(start = 42.dp, end = 12.dp),
+                                thickness = 0.7.dp,
                                 color = dividerColor
                             )
                         }
@@ -976,718 +1898,89 @@ private fun CollectionsTabContent(
 
 @Composable
 private fun LibraryEmptyStateCard(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     title: String,
     subtitle: String,
     actionLabel: String? = null,
     onActionClick: (() -> Unit)? = null
 ) {
-    val isDark = LocalIsDarkTheme.current
-    val accentBlue = if (isDark) IosDarkBlue else IosBlue
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(bottom = 32.dp),
+            .padding(bottom = 94.dp),
         contentAlignment = Alignment.Center
     ) {
-        Surface(
-            shape = RoundedCornerShape(18.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(0.5.dp, if (isDark) Color(0xFF2C2C2E) else IosSeparator),
-            modifier = Modifier.fillMaxWidth()
+        NeoPaperStackContainer(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(210.dp),
+            cornerRadius = 14.dp,
+            contentAlignment = Alignment.Center
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 26.dp),
+                    .padding(horizontal = 22.dp, vertical = 22.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(7.dp)
             ) {
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(28.dp)
                 )
                 Text(
                     text = title,
                     fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.ExtraBold,
                     color = MaterialTheme.colorScheme.onSurface,
-                    textAlign = TextAlign.Center
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = subtitle,
-                    fontSize = 12.sp,
+                    fontSize = 11.5.sp,
                     lineHeight = 16.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
                 )
                 if (actionLabel != null && onActionClick != null) {
                     Spacer(modifier = Modifier.height(4.dp))
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = accentBlue.copy(alpha = 0.12f),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .clickable(onClick = onActionClick)
+                    NeoBrutalistPressBox(
+                        onClick = onActionClick,
+                        isPill = true,
+                        shadowOffset = 2.5.dp,
+                        pressDepth = 1.8.dp,
+                        containerColor = IosBlue,
+                        modifier = Modifier.height(36.dp)
                     ) {
                         Text(
                             text = actionLabel,
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = accentBlue,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun CreateCollectionDialog(
-    onConfirm: (String) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var name by remember { mutableStateOf("") }
-    val isDark = LocalIsDarkTheme.current
-
-    IosFloatingDialog(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = "Tạo bộ sưu tập mới",
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(if (isDark) Color(0xFF2C2C2E) else Color(0xFFF2F2F7))
-                    .border(
-                        width = 0.5.dp,
-                        color = if (isDark) Color(0xFF3A3A3C) else IosHairline,
-                        shape = RoundedCornerShape(12.dp)
-                    )
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
-            ) {
-                if (name.isEmpty()) {
-                    Text(
-                        text = "Ví dụ: Tiểu thuyết yêu thích, Kinh tế…",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
-                    )
-                }
-                BasicTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    singleLine = true,
-                    textStyle = TextStyle(
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurface
-                    ),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("collection_name_input")
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TextButton(onClick = onDismiss) {
-                    Text("Hủy", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Spacer(modifier = Modifier.width(6.dp))
-                Box(modifier = Modifier.width(104.dp)) {
-                    IosPrimaryButton(
-                        text = "Tạo",
-                        height = 36.dp,
-                        enabled = name.trim().isNotEmpty(),
-                        onClick = { onConfirm(name.trim()) },
-                        modifier = Modifier.testTag("confirm_create_collection_button")
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AddBooksToCollectionDialog(
-    collection: BookCollection,
-    allBooks: List<LibraryBook>,
-    onSaveSelection: (Set<String>) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var selectedIds by remember(collection.id) { mutableStateOf(collection.bookIds.toSet()) }
-
-    IosFloatingDialog(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(
-                text = "Thêm sách vào \"${collection.name}\"",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            if (allBooks.isEmpty()) {
-                Text(
-                    text = "Chưa có sách nào trong thư viện để thêm.",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 280.dp)
-                ) {
-                    itemsIndexed(allBooks, key = { _, b -> b.id }) { idx, book ->
-                        val checked = book.id in selectedIds
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(40.dp)
-                                .clickable {
-                                    selectedIds = if (checked) {
-                                        selectedIds - book.id
-                                    } else {
-                                        selectedIds + book.id
-                                    }
-                                }
-                                .padding(horizontal = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Checkbox(
-                                checked = checked,
-                                onCheckedChange = { isChecked ->
-                                    selectedIds = if (isChecked) {
-                                        selectedIds + book.id
-                                    } else {
-                                        selectedIds - book.id
-                                    }
-                                },
-                                colors = CheckboxDefaults.colors(checkedColor = MaterialTheme.colorScheme.primary)
-                            )
-                            AppleBooksMiniCover(title = book.title, coverPath = book.coverPath)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = book.title,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                        if (idx < allBooks.lastIndex) {
-                            HorizontalDivider(
-                                thickness = 0.5.dp,
-                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)
-                            )
-                        }
-                    }
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TextButton(onClick = onDismiss) {
-                    Text("Đóng", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Spacer(modifier = Modifier.width(6.dp))
-                Box(modifier = Modifier.width(104.dp)) {
-                    IosPrimaryButton(
-                        text = "Xong",
-                        height = 36.dp,
-                        onClick = { onSaveSelection(selectedIds) }
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PickCollectionForBookDialog(
-    book: LibraryBook,
-    collections: List<BookCollection>,
-    onSelectCollection: (BookCollection) -> Unit,
-    onCreateNewClick: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    IosFloatingDialog(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(
-                text = "Thêm vào bộ sưu tập",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                text = book.title,
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            if (collections.isEmpty()) {
-                Text(
-                    text = "Bạn chưa có bộ sưu tập nào.",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 220.dp)
-                ) {
-                    itemsIndexed(collections, key = { _, c -> c.id }) { idx, col ->
-                        val alreadyIn = book.id in col.bookIds
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(40.dp)
-                                .clickable { onSelectCollection(col) }
-                                .padding(horizontal = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Folder,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = col.name,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
-                            if (alreadyIn) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Check,
-                                    contentDescription = "Đã có",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                            }
-                        }
-                        if (idx < collections.lastIndex) {
-                            HorizontalDivider(
-                                thickness = 0.5.dp,
-                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)
-                            )
-                        }
-                    }
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TextButton(onClick = onCreateNewClick) {
-                    Text("+ Bộ sưu tập mới", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-                }
-                TextButton(onClick = onDismiss) {
-                    Text("Đóng", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        }
-    }
-}
-
-/**
- * iOS Floating Dialog sequence for Book Library Import:
- * 1. AskCleanConfirmation: "Bạn có muốn dọn sách không?" (Không | Có)
- * 2. CleaningInProgress / ImportingDirect / FinalizingCleanImport: Spinning loader + live progress
- * 3. CleanCompleted: Green checkmark + "Sửa tiếp" (opens Cleaning Review/Editor) | "OK" (stays in Library)
- * 4. Error: Friendly error message
- */
-@Composable
-private fun LibraryImportFlowDialogs(
-    flowState: LibraryImportFlowState,
-    cleaningProgressPercent: Int,
-    cleaningStatusMessage: String,
-    onConfirmClean: () -> Unit,
-    onConfirmNoClean: () -> Unit,
-    onCancelClean: () -> Unit,
-    onContinueEdit: () -> Unit,
-    onFinishOk: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    val isDark = LocalIsDarkTheme.current
-    val accentBlue = if (isDark) IosDarkBlue else IosBlue
-
-    when (flowState) {
-        is LibraryImportFlowState.Idle -> Unit
-
-        is LibraryImportFlowState.AskCleanConfirmation -> {
-            IosFloatingDialog(onDismissRequest = onDismiss) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(18.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(44.dp)
-                            .clip(CircleShape)
-                            .background(accentBlue.copy(alpha = 0.12f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.AutoFixHigh,
-                            contentDescription = null,
-                            tint = accentBlue,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-
-                    Text(
-                        text = "Bạn có muốn dọn sách không?",
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        textAlign = TextAlign.Center
-                    )
-
-                    Text(
-                        text = flowState.source.displayName,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = accentBlue,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center
-                    )
-
-                    Text(
-                        text = "Chọn \"Có\" để tự động dọn link rác, chuẩn hóa phông, khoảng trắng và chính tả trước khi lưu vào Thư viện sách.",
-                        fontSize = 12.sp,
-                        lineHeight = 16.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
-                    )
-
-                    Spacer(modifier = Modifier.height(2.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedButton(
-                            onClick = onConfirmNoClean,
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(42.dp)
-                                .testTag("library_import_no_clean_button"),
-                            shape = RoundedCornerShape(50),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-                        ) {
-                            Text(
-                                text = "Không",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1
-                            )
-                        }
-
-                        Box(modifier = Modifier.weight(1f)) {
-                            IosPrimaryButton(
-                                text = "Có",
-                                height = 42.dp,
-                                onClick = onConfirmClean,
-                                modifier = Modifier.testTag("library_import_yes_clean_button")
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        is LibraryImportFlowState.ImportingDirect -> {
-            IosFloatingDialog(onDismissRequest = {}) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 22.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(34.dp),
-                        strokeWidth = 3.dp,
-                        color = accentBlue
-                    )
-                    Text(
-                        text = "Đang thêm sách vào thư viện…",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        textAlign = TextAlign.Center
-                    )
-                    Text(
-                        text = flowState.fileName,
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-        }
-
-        is LibraryImportFlowState.CleaningInProgress,
-        is LibraryImportFlowState.FinalizingCleanImport -> {
-            val isFinalizing = flowState is LibraryImportFlowState.FinalizingCleanImport
-            val displayPercent = if (isFinalizing) 100 else cleaningProgressPercent
-            val displayTitle = if (isFinalizing) {
-                "Đang lưu vào Thư viện sách…"
-            } else {
-                "Đang tự động dọn sách…"
-            }
-            val displaySubtitle = if (isFinalizing) {
-                (flowState as LibraryImportFlowState.FinalizingCleanImport).bookTitle
-            } else {
-                cleaningStatusMessage.ifBlank { "Đang phân tích và làm sạch nội dung…" }
-            }
-
-            IosFloatingDialog(onDismissRequest = {}) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 20.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier
-                            .size(38.dp)
-                            .testTag("library_auto_clean_spinner"),
-                        strokeWidth = 3.2.dp,
-                        color = accentBlue
-                    )
-
-                    Text(
-                        text = displayTitle,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        textAlign = TextAlign.Center
-                    )
-
-                    LinearProgressIndicator(
-                        progress = { (displayPercent / 100f).coerceIn(0f, 1f) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(5.dp)
-                            .clip(RoundedCornerShape(50)),
-                        color = accentBlue,
-                        trackColor = accentBlue.copy(alpha = 0.16f)
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = displaySubtitle,
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "$displayPercent%",
-                            fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = accentBlue
+                            color = Color.White,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(horizontal = 16.dp)
                         )
                     }
-
-                    if (!isFinalizing) {
-                        TextButton(
-                            onClick = onCancelClean,
-                            modifier = Modifier.testTag("library_cancel_auto_clean_button")
-                        ) {
-                            Text(
-                                text = "Hủy quét",
-                                fontSize = 12.sp,
-                                color = IosRed,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        is LibraryImportFlowState.CleanCompleted -> {
-            IosFloatingDialog(onDismissRequest = onFinishOk) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(18.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(46.dp)
-                            .clip(CircleShape)
-                            .background(if (isDark) IosGreen.copy(alpha = 0.18f) else IosGreenSoft),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.CheckCircle,
-                            contentDescription = null,
-                            tint = IosGreen,
-                            modifier = Modifier.size(26.dp)
-                        )
-                    }
-
-                    Text(
-                        text = "Đã dọn sách xong!",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        textAlign = TextAlign.Center
-                    )
-
-                    Text(
-                        text = flowState.book.title,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center
-                    )
-
-                    Text(
-                        text = if (flowState.totalFixes > 0) {
-                            "Đã tự động sửa ${flowState.totalFixes} lỗi và thêm sẵn vào Thư viện sách."
-                        } else {
-                            "Nội dung đã chuẩn sạch và được thêm sẵn vào Thư viện sách."
-                        },
-                        fontSize = 12.sp,
-                        lineHeight = 16.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
-                    )
-
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedButton(
-                            onClick = onContinueEdit,
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(42.dp)
-                                .testTag("library_clean_continue_edit_button"),
-                            shape = RoundedCornerShape(50),
-                            border = BorderStroke(1.dp, accentBlue.copy(alpha = 0.55f))
-                        ) {
-                            Text(
-                                text = "Sửa tiếp",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = accentBlue,
-                                maxLines = 1
-                            )
-                        }
-
-                        Box(modifier = Modifier.weight(1f)) {
-                            IosPrimaryButton(
-                                text = "OK",
-                                height = 42.dp,
-                                onClick = onFinishOk,
-                                modifier = Modifier.testTag("library_clean_ok_button")
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        is LibraryImportFlowState.Error -> {
-            IosFloatingDialog(onDismissRequest = onDismiss) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(18.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text(
-                        text = "Không thể xử lý tệp",
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = IosRed
-                    )
-                    Text(
-                        text = flowState.message,
-                        fontSize = 12.sp,
-                        lineHeight = 16.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
-                    )
-                    IosPrimaryButton(
-                        text = "Đóng",
-                        height = 40.dp,
-                        onClick = onDismiss
-                    )
                 }
             }
         }
     }
 }
 
+internal fun computeBookProgressPercent(book: LibraryBook): Int {
+    if (book.chapterCount <= 0) return 0
+    if (book.lastOpenedAtMillis <= 0L && book.lastChapterIndex == 0 && book.lastParagraphIndex == 0) {
+        return 0
+    }
+    val raw = if (book.chapterCount == 1) {
+        if (book.lastParagraphIndex > 0) 25 else 5
+    } else {
+        (((book.lastChapterIndex + 1).toFloat() / book.chapterCount.toFloat()) * 100f).roundToInt()
+    }
+    return raw.coerceIn(1, 100)
+}

@@ -65,6 +65,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -86,7 +87,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -115,7 +115,13 @@ import com.example.service.BookAudioPlaybackService
 import com.example.service.BookAudioPlaybackState
 import com.example.ui.ActiveBookReaderState
 import com.example.ui.components.AnimatedAudioPlayingBars
+import com.example.ui.components.NeoBrutalistPressBox
 import com.example.ui.components.ReaderAudioSettingsSheetContent
+import com.example.ui.components.neoHardOffsetShadow
+import com.example.ui.components.neoHardShadowColor
+import com.example.ui.components.neoInkBorderColor
+import com.example.ui.components.neoPaperSurfaceColor
+import com.example.ui.components.neoSecondaryPaperColor
 import com.example.ui.theme.IosBlue
 import com.example.ui.theme.ReaderBrownInk
 import com.example.ui.theme.ReaderBrownPaper
@@ -867,20 +873,23 @@ fun BookReaderScreen(
                                 val onLastPage = pagerState.currentPage >= pages.lastIndex
 
                                 if (onFirstPage && hasPrevChap) {
-                                    Surface(
-                                        shape = RoundedCornerShape(50),
-                                        color = subtleSurface,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(50))
-                                            .clickable {
-                                                val keepPlaying = isPlayingAudio
-                                                onSelectChapter(readerState.currentChapterIndex - 1, 0, keepPlaying)
-                                            }
+                                    NeoBrutalistPressBox(
+                                        onClick = {
+                                            val keepPlaying = isPlayingAudio
+                                            onSelectChapter(readerState.currentChapterIndex - 1, 0, keepPlaying)
+                                        },
+                                        isPill = true,
+                                        shadowOffset = 3.dp,
+                                        pressDepth = 2.dp,
+                                        borderWidth = 1.5.dp,
+                                        containerColor = paperBg,
+                                        borderColor = inkColor,
+                                        shadowColor = inkColor
                                     ) {
                                         Text(
                                             text = "← Chương trước",
                                             fontSize = 11.sp,
-                                            fontWeight = FontWeight.Medium,
+                                            fontWeight = FontWeight.Bold,
                                             color = inkColor,
                                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                                         )
@@ -897,20 +906,23 @@ fun BookReaderScreen(
                                 )
 
                                 if (onLastPage && hasNextChap) {
-                                    Surface(
-                                        shape = RoundedCornerShape(50),
-                                        color = subtleSurface,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(50))
-                                            .clickable {
-                                                val keepPlaying = isPlayingAudio
-                                                onSelectChapter(readerState.currentChapterIndex + 1, 0, keepPlaying)
-                                            }
+                                    NeoBrutalistPressBox(
+                                        onClick = {
+                                            val keepPlaying = isPlayingAudio
+                                            onSelectChapter(readerState.currentChapterIndex + 1, 0, keepPlaying)
+                                        },
+                                        isPill = true,
+                                        shadowOffset = 3.dp,
+                                        pressDepth = 2.dp,
+                                        borderWidth = 1.5.dp,
+                                        containerColor = paperBg,
+                                        borderColor = inkColor,
+                                        shadowColor = inkColor
                                     ) {
                                         Text(
                                             text = "Chương sau →",
                                             fontSize = 11.sp,
-                                            fontWeight = FontWeight.Medium,
+                                            fontWeight = FontWeight.Bold,
                                             color = inkColor,
                                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                                         )
@@ -1035,8 +1047,8 @@ fun BookReaderScreen(
             onDismissRequest = { showTocSheet = false },
             sheetState = sheetState,
             shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-            containerColor = Color(0xFFFFFFFF),
-            contentColor = Color(0xFF1C1C1E)
+            containerColor = MaterialTheme.colorScheme.background,
+            contentColor = MaterialTheme.colorScheme.onSurface
         ) {
             val currentDensity = LocalDensity.current
             CompositionLocalProvider(
@@ -1069,8 +1081,8 @@ fun BookReaderScreen(
             },
             sheetState = audioSheetState,
             shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-            containerColor = Color(0xFFFFFFFF),
-            contentColor = Color(0xFF1C1C1E)
+            containerColor = MaterialTheme.colorScheme.background,
+            contentColor = MaterialTheme.colorScheme.onSurface
         ) {
             val currentDensity = LocalDensity.current
             CompositionLocalProvider(
@@ -1239,18 +1251,21 @@ private fun ChapterFooterNavigation(
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (hasPrev) {
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = subtleSurface,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .clickable(onClick = onPrevChapter)
-                    .testTag("reader_prev_chapter_button")
+            NeoBrutalistPressBox(
+                onClick = onPrevChapter,
+                isPill = true,
+                shadowOffset = 3.dp,
+                pressDepth = 2.dp,
+                borderWidth = 1.5.dp,
+                containerColor = subtleSurface,
+                borderColor = inkColor,
+                shadowColor = inkColor,
+                modifier = Modifier.testTag("reader_prev_chapter_button")
             ) {
                 Text(
                     text = "← Chương trước",
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontWeight = FontWeight.Bold,
                     color = inkColor,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
                 )
@@ -1266,18 +1281,21 @@ private fun ChapterFooterNavigation(
         )
 
         if (hasNext) {
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = subtleSurface,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .clickable(onClick = onNextChapter)
-                    .testTag("reader_next_chapter_button")
+            NeoBrutalistPressBox(
+                onClick = onNextChapter,
+                isPill = true,
+                shadowOffset = 3.dp,
+                pressDepth = 2.dp,
+                borderWidth = 1.5.dp,
+                containerColor = subtleSurface,
+                borderColor = inkColor,
+                shadowColor = inkColor,
+                modifier = Modifier.testTag("reader_next_chapter_button")
             ) {
                 Text(
                     text = "Chương sau →",
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontWeight = FontWeight.Bold,
                     color = inkColor,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
                 )
@@ -1312,18 +1330,19 @@ private fun IosFloatingAudioPill(
 
     Row(
         modifier = Modifier
-            .height(42.dp)
-            .shadow(
-                elevation = 12.dp,
-                shape = pillShape,
-                ambientColor = Color.Black.copy(alpha = 0.28f),
-                spotColor = Color.Black.copy(alpha = 0.38f)
+            .padding(end = 3.dp, bottom = 3.dp)
+            .height(44.dp)
+            .neoHardOffsetShadow(
+                cornerRadius = 50.dp,
+                offsetX = 3.dp,
+                offsetY = 3.dp,
+                shadowColor = Color(0xFF09090B)
             )
             .clip(pillShape)
-            .background(Color(0xF51C1C1E))
+            .background(Color(0xFF18181B))
             .border(
-                width = 0.6.dp,
-                color = Color.White.copy(alpha = 0.18f),
+                width = 1.5.dp,
+                color = Color(0xFF3F3F46),
                 shape = pillShape
             )
             .padding(horizontal = 8.dp)
@@ -1543,26 +1562,33 @@ private fun IosReaderAppearancePopover(
     onSelectTheme: (ReaderPaperTheme) -> Unit
 ) {
     val shape = RoundedCornerShape(16.dp)
+    val cardBg = neoPaperSurfaceColor()
+    val trayBg = neoSecondaryPaperColor()
+    val inkBorder = neoInkBorderColor()
+    val hardShadow = neoHardShadowColor()
+    val primaryInk = MaterialTheme.colorScheme.onSurface
+    val secondaryInk = MaterialTheme.colorScheme.onSurfaceVariant
 
-    Surface(
+    Box(
         modifier = Modifier
-            .width(256.dp)
-            .heightIn(max = 460.dp)
-            .shadow(
-                elevation = 14.dp,
-                shape = shape,
-                ambientColor = Color.Black.copy(alpha = 0.12f),
-                spotColor = Color.Black.copy(alpha = 0.22f)
+            .width(264.dp)
+            .heightIn(max = 468.dp)
+            .padding(end = 4.dp, bottom = 4.dp)
+            .neoHardOffsetShadow(
+                cornerRadius = 16.dp,
+                offsetX = 4.dp,
+                offsetY = 4.dp,
+                shadowColor = hardShadow
             )
+            .clip(shape)
+            .background(cardBg)
+            .border(1.5.dp, inkBorder, shape)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = {}
             )
-            .testTag("reader_appearance_popover"),
-        shape = shape,
-        color = Color(0xF7FFFFFF),
-        border = BorderStroke(0.5.dp, Color(0xFFE5E5EA))
+            .testTag("reader_appearance_popover")
     ) {
         Column(
             modifier = Modifier
@@ -1584,41 +1610,48 @@ private fun IosReaderAppearancePopover(
                 Text(
                     text = "Font chữ",
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFF1C1C1E)
+                    fontWeight = FontWeight.Bold,
+                    color = primaryInk
                 )
                 Box {
-                    Row(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .background(Color(0xFFF2F2F7))
-                            .clickable { fontMenuExpanded = true }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                            .testTag("reader_font_family_selector"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    NeoBrutalistPressBox(
+                        onClick = { fontMenuExpanded = true },
+                        isPill = true,
+                        shadowOffset = 2.dp,
+                        pressDepth = 1.5.dp,
+                        borderWidth = 1.5.dp,
+                        containerColor = trayBg,
+                        borderColor = inkBorder,
+                        shadowColor = hardShadow,
+                        modifier = Modifier.testTag("reader_font_family_selector")
                     ) {
-                        Text(
-                            text = currentFontName,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = IosBlue,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.widthIn(max = 112.dp)
-                        )
-                        Icon(
-                            imageVector = Icons.Rounded.KeyboardArrowDown,
-                            contentDescription = "Chọn font chữ",
-                            tint = IosBlue,
-                            modifier = Modifier.size(14.dp)
-                        )
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Text(
+                                text = currentFontName,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = IosBlue,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 112.dp)
+                            )
+                            Icon(
+                                imageVector = Icons.Rounded.KeyboardArrowDown,
+                                contentDescription = "Chọn font chữ",
+                                tint = IosBlue,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
                     }
 
                     DropdownMenu(
                         expanded = fontMenuExpanded,
                         onDismissRequest = { fontMenuExpanded = false },
-                        containerColor = Color.White
+                        containerColor = cardBg
                     ) {
                         allFontOptions.forEach { fontOpt ->
                             val selected = prefs.fontId == fontOpt.id
@@ -1636,7 +1669,7 @@ private fun IosReaderAppearancePopover(
                                             fontSize = 12.sp,
                                             fontFamily = itemFamily,
                                             fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                            color = if (selected) IosBlue else Color(0xFF1C1C1E)
+                                            color = if (selected) IosBlue else primaryInk
                                         )
                                         if (selected) {
                                             Icon(
@@ -1658,7 +1691,7 @@ private fun IosReaderAppearancePopover(
                 }
             }
 
-            HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFE5E5EA))
+            HorizontalDivider(thickness = 0.8.dp, color = MaterialTheme.colorScheme.outline)
 
             // 1. Font Size (13..48 sp) with `-`/`+` AND quick slider
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -1679,7 +1712,7 @@ private fun IosReaderAppearancePopover(
                     colors = SliderDefaults.colors(
                         thumbColor = IosBlue,
                         activeTrackColor = IosBlue,
-                        inactiveTrackColor = Color(0xFFE5E5EA)
+                        inactiveTrackColor = trayBg
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1688,49 +1721,41 @@ private fun IosReaderAppearancePopover(
                 )
             }
 
-            HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFE5E5EA))
+            HorizontalDivider(thickness = 0.8.dp, color = MaterialTheme.colorScheme.outline)
 
             // 2. Scroll Direction (Cuộn dọc | Lật ngang) + Hiệu ứng lật ngang
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     text = "Kiểu lật trang",
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFF1C1C1E)
+                    fontWeight = FontWeight.Bold,
+                    color = primaryInk
                 )
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(30.dp)
-                        .clip(RoundedCornerShape(9.dp))
-                        .background(Color(0xFFE5E5EA))
-                        .padding(2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     ReaderScrollDirection.entries.forEach { dir ->
                         val active = prefs.scrollDirection == dir
-                        Box(
+                        NeoBrutalistPressBox(
+                            onClick = { onSelectScrollDirection(dir) },
+                            isPill = true,
+                            shadowOffset = 2.5.dp,
+                            pressDepth = 1.8.dp,
+                            borderWidth = 1.5.dp,
+                            containerColor = if (active) IosBlue else trayBg,
+                            borderColor = inkBorder,
+                            shadowColor = hardShadow,
                             modifier = Modifier
                                 .weight(1f)
-                                .fillMaxSize()
-                                .then(
-                                    if (active) {
-                                        Modifier.shadow(2.dp, RoundedCornerShape(7.dp))
-                                    } else {
-                                        Modifier
-                                    }
-                                )
-                                .clip(RoundedCornerShape(7.dp))
-                                .background(if (active) Color.White else Color.Transparent)
-                                .clickable { onSelectScrollDirection(dir) }
-                                .testTag("reader_scroll_${dir.storageKey}"),
-                            contentAlignment = Alignment.Center
+                                .height(33.dp)
+                                .testTag("reader_scroll_${dir.storageKey}")
                         ) {
                             Text(
                                 text = dir.label,
                                 fontSize = 11.sp,
-                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
-                                color = if (active) Color(0xFF1C1C1E) else Color(0xFF6E6E73),
+                                fontWeight = FontWeight.Bold,
+                                color = if (active) Color.White else primaryInk,
                                 maxLines = 1
                             )
                         }
@@ -1740,7 +1765,7 @@ private fun IosReaderAppearancePopover(
                 if (prefs.scrollDirection == ReaderScrollDirection.HORIZONTAL) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
                         HorizontalPageEffect.entries.forEach { effect ->
                             val selected = prefs.horizontalPageEffect == effect
@@ -1749,21 +1774,25 @@ private fun IosReaderAppearancePopover(
                                 HorizontalPageEffect.TAP_FADE -> "Lướt mờ"
                                 HorizontalPageEffect.NONE -> "Không"
                             }
-                            Box(
+                            NeoBrutalistPressBox(
+                                onClick = { onSelectHorizontalPageEffect(effect) },
+                                isPill = true,
+                                shadowOffset = 2.dp,
+                                pressDepth = 1.5.dp,
+                                borderWidth = 1.2.dp,
+                                containerColor = if (selected) IosBlue else trayBg,
+                                borderColor = inkBorder,
+                                shadowColor = hardShadow,
                                 modifier = Modifier
                                     .weight(1f)
-                                    .clip(RoundedCornerShape(50))
-                                    .background(if (selected) IosBlue else Color(0xFFF2F2F7))
-                                    .clickable { onSelectHorizontalPageEffect(effect) }
-                                    .padding(vertical = 5.dp)
-                                    .testTag("popover_horizontal_effect_${effect.storageKey}"),
-                                contentAlignment = Alignment.Center
+                                    .height(28.dp)
+                                    .testTag("popover_horizontal_effect_${effect.storageKey}")
                             ) {
                                 Text(
                                     text = shortName,
                                     fontSize = 10.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = if (selected) Color.White else Color(0xFF1C1C1E),
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (selected) Color.White else primaryInk,
                                     maxLines = 1
                                 )
                             }
@@ -1772,7 +1801,7 @@ private fun IosReaderAppearancePopover(
                 }
             }
 
-            HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFE5E5EA))
+            HorizontalDivider(thickness = 0.8.dp, color = MaterialTheme.colorScheme.outline)
 
             // 3. Page Margin (Lề trang)
             PopoverStepperRow(
@@ -1810,9 +1839,9 @@ private fun IosReaderAppearancePopover(
                 onIncrease = onIncreaseLetterSpacing
             )
 
-            HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFE5E5EA))
+            HorizontalDivider(thickness = 0.8.dp, color = MaterialTheme.colorScheme.outline)
 
-            // 6. Paper Color (3 circular swatches with #007AFF ring when active)
+            // 6. Paper Color (3 circular swatches with crisp ink border)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1821,8 +1850,8 @@ private fun IosReaderAppearancePopover(
                 Text(
                     text = "Màu giấy",
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFF1C1C1E)
+                    fontWeight = FontWeight.Bold,
+                    color = primaryInk
                 )
 
                 Row(
@@ -1867,6 +1896,12 @@ private fun PopoverStepperRow(
     onDecrease: () -> Unit,
     onIncrease: () -> Unit
 ) {
+    val primaryInk = MaterialTheme.colorScheme.onSurface
+    val secondaryInk = MaterialTheme.colorScheme.onSurfaceVariant
+    val trayBg = neoSecondaryPaperColor()
+    val inkBorder = neoInkBorderColor()
+    val hardShadow = neoHardShadowColor()
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1875,30 +1910,32 @@ private fun PopoverStepperRow(
         Text(
             text = label,
             fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color(0xFF1C1C1E)
+            fontWeight = FontWeight.Bold,
+            color = primaryInk
         )
 
         Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .background(Color(0xFFF2F2F7))
-                .padding(horizontal = 4.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-            Box(
+            NeoBrutalistPressBox(
+                onClick = onDecrease,
+                enabled = canDecrease,
+                isCircle = true,
+                shadowOffset = 2.dp,
+                pressDepth = 1.5.dp,
+                borderWidth = 1.5.dp,
+                containerColor = trayBg,
+                borderColor = inkBorder,
+                shadowColor = hardShadow,
                 modifier = Modifier
-                    .size(26.dp)
-                    .clip(CircleShape)
-                    .clickable(enabled = canDecrease, onClick = onDecrease)
-                    .testTag(decreaseTag),
-                contentAlignment = Alignment.Center
+                    .size(29.dp)
+                    .testTag(decreaseTag)
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Remove,
                     contentDescription = "Giảm $label",
-                    tint = if (canDecrease) Color(0xFF1C1C1E) else Color(0xFFAEAEB2),
+                    tint = if (canDecrease) primaryInk else secondaryInk.copy(alpha = 0.4f),
                     modifier = Modifier.size(15.dp)
                 )
             }
@@ -1906,25 +1943,31 @@ private fun PopoverStepperRow(
             Text(
                 text = valueText,
                 fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color(0xFF1C1C1E),
+                fontWeight = FontWeight.Bold,
+                color = primaryInk,
                 modifier = Modifier.width(34.dp),
                 textAlign = TextAlign.Center,
                 maxLines = 1
             )
 
-            Box(
+            NeoBrutalistPressBox(
+                onClick = onIncrease,
+                enabled = canIncrease,
+                isCircle = true,
+                shadowOffset = 2.dp,
+                pressDepth = 1.5.dp,
+                borderWidth = 1.5.dp,
+                containerColor = trayBg,
+                borderColor = inkBorder,
+                shadowColor = hardShadow,
                 modifier = Modifier
-                    .size(26.dp)
-                    .clip(CircleShape)
-                    .clickable(enabled = canIncrease, onClick = onIncrease)
-                    .testTag(increaseTag),
-                contentAlignment = Alignment.Center
+                    .size(29.dp)
+                    .testTag(increaseTag)
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Add,
                     contentDescription = "Tăng $label",
-                    tint = if (canIncrease) Color(0xFF1C1C1E) else Color(0xFFAEAEB2),
+                    tint = if (canIncrease) primaryInk else secondaryInk.copy(alpha = 0.4f),
                     modifier = Modifier.size(15.dp)
                 )
             }
@@ -1940,19 +1983,18 @@ private fun PaperSwatchCircle(
     tag: String,
     onClick: () -> Unit
 ) {
-    Box(
+    NeoBrutalistPressBox(
+        onClick = onClick,
+        isCircle = true,
+        shadowOffset = 2.dp,
+        pressDepth = 1.5.dp,
+        borderWidth = if (selected) 2.dp else 1.5.dp,
+        containerColor = color,
+        borderColor = if (selected) IosBlue else neoInkBorderColor(),
+        shadowColor = neoHardShadowColor(),
         modifier = Modifier
-            .size(28.dp)
-            .clip(CircleShape)
-            .background(color)
-            .border(
-                width = if (selected) 2.2.dp else 0.8.dp,
-                color = if (selected) IosBlue else Color(0xFFD1D1D6),
-                shape = CircleShape
-            )
-            .clickable(onClick = onClick)
-            .testTag(tag),
-        contentAlignment = Alignment.Center
+            .size(30.dp)
+            .testTag(tag)
     ) {
         if (selected) {
             Icon(
@@ -1972,6 +2014,10 @@ private fun ReaderTocBottomSheetContent(
     currentChapterIndex: Int,
     onSelectChapter: (Int) -> Unit
 ) {
+    val primaryInk = MaterialTheme.colorScheme.onSurface
+    val secondaryInk = MaterialTheme.colorScheme.onSurfaceVariant
+    val dividerColor = MaterialTheme.colorScheme.outline
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1981,20 +2027,20 @@ private fun ReaderTocBottomSheetContent(
         Text(
             text = "Mục lục",
             fontSize = 15.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color(0xFF1C1C1E)
+            fontWeight = FontWeight.ExtraBold,
+            color = primaryInk
         )
         if (bookTitle.isNotBlank()) {
             Text(
                 text = bookTitle,
                 fontSize = 11.sp,
-                color = Color(0xFF6E6E73),
+                color = secondaryInk,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 2.dp, bottom = 10.dp)
             )
         }
-        HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFE5E5EA))
+        HorizontalDivider(thickness = 1.dp, color = dividerColor)
 
         LazyColumn(
             modifier = Modifier
@@ -2019,8 +2065,8 @@ private fun ReaderTocBottomSheetContent(
                     Text(
                         text = chapter.title,
                         fontSize = 13.sp,
-                        fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
-                        color = if (isCurrent) IosBlue else Color(0xFF1C1C1E),
+                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                        color = if (isCurrent) IosBlue else primaryInk,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
@@ -2035,7 +2081,7 @@ private fun ReaderTocBottomSheetContent(
                     }
                 }
                 if (idx < chapters.lastIndex) {
-                    HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFE5E5EA))
+                    HorizontalDivider(thickness = 0.6.dp, color = dividerColor)
                 }
             }
         }

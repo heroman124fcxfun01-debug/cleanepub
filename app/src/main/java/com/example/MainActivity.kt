@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.Display
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -12,11 +13,20 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -28,6 +38,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,8 +61,10 @@ import com.example.service.BookAudioPlaybackService
 import com.example.ui.BookLibraryViewModel
 import com.example.ui.LibraryImportFlowState
 import com.example.ui.MainViewModel
+import com.example.ui.components.AppMainTab
 import com.example.ui.components.EpubMetadataEditorDialog
 import com.example.ui.components.FloatingBackgroundAudioBanner
+import com.example.ui.components.FloatingBottomNavBar
 import com.example.ui.components.LibraryReaderGeneralSettingsSheet
 import com.example.ui.components.SettingsDialog
 import com.example.ui.screens.BookLibraryScreen
@@ -60,6 +73,7 @@ import com.example.ui.screens.MainScreen
 import com.example.ui.screens.ManualEditorScreen
 import com.example.ui.screens.ProcessingScreen
 import com.example.ui.screens.ReviewScreen
+import com.example.ui.screens.StudioScreen
 import com.example.ui.theme.EpubCleanAITheme
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 
@@ -77,6 +91,9 @@ class MainActivity : ComponentActivity() {
 
         // Initialize PDFBox-Android resource loader (100% on-device)
         PDFBoxResourceLoader.init(applicationContext)
+
+        // Request highest supported display refresh rate (90Hz/120Hz) for ultra-smooth transitions
+        enableHighRefreshRate()
 
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(
@@ -126,6 +143,29 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    private fun enableHighRefreshRate() {
+        runCatching {
+            val activeDisplay: Display? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay
+            }
+            val currentMode = activeDisplay?.mode ?: return
+            val bestMode = activeDisplay.supportedModes
+                .filter {
+                    it.physicalWidth == currentMode.physicalWidth &&
+                        it.physicalHeight == currentMode.physicalHeight
+                }
+                .maxByOrNull { it.refreshRate }
+            if (bestMode != null && bestMode.refreshRate > currentMode.refreshRate) {
+                window.attributes = window.attributes.apply {
+                    preferredDisplayModeId = bestMode.modeId
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -155,6 +195,7 @@ private fun EpubCleanNavHost(
     val pendingImport by viewModel.pendingImport.collectAsStateWithLifecycle()
     val customSaveFolderLabel by viewModel.customSaveFolderLabel.collectAsStateWithLifecycle()
     val manualEditorState by viewModel.manualEditorState.collectAsStateWithLifecycle()
+    val batchCleanState by viewModel.batchCleanState.collectAsStateWithLifecycle()
 
     val libraryBooks by libraryViewModel.books.collectAsStateWithLifecycle()
     val libraryCollections by libraryViewModel.collections.collectAsStateWithLifecycle()
@@ -188,10 +229,17 @@ private fun EpubCleanNavHost(
         onForceLightBarsChanged(route == ROUTE_MANUAL_EDITOR || route == ROUTE_BOOK_READER)
     }
 
+    var activeMainTab by rememberSaveable { mutableStateOf(AppMainTab.CLEAN_EPUB) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showLibraryReaderSettingsSheet by remember { mutableStateOf(false) }
     var showReviewMetadataDialog by remember { mutableStateOf(false) }
     var coverPickerForReview by remember { mutableStateOf(false) }
+
+    LaunchedEffect(activeMainTab) {
+        if (activeMainTab == AppMainTab.BOOK_LIBRARY) {
+            libraryViewModel.refreshLibrary()
+        }
+    }
 
     // Re-check MANAGE_EXTERNAL_STORAGE & newly installed offline TTS voices on ON_RESUME
     DisposableEffect(lifecycleOwner) {
@@ -270,12 +318,31 @@ private fun EpubCleanNavHost(
         }
     )
 
-    // Direct offline import picker for Book Library (.epub / .pdf) -> prompts "Có muốn dọn sách không?"
+    // Direct offline single/multi-book picker for Book Library (.epub / .pdf)
     val libraryImportLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument(),
-        onResult = { uri ->
-            if (uri != null) {
-                libraryViewModel.onLibraryFilePicked(uri)
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+        onResult = { uris ->
+            if (uris.isNotEmpty()) {
+                libraryViewModel.onLibraryFilesPicked(uris)
+            }
+        }
+    )
+
+    // Batch multi-book auto-clean picker for Cleanbook (automatically cleans & saves all books)
+    val cleanbookBatchLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+        onResult = { uris ->
+            if (uris.isNotEmpty()) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val notifGranted = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (!notifGranted) {
+                        notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                }
+                viewModel.startBatchAutoClean(uris)
             }
         }
     )
@@ -378,121 +445,204 @@ private fun EpubCleanNavHost(
     Box(modifier = Modifier.fillMaxSize()) {
         NavHost(
             navController = navController,
-            startDestination = ROUTE_HOME
+            startDestination = ROUTE_HOME,
+            enterTransition = {
+                slideInHorizontally(
+                    initialOffsetX = { fullWidth -> (fullWidth * 0.22f).toInt() },
+                    animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing)
+                ) + fadeIn(animationSpec = tween(durationMillis = 220))
+            },
+            exitTransition = {
+                slideOutHorizontally(
+                    targetOffsetX = { fullWidth -> -(fullWidth * 0.10f).toInt() },
+                    animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing)
+                ) + fadeOut(animationSpec = tween(durationMillis = 180))
+            },
+            popEnterTransition = {
+                slideInHorizontally(
+                    initialOffsetX = { fullWidth -> -(fullWidth * 0.14f).toInt() },
+                    animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing)
+                ) + fadeIn(animationSpec = tween(durationMillis = 200))
+            },
+            popExitTransition = {
+                slideOutHorizontally(
+                    targetOffsetX = { fullWidth -> (fullWidth * 0.25f).toInt() },
+                    animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing)
+                ) + fadeOut(animationSpec = tween(durationMillis = 180))
+            }
         ) {
         composable(ROUTE_HOME) {
-            MainScreen(
-                recentFiles = recentFiles,
-                libraryBookCount = libraryBooks.size,
-                isOpeningEditor = isResumingDraft,
-                hasAllFilesAccess = hasAllFilesAccess,
-                cleaningOptions = cleaningOptions,
-                isLoadingMetadata = isLoadingMetadata,
-                errorBanner = homeError,
-                onOpenLibraryClick = {
-                    libraryViewModel.refreshLibrary()
-                    navController.navigate(ROUTE_BOOK_LIBRARY) {
-                        launchSingleTop = true
-                    }
-                },
-                onSelectFileClick = {
-                    documentPickerLauncher.launch(
-                        arrayOf(
-                            "application/epub+zip",
-                            "application/pdf",
-                            "application/octet-stream",
-                            "*/*"
-                        )
+            AnimatedContent(
+                targetState = activeMainTab,
+                transitionSpec = {
+                    val movingForward = targetState.ordinal > initialState.ordinal
+                    val enter = slideInHorizontally(
+                        initialOffsetX = { width ->
+                            if (movingForward) (width * 0.08f).toInt() else -(width * 0.08f).toInt()
+                        },
+                        animationSpec = spring(dampingRatio = 0.88f, stiffness = 460f)
+                    ) + fadeIn(
+                        animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing)
+                    ) + scaleIn(
+                        initialScale = 0.985f,
+                        animationSpec = spring(dampingRatio = 0.88f, stiffness = 460f)
                     )
+                    val exit = slideOutHorizontally(
+                        targetOffsetX = { width ->
+                            if (movingForward) -(width * 0.06f).toInt() else (width * 0.06f).toInt()
+                        },
+                        animationSpec = tween(durationMillis = 170, easing = FastOutSlowInEasing)
+                    ) + fadeOut(
+                        animationSpec = tween(durationMillis = 150)
+                    ) + scaleOut(
+                        targetScale = 0.985f,
+                        animationSpec = tween(durationMillis = 170)
+                    )
+                    enter togetherWith exit
                 },
-                onRequestStoragePermission = ::requestStorageAccess,
-                onOpenSettingsClick = { showSettingsDialog = true },
-                onUpdateCleaningOptions = { viewModel.updateCleaningOptions(it) },
-                onContinueEditHistoryFile = { entry ->
-                    viewModel.continueEditingHistoryItem(entry) {
-                        navController.navigate(ROUTE_MANUAL_EDITOR) {
-                            launchSingleTop = true
-                        }
+                label = "main_tab_120fps_transition"
+            ) { tab ->
+                when (tab) {
+                    AppMainTab.CLEAN_EPUB -> {
+                        MainScreen(
+                            recentFiles = recentFiles,
+                            isOpeningEditor = isResumingDraft,
+                            hasAllFilesAccess = hasAllFilesAccess,
+                            cleaningOptions = cleaningOptions,
+                            isLoadingMetadata = isLoadingMetadata,
+                            batchCleanState = batchCleanState,
+                            errorBanner = homeError,
+                            onSelectFileClick = {
+                                documentPickerLauncher.launch(
+                                    arrayOf(
+                                        "application/epub+zip",
+                                        "application/pdf",
+                                        "application/octet-stream",
+                                        "*/*"
+                                    )
+                                )
+                            },
+                            onBatchCleanClick = {
+                                cleanbookBatchLauncher.launch(
+                                    arrayOf(
+                                        "application/epub+zip",
+                                        "application/pdf",
+                                        "application/octet-stream",
+                                        "*/*"
+                                    )
+                                )
+                            },
+                            onCancelBatchClean = { viewModel.cancelBatchAutoClean() },
+                            onDismissBatchClean = { viewModel.dismissBatchCleanState() },
+                            onRequestStoragePermission = ::requestStorageAccess,
+                            onOpenSettingsClick = { showSettingsDialog = true },
+                            onUpdateCleaningOptions = { viewModel.updateCleaningOptions(it) },
+                            onContinueEditHistoryFile = { entry ->
+                                viewModel.continueEditingHistoryItem(entry) {
+                                    navController.navigate(ROUTE_MANUAL_EDITOR) {
+                                        launchSingleTop = true
+                                    }
+                                }
+                            },
+                            onOpenHistoryFile = { entry ->
+                                openEpubExternally(entry.filePath, entry.uriString)
+                            },
+                            onReprocessHistoryFile = { entry ->
+                                viewModel.reprocessHistoryItem(entry)
+                            },
+                            onLearnErrorsFromHistory = { entry ->
+                                viewModel.learnErrorsFromHistory(entry)
+                            },
+                            onDeleteHistoryFile = { id -> viewModel.deleteHistoryItem(id) },
+                            onClearAllHistory = { viewModel.clearAllHistory() },
+                            onDismissError = { viewModel.clearHomeError() }
+                        )
                     }
-                },
-                onOpenHistoryFile = { entry ->
-                    openEpubExternally(entry.filePath, entry.uriString)
-                },
-                onReprocessHistoryFile = { entry ->
-                    viewModel.reprocessHistoryItem(entry)
-                },
-                onLearnErrorsFromHistory = { entry ->
-                    viewModel.learnErrorsFromHistory(entry)
-                },
-                onDeleteHistoryFile = { id -> viewModel.deleteHistoryItem(id) },
-                onClearAllHistory = { viewModel.clearAllHistory() },
-                onDismissError = { viewModel.clearHomeError() }
-            )
-        }
 
-        composable(ROUTE_BOOK_LIBRARY) {
-            BookLibraryScreen(
-                books = libraryBooks,
-                collections = libraryCollections,
-                isImporting = isImportingLibraryBook,
-                importFlowState = libraryImportFlowState,
-                cleaningProgressPercent = (snapshot.progressFraction * 100f).toInt().coerceIn(0, 100),
-                cleaningStatusMessage = snapshot.statusDetail,
-                onBackClick = { navController.popBackStack() },
-                onOpenReaderGeneralSettingsClick = { showLibraryReaderSettingsSheet = true },
-                onImportBookClick = {
-                    libraryImportLauncher.launch(
-                        arrayOf(
-                            "application/epub+zip",
-                            "application/pdf",
-                            "application/octet-stream",
-                            "*/*"
+                    AppMainTab.BOOK_LIBRARY -> {
+                        BookLibraryScreen(
+                            books = libraryBooks,
+                            collections = libraryCollections,
+                            isImporting = isImportingLibraryBook,
+                            importFlowState = libraryImportFlowState,
+                            cleaningProgressPercent = (snapshot.progressFraction * 100f).toInt().coerceIn(0, 100),
+                            cleaningStatusMessage = snapshot.statusDetail,
+                            onOpenReaderGeneralSettingsClick = { showLibraryReaderSettingsSheet = true },
+                            onImportBookClick = {
+                                libraryImportLauncher.launch(
+                                    arrayOf(
+                                        "application/epub+zip",
+                                        "application/pdf",
+                                        "application/octet-stream",
+                                        "*/*"
+                                    )
+                                )
+                            },
+                            onConfirmCleanBeforeImport = {
+                                val source = libraryViewModel.startCleaningFlowForPickedFile()
+                                if (source != null) {
+                                    viewModel.startAutoCleanForLibraryImport(source)
+                                }
+                            },
+                            onConfirmDirectImportNoClean = {
+                                libraryViewModel.confirmDirectImportWithoutCleaning()
+                            },
+                            onConfirmBatchClean = {
+                                libraryViewModel.startBatchImportIntoLibrary(
+                                    cleanBeforeImport = true,
+                                    cleaningOptions = cleaningOptions
+                                )
+                            },
+                            onConfirmBatchNoClean = {
+                                libraryViewModel.startBatchImportIntoLibrary(
+                                    cleanBeforeImport = false,
+                                    cleaningOptions = cleaningOptions
+                                )
+                            },
+                            onCancelBatchImport = {
+                                libraryViewModel.cancelBatchImport()
+                            },
+                            onCancelAutoClean = {
+                                viewModel.cancelProcessing()
+                                libraryViewModel.dismissImportFlow()
+                            },
+                            onContinueEditCleanedBook = {
+                                libraryViewModel.dismissImportFlow()
+                                navController.navigate(ROUTE_REVIEW) {
+                                    launchSingleTop = true
+                                }
+                            },
+                            onAcceptCleanedBookOk = {
+                                libraryViewModel.dismissImportFlow()
+                                viewModel.resetProcessingSession()
+                            },
+                            onDismissImportFlow = {
+                                libraryViewModel.dismissImportFlow()
+                            },
+                            onOpenBook = { book ->
+                                libraryViewModel.openBookForReading(book) {
+                                    navController.navigate(ROUTE_BOOK_READER) {
+                                        launchSingleTop = true
+                                    }
+                                }
+                            },
+                            onDeleteBook = { bookId -> libraryViewModel.deleteBook(bookId) },
+                            onCreateCollection = { name -> libraryViewModel.createCollection(name) },
+                            onSetCollectionBooks = { colId, bookIds ->
+                                libraryViewModel.setCollectionBooks(colId, bookIds)
+                            },
+                            onAddBookToCollection = { colId, bookId ->
+                                libraryViewModel.addBookToCollection(colId, bookId)
+                            },
+                            onDeleteCollection = { colId -> libraryViewModel.deleteCollection(colId) }
                         )
-                    )
-                },
-                onConfirmCleanBeforeImport = {
-                    val source = libraryViewModel.startCleaningFlowForPickedFile()
-                    if (source != null) {
-                        viewModel.startAutoCleanForLibraryImport(source)
                     }
-                },
-                onConfirmDirectImportNoClean = {
-                    libraryViewModel.confirmDirectImportWithoutCleaning()
-                },
-                onCancelAutoClean = {
-                    viewModel.cancelProcessing()
-                    libraryViewModel.dismissImportFlow()
-                },
-                onContinueEditCleanedBook = {
-                    libraryViewModel.dismissImportFlow()
-                    navController.navigate(ROUTE_REVIEW) {
-                        launchSingleTop = true
+
+                    AppMainTab.STUDIO -> {
+                        StudioScreen()
                     }
-                },
-                onAcceptCleanedBookOk = {
-                    libraryViewModel.dismissImportFlow()
-                    viewModel.resetProcessingSession()
-                },
-                onDismissImportFlow = {
-                    libraryViewModel.dismissImportFlow()
-                },
-                onOpenBook = { book ->
-                    libraryViewModel.openBookForReading(book) {
-                        navController.navigate(ROUTE_BOOK_READER) {
-                            launchSingleTop = true
-                        }
-                    }
-                },
-                onDeleteBook = { bookId -> libraryViewModel.deleteBook(bookId) },
-                onCreateCollection = { name -> libraryViewModel.createCollection(name) },
-                onSetCollectionBooks = { colId, bookIds ->
-                    libraryViewModel.setCollectionBooks(colId, bookIds)
-                },
-                onAddBookToCollection = { colId, bookId ->
-                    libraryViewModel.addBookToCollection(colId, bookId)
-                },
-                onDeleteCollection = { colId -> libraryViewModel.deleteCollection(colId) }
-            )
+                }
+            }
         }
 
         composable(ROUTE_BOOK_READER) {
@@ -653,7 +803,11 @@ private fun EpubCleanNavHost(
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
                 .widthIn(max = 560.dp)
-                .padding(horizontal = 14.dp, vertical = 10.dp)
+                .padding(
+                    start = 16.dp,
+                    end = 16.dp,
+                    bottom = if (currentRoute == ROUTE_HOME) 82.dp else 10.dp
+                )
         ) {
             FloatingBackgroundAudioBanner(
                 playbackState = audioPlaybackState,
@@ -670,6 +824,19 @@ private fun EpubCleanNavHost(
                 onStopClick = {
                     BookAudioPlaybackService.stop(context)
                 }
+            )
+        }
+
+        // Frosted-Glass Floating Bottom Navigation Pill (3 Tabs: Cleanbook | Thư viện sách | Studio)
+        AnimatedVisibility(
+            visible = currentRoute == ROUTE_HOME,
+            enter = slideInVertically { it } + fadeIn(),
+            exit = slideOutVertically { it } + fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            FloatingBottomNavBar(
+                selectedTab = activeMainTab,
+                onSelectTab = { selected -> activeMainTab = selected }
             )
         }
     }

@@ -116,22 +116,21 @@ fun FloatingBackgroundAudioBanner(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .shadow(
-                elevation = 10.dp,
-                shape = pillShape,
-                ambientColor = Color.Black.copy(alpha = 0.20f),
-                spotColor = Color.Black.copy(alpha = 0.30f)
+            .padding(end = 3.dp, bottom = 3.dp)
+            .neoHardOffsetShadow(
+                cornerRadius = 999.dp,
+                offsetX = 3.dp,
+                offsetY = 3.dp
             )
             .clip(pillShape)
-            .background(Color(0xF21C1C1E))
-            .border(0.6.dp, Color.White.copy(alpha = 0.16f), pillShape)
+            .background(Color(0xFF18181B))
+            .border(width = 1.5.dp, color = Color(0xFF3F3F46), shape = pillShape)
             .clickable(onClick = onOpenBookClick)
             .padding(horizontal = 12.dp, vertical = 8.dp)
             .testTag("background_audio_mini_banner"),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Headphones + Live animated running bars side-by-side
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -139,11 +138,11 @@ fun FloatingBackgroundAudioBanner(
             Icon(
                 imageVector = Icons.Rounded.Headphones,
                 contentDescription = "Đang nghe sách",
-                tint = IosBlue,
+                tint = Color(0xFFF5B82E),
                 modifier = Modifier.size(16.dp)
             )
             if (playbackState.isPlaying) {
-                AnimatedAudioPlayingBars(color = IosBlue, maxHeight = 12.dp, barWidth = 2.2.dp)
+                AnimatedAudioPlayingBars(color = Color(0xFFF5B82E), maxHeight = 12.dp, barWidth = 2.2.dp)
             }
         }
 
@@ -155,9 +154,10 @@ fun FloatingBackgroundAudioBanner(
                 text = playbackState.bookTitle.ifBlank { "Đang nghe sách" },
                 fontSize = 12.sp,
                 lineHeight = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFFF4F1EA),
                 maxLines = 1,
+                softWrap = false,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
@@ -172,8 +172,9 @@ fun FloatingBackgroundAudioBanner(
                 },
                 fontSize = 10.sp,
                 lineHeight = 12.sp,
-                color = Color.White.copy(alpha = 0.68f),
+                color = Color(0xFFA1A1AA),
                 maxLines = 1,
+                softWrap = false,
                 overflow = TextOverflow.Ellipsis
             )
         }
@@ -183,6 +184,7 @@ fun FloatingBackgroundAudioBanner(
                 .size(28.dp)
                 .clip(CircleShape)
                 .background(IosBlue)
+                .border(1.2.dp, Color(0xFFF4F1EA), CircleShape)
                 .clickable(onClick = onTogglePlayPause)
                 .testTag("background_audio_toggle_button"),
             contentAlignment = Alignment.Center
@@ -191,7 +193,7 @@ fun FloatingBackgroundAudioBanner(
                 imageVector = if (playbackState.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                 contentDescription = if (playbackState.isPlaying) "Tạm dừng" else "Phát tiếp",
                 tint = Color.White,
-                modifier = Modifier.size(16.dp)
+                modifier = Modifier.size(15.dp)
             )
         }
 
@@ -199,7 +201,8 @@ fun FloatingBackgroundAudioBanner(
             modifier = Modifier
                 .size(26.dp)
                 .clip(CircleShape)
-                .background(Color.White.copy(alpha = 0.14f))
+                .background(Color(0xFF27272A))
+                .border(1.dp, Color(0xFF52525B), CircleShape)
                 .clickable(onClick = onStopClick)
                 .testTag("background_audio_stop_button"),
             contentAlignment = Alignment.Center
@@ -207,7 +210,7 @@ fun FloatingBackgroundAudioBanner(
             Icon(
                 imageVector = Icons.Rounded.Close,
                 contentDescription = "Tắt nghe sách",
-                tint = Color.White,
+                tint = Color(0xFFF4F1EA),
                 modifier = Modifier.size(14.dp)
             )
         }

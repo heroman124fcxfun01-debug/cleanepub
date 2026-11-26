@@ -81,15 +81,18 @@ fun CustomReplaceDialog(
                 .padding(18.dp)
         ) {
             // Header
+            val inkBorder = neoInkBorderColor()
+            val hardShadow = neoHardShadowColor()
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
-                        .size(30.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer),
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(MaterialTheme.colorScheme.primaryContainer)
+                        .border(1.5.dp, inkBorder, RoundedCornerShape(9.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -103,9 +106,9 @@ fun CustomReplaceDialog(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Thay thế nhanh cá nhân",
-                        fontSize = 16.sp,
-                        lineHeight = 20.sp,
-                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp,
+                        lineHeight = 19.sp,
+                        fontWeight = FontWeight.ExtraBold,
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -118,19 +121,15 @@ fun CustomReplaceDialog(
                         maxLines = 1
                     )
                 }
-                Box(
-                    modifier = Modifier
-                        .size(30.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .clickable(onClick = onDismiss)
-                        .testTag("custom_replace_close"),
-                    contentAlignment = Alignment.Center
+                Ios3DCircleIconButton(
+                    onClick = onDismiss,
+                    size = 30.dp,
+                    modifier = Modifier.testTag("custom_replace_close")
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Close,
                         contentDescription = "Đóng",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.size(15.dp)
                     )
                 }
@@ -170,27 +169,29 @@ fun CustomReplaceDialog(
                 )
 
                 val canAdd = findInput.isNotEmpty()
-                Surface(
-                    shape = CircleShape,
-                    color = if (canAdd) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                NeoBrutalistPressBox(
+                    onClick = {
+                        onAddRule(findInput, replaceInput)
+                        findInput = ""
+                        replaceInput = ""
+                    },
+                    enabled = canAdd,
+                    isCircle = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    containerColor = if (canAdd) MaterialTheme.colorScheme.primary else neoSecondaryPaperColor(),
+                    borderColor = inkBorder,
+                    shadowColor = hardShadow,
                     modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .clickable(enabled = canAdd) {
-                            onAddRule(findInput, replaceInput)
-                            findInput = ""
-                            replaceInput = ""
-                        }
+                        .size(39.dp)
                         .testTag("custom_replace_add_button")
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Rounded.Add,
-                            contentDescription = "Thêm cặp thay thế",
-                            tint = if (canAdd) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Rounded.Add,
+                        contentDescription = "Thêm cặp thay thế",
+                        tint = if (canAdd) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
 
@@ -226,11 +227,15 @@ fun CustomReplaceDialog(
                         items = rules,
                         key = { it.id }
                     ) { rule ->
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
-                            modifier = Modifier.fillMaxWidth()
+                        val ruleShape = RoundedCornerShape(10.dp)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(end = 3.dp, bottom = 3.dp)
+                                .neoHardOffsetShadow(cornerRadius = 10.dp, offsetX = 3.dp, offsetY = 3.dp, shadowColor = hardShadow)
+                                .clip(ruleShape)
+                                .background(neoSecondaryPaperColor())
+                                .border(1.5.dp, inkBorder, ruleShape)
                         ) {
                             Row(
                                 modifier = Modifier
@@ -330,8 +335,8 @@ private fun DialogCompactInput(
         modifier = modifier
             .height(36.dp)
             .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .border(0.8.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.7f), RoundedCornerShape(10.dp))
+            .background(neoSecondaryPaperColor())
+            .border(1.5.dp, neoInkBorderColor(), RoundedCornerShape(10.dp))
             .padding(horizontal = 9.dp),
         contentAlignment = Alignment.CenterStart
     ) {

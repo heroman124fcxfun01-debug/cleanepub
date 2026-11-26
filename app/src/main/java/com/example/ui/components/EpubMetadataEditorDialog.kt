@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -121,31 +122,34 @@ fun EpubMetadataEditorDialog(
                     )
                 }
                 Spacer(modifier = Modifier.width(8.dp))
-                Box(
-                    modifier = Modifier
-                        .size(32.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .clickable(onClick = onDismiss)
-                        .testTag("metadata_close_button"),
-                    contentAlignment = Alignment.Center
+                Ios3DCircleIconButton(
+                    onClick = onDismiss,
+                    size = 32.dp,
+                    modifier = Modifier.testTag("metadata_close_button")
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Close,
                         contentDescription = "Đóng",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.size(16.dp)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            // Cover Preview + Change Cover Pill Button
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.fillMaxWidth()
+            // Cover Preview + Change Cover Pill Button (Neo-Brutalist 3D Card)
+            val inkBorder = neoInkBorderColor()
+            val hardShadow = neoHardShadowColor()
+            val coverCardShape = RoundedCornerShape(14.dp)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(end = 3.dp, bottom = 3.dp)
+                    .neoHardOffsetShadow(cornerRadius = 14.dp, offsetX = 3.dp, offsetY = 3.dp, shadowColor = hardShadow)
+                    .clip(coverCardShape)
+                    .background(neoSecondaryPaperColor())
+                    .border(1.5.dp, inkBorder, coverCardShape)
             ) {
                 Row(
                     modifier = Modifier
@@ -157,8 +161,9 @@ fun EpubMetadataEditorDialog(
                         modifier = Modifier
                             .width(68.dp)
                             .height(94.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(MaterialTheme.colorScheme.primaryContainer),
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.primaryContainer)
+                            .border(1.5.dp, inkBorder, RoundedCornerShape(10.dp)),
                         contentAlignment = Alignment.Center
                     ) {
                         if (coverBitmap != null) {
@@ -185,7 +190,7 @@ fun EpubMetadataEditorDialog(
                             text = "Bìa sách (Cover)",
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.onSurface,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
@@ -198,30 +203,34 @@ fun EpubMetadataEditorDialog(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(10.dp))
-                        Surface(
-                            shape = RoundedCornerShape(50),
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(50))
-                                .testTag("change_cover_button")
-                                .clickable(onClick = onPickCoverClick)
+                        NeoBrutalistPressBox(
+                            onClick = onPickCoverClick,
+                            isPill = true,
+                            shadowOffset = 3.dp,
+                            pressDepth = 2.dp,
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            borderColor = inkBorder,
+                            shadowColor = hardShadow,
+                            modifier = Modifier.testTag("change_cover_button")
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.Image,
                                     contentDescription = null,
                                     tint = Color.White,
-                                    modifier = Modifier.size(16.dp)
+                                    modifier = Modifier.size(15.dp)
                                 )
                                 Text(
                                     text = "Đổi bìa sách",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = Color.White,
-                                    fontWeight = FontWeight.SemiBold
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
                         }
@@ -265,23 +274,25 @@ fun EpubMetadataEditorDialog(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Quick Language Pill Chips
+            // Quick Language Pill Chips (Neo-Brutalist 3D tactile pills)
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 listOf("vi", "en", "vi-VN").forEach { code ->
                     val selected = language.trim().equals(code, ignoreCase = true)
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = if (selected) {
+                    NeoBrutalistPressBox(
+                        onClick = { language = code },
+                        isPill = true,
+                        shadowOffset = 3.dp,
+                        pressDepth = 2.dp,
+                        containerColor = if (selected) {
                             MaterialTheme.colorScheme.primaryContainer
                         } else {
-                            MaterialTheme.colorScheme.surfaceVariant
+                            neoPaperSurfaceColor()
                         },
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .clickable { language = code }
+                        borderColor = inkBorder,
+                        shadowColor = hardShadow
                     ) {
                         Text(
                             text = code,
@@ -289,10 +300,12 @@ fun EpubMetadataEditorDialog(
                             color = if (selected) {
                                 MaterialTheme.colorScheme.primary
                             } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
+                                MaterialTheme.colorScheme.onSurface
                             },
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                         )
                     }
                 }
@@ -306,27 +319,20 @@ fun EpubMetadataEditorDialog(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                OutlinedButton(
+                Ios3DSurfacePillButton(
+                    text = "Hủy",
+                    height = 44.dp,
+                    recessed = true,
                     onClick = onDismiss,
                     modifier = Modifier
                         .weight(0.38f)
-                        .height(46.dp)
-                        .testTag("metadata_cancel_button"),
-                    shape = RoundedCornerShape(50),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-                ) {
-                    Text(
-                        text = "Hủy",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1
-                    )
-                }
+                        .testTag("metadata_cancel_button")
+                )
 
                 Box(modifier = Modifier.weight(0.62f)) {
                     IosPrimaryButton(
                         text = confirmButtonLabel,
-                        height = 46.dp,
+                        height = 44.dp,
                         onClick = {
                             onConfirm(
                                 metadata.copy(

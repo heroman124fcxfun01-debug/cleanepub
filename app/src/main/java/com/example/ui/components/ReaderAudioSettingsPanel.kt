@@ -43,6 +43,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
@@ -128,11 +129,11 @@ fun ReaderAudioSettingsSheetContent(
         }
     }
 
-    val cardBg = Color(0xFFF2F2F7)
-    val itemBg = Color(0xFFFFFFFF)
-    val borderCol = Color(0xFFE5E5EA)
-    val primaryInk = Color(0xFF1C1C1E)
-    val secondaryInk = Color(0xFF6E6E73)
+    val cardBg = neoSecondaryPaperColor()
+    val itemBg = neoPaperSurfaceColor()
+    val borderCol = neoInkBorderColor()
+    val primaryInk = MaterialTheme.colorScheme.onSurface
+    val secondaryInk = MaterialTheme.colorScheme.onSurfaceVariant
 
     Column(
         modifier = Modifier
@@ -155,9 +156,10 @@ fun ReaderAudioSettingsSheetContent(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(30.dp)
+                        .size(32.dp)
                         .clip(CircleShape)
-                        .background(IosBlue.copy(alpha = 0.12f)),
+                        .background(IosBlue.copy(alpha = 0.14f))
+                        .border(1.2.dp, borderCol, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -171,7 +173,7 @@ fun ReaderAudioSettingsSheetContent(
                     Text(
                         text = "Cài đặt nghe sách",
                         fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
+                        fontWeight = FontWeight.ExtraBold,
                         color = primaryInk
                     )
                     Text(
@@ -182,25 +184,21 @@ fun ReaderAudioSettingsSheetContent(
                 }
             }
 
-            Box(
-                modifier = Modifier
-                    .size(28.dp)
-                    .clip(CircleShape)
-                    .background(cardBg)
-                    .clickable(onClick = onClose)
-                    .testTag("audio_settings_close_button"),
-                contentAlignment = Alignment.Center
+            Ios3DCircleIconButton(
+                onClick = onClose,
+                size = 32.dp,
+                modifier = Modifier.testTag("audio_settings_close_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Close,
                     contentDescription = "Đóng cài đặt nghe",
-                    tint = secondaryInk,
+                    tint = primaryInk,
                     modifier = Modifier.size(16.dp)
                 )
             }
         }
 
-        HorizontalDivider(thickness = 0.5.dp, color = borderCol)
+        HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outline)
 
         Column(
             modifier = Modifier
@@ -224,14 +222,19 @@ fun ReaderAudioSettingsSheetContent(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Box(modifier = Modifier.weight(1f)) {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = itemBg,
-                            border = BorderStroke(0.6.dp, borderCol),
+                        NeoBrutalistPressBox(
+                            onClick = { narratorDropdownExpanded = true },
+                            isPill = false,
+                            cornerRadius = 12.dp,
+                            shadowOffset = 3.dp,
+                            pressDepth = 2.dp,
+                            borderWidth = 1.5.dp,
+                            containerColor = itemBg,
+                            borderColor = borderCol,
+                            shadowColor = neoHardShadowColor(),
+                            contentAlignment = Alignment.CenterStart,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable { narratorDropdownExpanded = true }
                                 .testTag("narrator_voice_dropdown")
                         ) {
                             Row(
@@ -244,7 +247,7 @@ fun ReaderAudioSettingsSheetContent(
                                 Text(
                                     text = readerPrefs.voiceProfile.displayName,
                                     fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
+                                    fontWeight = FontWeight.Bold,
                                     color = primaryInk,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
@@ -262,7 +265,7 @@ fun ReaderAudioSettingsSheetContent(
                         DropdownMenu(
                             expanded = narratorDropdownExpanded,
                             onDismissRequest = { narratorDropdownExpanded = false },
-                            containerColor = Color.White
+                            containerColor = itemBg
                         ) {
                             ReaderVoiceProfile.entries.forEach { profile ->
                                 val selected = readerPrefs.voiceProfile == profile
@@ -298,17 +301,20 @@ fun ReaderAudioSettingsSheetContent(
                     }
 
                     // Nút nghe thử nhanh giọng dẫn truyện hiện tại
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = cardBg,
-                        border = BorderStroke(0.5.dp, borderCol),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable {
-                                val pitch = readerPrefs.resolvePlaybackPitch(readerPrefs.voiceProfile)
-                                onPreviewVoice(readerPrefs.voiceProfile, pitch)
-                            }
-                            .testTag("narrator_voice_preview_button")
+                    NeoBrutalistPressBox(
+                        onClick = {
+                            val pitch = readerPrefs.resolvePlaybackPitch(readerPrefs.voiceProfile)
+                            onPreviewVoice(readerPrefs.voiceProfile, pitch)
+                        },
+                        isPill = false,
+                        cornerRadius = 12.dp,
+                        shadowOffset = 3.dp,
+                        pressDepth = 2.dp,
+                        borderWidth = 1.5.dp,
+                        containerColor = itemBg,
+                        borderColor = borderCol,
+                        shadowColor = neoHardShadowColor(),
+                        modifier = Modifier.testTag("narrator_voice_preview_button")
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 11.dp, vertical = 10.dp),
@@ -324,7 +330,7 @@ fun ReaderAudioSettingsSheetContent(
                             Text(
                                 text = "Thử",
                                 fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
+                                fontWeight = FontWeight.Bold,
                                 color = primaryInk
                             )
                         }
@@ -368,13 +374,17 @@ fun ReaderAudioSettingsSheetContent(
                     "Quét truyện tìm 7 nhân vật xuất hiện nhiều nhất"
                 },
                 trailingAction = {
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = IosBlue,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .clickable(enabled = !isScanningCharacters, onClick = onScanCharactersClick)
-                            .testTag("audio_scan_characters_button")
+                    NeoBrutalistPressBox(
+                        onClick = onScanCharactersClick,
+                        enabled = !isScanningCharacters,
+                        isPill = true,
+                        shadowOffset = 3.dp,
+                        pressDepth = 2.dp,
+                        borderWidth = 1.5.dp,
+                        containerColor = IosBlue,
+                        borderColor = borderCol,
+                        shadowColor = neoHardShadowColor(),
+                        modifier = Modifier.testTag("audio_scan_characters_button")
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
@@ -398,7 +408,7 @@ fun ReaderAudioSettingsSheetContent(
                             Text(
                                 text = if (isScanningCharacters) "Đang quét..." else "Quét",
                                 fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
+                                fontWeight = FontWeight.Bold,
                                 color = Color.White
                             )
                         }
@@ -409,8 +419,11 @@ fun ReaderAudioSettingsSheetContent(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .padding(end = 3.dp, bottom = 3.dp)
+                        .neoHardOffsetShadow(cornerRadius = 12.dp, offsetX = 3.dp, offsetY = 3.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(cardBg)
+                        .background(itemBg)
+                        .border(1.5.dp, borderCol, RoundedCornerShape(12.dp))
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
@@ -419,7 +432,7 @@ fun ReaderAudioSettingsSheetContent(
                         Text(
                             text = "Chế độ giọng nhân vật",
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             color = primaryInk
                         )
                         Text(
@@ -460,9 +473,11 @@ fun ReaderAudioSettingsSheetContent(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .padding(end = 3.dp, bottom = 3.dp)
+                            .neoHardOffsetShadow(cornerRadius = 14.dp, offsetX = 3.dp, offsetY = 3.dp)
                             .clip(RoundedCornerShape(14.dp))
                             .background(itemBg)
-                            .border(0.5.dp, borderCol, RoundedCornerShape(14.dp))
+                            .border(1.5.dp, borderCol, RoundedCornerShape(14.dp))
                             .padding(12.dp)
                             .testTag("character_voice_picker_panel"),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -529,14 +544,16 @@ fun ReaderAudioSettingsSheetContent(
                                     }
 
                                     Box {
-                                        Surface(
-                                            shape = RoundedCornerShape(50),
-                                            color = cardBg,
-                                            border = BorderStroke(0.5.dp, borderCol),
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(50))
-                                                .clickable { expandedMenu = true }
-                                                .testTag("character_voice_selector_$idx")
+                                        NeoBrutalistPressBox(
+                                            onClick = { expandedMenu = true },
+                                            isPill = true,
+                                            shadowOffset = 2.dp,
+                                            pressDepth = 1.5.dp,
+                                            borderWidth = 1.5.dp,
+                                            containerColor = cardBg,
+                                            borderColor = borderCol,
+                                            shadowColor = neoHardShadowColor(),
+                                            modifier = Modifier.testTag("character_voice_selector_$idx")
                                         ) {
                                             Row(
                                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
@@ -552,7 +569,7 @@ fun ReaderAudioSettingsSheetContent(
                                                 Text(
                                                     text = assignedVoice?.shortLabel ?: "Dẫn truyện",
                                                     fontSize = 11.sp,
-                                                    fontWeight = FontWeight.SemiBold,
+                                                    fontWeight = FontWeight.Bold,
                                                     color = primaryInk,
                                                     maxLines = 1
                                                 )
@@ -568,7 +585,7 @@ fun ReaderAudioSettingsSheetContent(
                                         DropdownMenu(
                                             expanded = expandedMenu,
                                             onDismissRequest = { expandedMenu = false },
-                                            containerColor = Color.White
+                                            containerColor = itemBg
                                         ) {
                                             DropdownMenuItem(
                                                 text = {
@@ -619,22 +636,25 @@ fun ReaderAudioSettingsSheetContent(
                                 .padding(top = 4.dp),
                             horizontalArrangement = Arrangement.End
                         ) {
-                            Surface(
-                                shape = RoundedCornerShape(50),
-                                color = IosBlue,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(50))
-                                    .clickable {
-                                        val finalMap = LinkedHashMap<String, ReaderVoiceProfile>()
-                                        scannedCharacters.forEach { c ->
-                                            val chosen = draftCharVoices[c.name]
-                                            if (chosen != null) {
-                                                finalMap[c.name] = chosen
-                                            }
+                            NeoBrutalistPressBox(
+                                onClick = {
+                                    val finalMap = LinkedHashMap<String, ReaderVoiceProfile>()
+                                    scannedCharacters.forEach { c ->
+                                        val chosen = draftCharVoices[c.name]
+                                        if (chosen != null) {
+                                            finalMap[c.name] = chosen
                                         }
-                                        onConfirmCharacterAssignments(finalMap)
                                     }
-                                    .testTag("character_voice_ok_button")
+                                    onConfirmCharacterAssignments(finalMap)
+                                },
+                                isPill = true,
+                                shadowOffset = 3.dp,
+                                pressDepth = 2.dp,
+                                borderWidth = 1.5.dp,
+                                containerColor = IosBlue,
+                                borderColor = borderCol,
+                                shadowColor = neoHardShadowColor(),
+                                modifier = Modifier.testTag("character_voice_ok_button")
                             ) {
                                 Text(
                                     text = "OK",
@@ -660,9 +680,11 @@ fun ReaderAudioSettingsSheetContent(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .padding(end = 3.dp, bottom = 3.dp)
+                        .neoHardOffsetShadow(cornerRadius = 14.dp, offsetX = 3.dp, offsetY = 3.dp)
                         .clip(RoundedCornerShape(14.dp))
                         .background(itemBg)
-                        .border(0.5.dp, borderCol, RoundedCornerShape(14.dp))
+                        .border(1.5.dp, borderCol, RoundedCornerShape(14.dp))
                         .padding(10.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -680,10 +702,10 @@ fun ReaderAudioSettingsSheetContent(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(11.dp))
-                                    .background(if (selected) IosBlue.copy(alpha = 0.10f) else cardBg)
+                                    .background(if (selected) IosBlue.copy(alpha = 0.12f) else cardBg)
                                     .border(
-                                        width = if (selected) 1.dp else 0.5.dp,
-                                        color = if (selected) IosBlue else Color.Transparent,
+                                        width = if (selected) 1.5.dp else 1.dp,
+                                        color = if (selected) IosBlue else borderCol,
                                         shape = RoundedCornerShape(11.dp)
                                     )
                                     .clickable { onSelectAmbientSound(track) }
@@ -701,7 +723,8 @@ fun ReaderAudioSettingsSheetContent(
                                         modifier = Modifier
                                             .size(26.dp)
                                             .clip(CircleShape)
-                                            .background(if (selected) IosBlue else Color.White),
+                                            .background(if (selected) IosBlue else itemBg)
+                                            .border(1.dp, borderCol, CircleShape),
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Icon(
@@ -815,15 +838,15 @@ private fun AudioSectionBlock(
                     Text(
                         text = title,
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF1C1C1E),
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         text = subtitle,
                         fontSize = 10.sp,
-                        color = Color(0xFF6E6E73),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )

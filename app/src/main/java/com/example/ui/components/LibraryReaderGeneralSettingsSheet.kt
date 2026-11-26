@@ -51,6 +51,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -69,7 +70,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -128,12 +128,12 @@ fun LibraryReaderGeneralSettingsSheet(
     onDismiss: () -> Unit
 ) {
     val isDark = LocalIsDarkTheme.current
-    val sheetBg = if (isDark) Color(0xFF1C1C1E) else Color(0xFFFFFFFF)
-    val cardBg = if (isDark) Color(0xFF2C2C2E) else Color(0xFFF2F2F7)
-    val itemBg = if (isDark) Color(0xFF1C1C1E) else Color(0xFFFFFFFF)
-    val borderCol = if (isDark) Color(0xFF3A3A3C) else Color(0xFFE5E5EA)
-    val primaryInk = if (isDark) Color(0xFFFFFFFF) else Color(0xFF1C1C1E)
-    val secondaryInk = if (isDark) Color(0xFF98989F) else Color(0xFF6E6E73)
+    val sheetBg = MaterialTheme.colorScheme.background
+    val cardBg = neoPaperSurfaceColor()
+    val itemBg = neoSecondaryPaperColor()
+    val borderCol = neoInkBorderColor()
+    val primaryInk = MaterialTheme.colorScheme.onSurface
+    val secondaryInk = MaterialTheme.colorScheme.onSurfaceVariant
     val accentBlue = if (isDark) IosDarkBlue else IosBlue
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -174,9 +174,10 @@ fun LibraryReaderGeneralSettingsSheet(
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(30.dp)
+                                .size(32.dp)
                                 .clip(CircleShape)
-                                .background(accentBlue.copy(alpha = 0.14f)),
+                                .background(accentBlue.copy(alpha = 0.14f))
+                                .border(1.2.dp, borderCol, CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
@@ -190,7 +191,7 @@ fun LibraryReaderGeneralSettingsSheet(
                             Text(
                                 text = "Cài đặt chung đọc sách",
                                 fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold,
+                                fontWeight = FontWeight.ExtraBold,
                                 color = primaryInk
                             )
                             Text(
@@ -201,19 +202,15 @@ fun LibraryReaderGeneralSettingsSheet(
                         }
                     }
 
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .clip(CircleShape)
-                            .background(cardBg)
-                            .clickable(onClick = onDismiss)
-                            .testTag("library_general_settings_close_button"),
-                        contentAlignment = Alignment.Center
+                    Ios3DCircleIconButton(
+                        onClick = onDismiss,
+                        size = 32.dp,
+                        modifier = Modifier.testTag("library_general_settings_close_button")
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Close,
                             contentDescription = "Đóng cài đặt chung",
-                            tint = secondaryInk,
+                            tint = primaryInk,
                             modifier = Modifier.size(16.dp)
                         )
                     }
@@ -252,7 +249,7 @@ fun LibraryReaderGeneralSettingsSheet(
                     )
                 }
 
-                HorizontalDivider(thickness = 0.5.dp, color = borderCol)
+                HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outline)
 
                 Column(
                     modifier = Modifier
@@ -316,21 +313,17 @@ private fun GeneralSettingsTabPill(
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
-    val shape = RoundedCornerShape(50)
-    Surface(
-        shape = shape,
-        color = if (selected) accentBlue else unselectedBg,
-        border = if (selected) null else BorderStroke(0.6.dp, borderCol),
+    NeoBrutalistPressBox(
+        onClick = onClick,
+        isPill = true,
+        shadowOffset = 3.dp,
+        pressDepth = 2.dp,
+        borderWidth = 1.5.dp,
+        containerColor = if (selected) accentBlue else unselectedBg,
+        borderColor = borderCol,
+        shadowColor = neoHardShadowColor(),
         modifier = modifier
-            .height(38.dp)
-            .shadow(
-                elevation = if (selected) 6.dp else 1.dp,
-                shape = shape,
-                ambientColor = accentBlue.copy(alpha = if (selected) 0.28f else 0.06f),
-                spotColor = accentBlue.copy(alpha = if (selected) 0.35f else 0.08f)
-            )
-            .clip(shape)
-            .clickable(onClick = onClick)
+            .height(41.dp)
             .testTag(testTag)
     ) {
         Row(
@@ -348,7 +341,7 @@ private fun GeneralSettingsTabPill(
             Text(
                 text = label,
                 fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
+                fontWeight = FontWeight.Bold,
                 color = if (selected) Color.White else unselectedInk,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -387,8 +380,11 @@ private fun ReadingModeDefaultsTab(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(end = 3.dp, bottom = 3.dp)
+            .neoHardOffsetShadow(cornerRadius = 14.dp, offsetX = 3.dp, offsetY = 3.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(cardBg)
+            .border(1.5.dp, borderCol, RoundedCornerShape(14.dp))
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -424,13 +420,16 @@ private fun ReadingModeDefaultsTab(
             }
 
             // Nút Import Font ngay bên cạnh
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = accentBlue,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .clickable(onClick = onImportFontClick)
-                    .testTag("general_settings_import_font_button")
+            NeoBrutalistPressBox(
+                onClick = onImportFontClick,
+                isPill = true,
+                shadowOffset = 3.dp,
+                pressDepth = 2.dp,
+                borderWidth = 1.5.dp,
+                containerColor = accentBlue,
+                borderColor = borderCol,
+                shadowColor = neoHardShadowColor(),
+                modifier = Modifier.testTag("general_settings_import_font_button")
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -446,7 +445,7 @@ private fun ReadingModeDefaultsTab(
                     Text(
                         text = "Import font",
                         fontSize = 10.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontWeight = FontWeight.Bold,
                         color = Color.White
                     )
                 }
@@ -460,7 +459,7 @@ private fun ReadingModeDefaultsTab(
                 .height(164.dp)
                 .clip(RoundedCornerShape(12.dp))
                 .background(itemBg)
-                .border(0.6.dp, borderCol, RoundedCornerShape(12.dp))
+                .border(1.5.dp, borderCol, RoundedCornerShape(12.dp))
                 .testTag("general_settings_font_scroll_window")
         ) {
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
@@ -546,8 +545,11 @@ private fun ReadingModeDefaultsTab(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(end = 3.dp, bottom = 3.dp)
+            .neoHardOffsetShadow(cornerRadius = 14.dp, offsetX = 3.dp, offsetY = 3.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(cardBg)
+            .border(1.5.dp, borderCol, RoundedCornerShape(14.dp))
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(9.dp)
     ) {
@@ -564,15 +566,18 @@ private fun ReadingModeDefaultsTab(
         ) {
             ReaderScrollDirection.entries.forEach { dir ->
                 val selected = readerPrefs.scrollDirection == dir
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (selected) accentBlue else itemBg,
-                    border = if (selected) null else BorderStroke(0.6.dp, borderCol),
+                NeoBrutalistPressBox(
+                    onClick = { onSelectScrollDirection(dir) },
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (selected) accentBlue else itemBg,
+                    borderColor = borderCol,
+                    shadowColor = neoHardShadowColor(),
                     modifier = Modifier
                         .weight(1f)
-                        .height(34.dp)
-                        .clip(RoundedCornerShape(50))
-                        .clickable { onSelectScrollDirection(dir) }
+                        .height(37.dp)
                         .testTag("general_scroll_dir_${dir.storageKey}")
                 ) {
                     Row(
@@ -593,7 +598,7 @@ private fun ReadingModeDefaultsTab(
                         Text(
                             text = dir.label,
                             fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             color = if (selected) Color.White else primaryInk
                         )
                     }
@@ -624,7 +629,7 @@ private fun ReadingModeDefaultsTab(
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
                         .background(itemBg)
-                        .border(0.5.dp, borderCol, RoundedCornerShape(12.dp))
+                        .border(1.5.dp, borderCol, RoundedCornerShape(12.dp))
                 ) {
                     HorizontalPageEffect.entries.forEachIndexed { idx, effect ->
                         val selected = readerPrefs.horizontalPageEffect == effect
@@ -676,8 +681,11 @@ private fun ReadingModeDefaultsTab(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(end = 3.dp, bottom = 3.dp)
+            .neoHardOffsetShadow(cornerRadius = 14.dp, offsetX = 3.dp, offsetY = 3.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(cardBg)
+            .border(1.5.dp, borderCol, RoundedCornerShape(14.dp))
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -705,7 +713,7 @@ private fun ReadingModeDefaultsTab(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
                 .background(itemBg)
-                .border(0.5.dp, borderCol, RoundedCornerShape(12.dp))
+                .border(1.5.dp, borderCol, RoundedCornerShape(12.dp))
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
@@ -849,8 +857,11 @@ private fun AudioListeningDefaultsTab(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(end = 3.dp, bottom = 3.dp)
+            .neoHardOffsetShadow(cornerRadius = 14.dp, offsetX = 3.dp, offsetY = 3.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(cardBg)
+            .border(1.5.dp, borderCol, RoundedCornerShape(14.dp))
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -868,17 +879,19 @@ private fun AudioListeningDefaultsTab(
             TtsEngineType.entries.forEach { engine ->
                 val selected = readerPrefs.ttsEngineType == engine
                 val isAi = engine == TtsEngineType.AI_TTS
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = if (selected) accentBlue.copy(alpha = 0.12f) else itemBg,
-                    border = BorderStroke(
-                        width = if (selected) 1.2.dp else 0.6.dp,
-                        color = if (selected) accentBlue else borderCol
-                    ),
+                NeoBrutalistPressBox(
+                    onClick = { onSelectTtsEngine(engine) },
+                    isPill = false,
+                    cornerRadius = 12.dp,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (selected) accentBlue.copy(alpha = 0.14f) else itemBg,
+                    borderColor = if (selected) accentBlue else borderCol,
+                    shadowColor = neoHardShadowColor(),
+                    contentAlignment = Alignment.TopStart,
                     modifier = Modifier
                         .weight(1f)
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable { onSelectTtsEngine(engine) }
                         .testTag("general_tts_engine_${engine.storageKey}")
                 ) {
                     Column(
@@ -933,8 +946,11 @@ private fun AudioListeningDefaultsTab(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(end = 3.dp, bottom = 3.dp)
+            .neoHardOffsetShadow(cornerRadius = 14.dp, offsetX = 3.dp, offsetY = 3.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(cardBg)
+            .border(1.5.dp, borderCol, RoundedCornerShape(14.dp))
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -950,14 +966,19 @@ private fun AudioListeningDefaultsTab(
         )
 
         Box(modifier = Modifier.fillMaxWidth()) {
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = itemBg,
-                border = BorderStroke(0.6.dp, borderCol),
+            NeoBrutalistPressBox(
+                onClick = { narratorExpanded = true },
+                isPill = false,
+                cornerRadius = 12.dp,
+                shadowOffset = 3.dp,
+                pressDepth = 2.dp,
+                borderWidth = 1.5.dp,
+                containerColor = itemBg,
+                borderColor = borderCol,
+                shadowColor = neoHardShadowColor(),
+                contentAlignment = Alignment.CenterStart,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable { narratorExpanded = true }
                     .testTag("general_default_narrator_dropdown")
             ) {
                 Row(
@@ -970,7 +991,7 @@ private fun AudioListeningDefaultsTab(
                     Text(
                         text = readerPrefs.voiceProfile.displayName,
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontWeight = FontWeight.Bold,
                         color = primaryInk
                     )
                     Icon(
@@ -985,7 +1006,7 @@ private fun AudioListeningDefaultsTab(
             DropdownMenu(
                 expanded = narratorExpanded,
                 onDismissRequest = { narratorExpanded = false },
-                containerColor = itemBg
+                containerColor = cardBg
             ) {
                 ReaderVoiceProfile.entries.forEach { profile ->
                     val selected = readerPrefs.voiceProfile == profile
@@ -1025,8 +1046,11 @@ private fun AudioListeningDefaultsTab(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(end = 3.dp, bottom = 3.dp)
+            .neoHardOffsetShadow(cornerRadius = 14.dp, offsetX = 3.dp, offsetY = 3.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(cardBg)
+            .border(1.5.dp, borderCol, RoundedCornerShape(14.dp))
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -1069,7 +1093,7 @@ private fun AudioListeningDefaultsTab(
             )
         }
 
-        HorizontalDivider(thickness = 0.5.dp, color = borderCol)
+        HorizontalDivider(thickness = 0.8.dp, color = MaterialTheme.colorScheme.outline)
 
         Text(
             text = "Âm thanh nền mặc định",
@@ -1083,7 +1107,7 @@ private fun AudioListeningDefaultsTab(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
                 .background(itemBg)
-                .border(0.5.dp, borderCol, RoundedCornerShape(12.dp))
+                .border(1.5.dp, borderCol, RoundedCornerShape(12.dp))
         ) {
             AmbientSoundTrack.entries.forEachIndexed { idx, track ->
                 val selected = readerPrefs.ambientSound == track
@@ -1155,18 +1179,21 @@ private fun CompactCircleStepBtn(
     ink: Color,
     onClick: () -> Unit
 ) {
-    Box(
-        modifier = Modifier
-            .size(26.dp)
-            .clip(CircleShape)
-            .background(bg)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
+    NeoBrutalistPressBox(
+        onClick = onClick,
+        isCircle = true,
+        shadowOffset = 2.dp,
+        pressDepth = 1.5.dp,
+        borderWidth = 1.5.dp,
+        containerColor = bg,
+        borderColor = neoInkBorderColor(),
+        shadowColor = neoHardShadowColor(),
+        modifier = Modifier.size(30.dp)
     ) {
         Text(
             text = label,
             fontSize = 14.sp,
-            fontWeight = FontWeight.Bold,
+            fontWeight = FontWeight.ExtraBold,
             color = ink
         )
     }

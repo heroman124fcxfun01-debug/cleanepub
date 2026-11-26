@@ -219,7 +219,7 @@ private fun SepiaCompactInput(
             .height(34.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(SepiaCard)
-            .border(0.8.dp, SepiaBorder, RoundedCornerShape(10.dp))
+            .border(1.5.dp, SepiaInk, RoundedCornerShape(10.dp))
             .padding(horizontal = 10.dp),
         contentAlignment = Alignment.CenterStart
     ) {
@@ -254,18 +254,21 @@ private fun SepiaSmallActionChip(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Surface(
-        shape = RoundedCornerShape(50),
-        color = when {
-            !enabled -> SepiaBorder.copy(alpha = 0.45f)
+    NeoBrutalistPressBox(
+        onClick = onClick,
+        enabled = enabled,
+        isPill = true,
+        shadowOffset = 3.dp,
+        pressDepth = 2.dp,
+        borderWidth = 1.5.dp,
+        containerColor = when {
+            !enabled -> SepiaBorder.copy(alpha = 0.55f)
             emphasized -> SepiaAccent
             else -> SepiaCard
         },
-        border = if (!emphasized && enabled) BorderStroke(0.8.dp, SepiaBorder) else null,
-        modifier = modifier
-            .height(32.dp)
-            .clip(RoundedCornerShape(50))
-            .clickable(enabled = enabled, onClick = onClick)
+        borderColor = if (enabled) SepiaInk else SepiaInkMuted.copy(alpha = 0.5f),
+        shadowColor = if (enabled) SepiaInk else Color.Transparent,
+        modifier = modifier.height(34.dp)
     ) {
         Box(
             modifier = Modifier.padding(horizontal = 10.dp),
@@ -274,9 +277,9 @@ private fun SepiaSmallActionChip(
             Text(
                 text = label,
                 fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
+                fontWeight = FontWeight.Bold,
                 color = when {
-                    !enabled -> SepiaInkMuted.copy(alpha = 0.55f)
+                    !enabled -> SepiaInkMuted.copy(alpha = 0.65f)
                     emphasized -> Color.White
                     else -> SepiaInk
                 },
@@ -341,14 +344,17 @@ fun ManualTocOverlayDialog(
                 )
 
                 // Dedicated "Sửa" toggle button inside TOC header
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (isTocEditMode) SepiaAccent else SepiaCard,
-                    border = if (isTocEditMode) null else BorderStroke(0.9.dp, SepiaBorder),
+                NeoBrutalistPressBox(
+                    onClick = { isTocEditMode = !isTocEditMode },
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (isTocEditMode) SepiaAccent else SepiaCard,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk,
                     modifier = Modifier
-                        .height(30.dp)
-                        .clip(RoundedCornerShape(50))
-                        .clickable { isTocEditMode = !isTocEditMode }
+                        .height(33.dp)
                         .testTag("toc_edit_mode_button")
                 ) {
                     Box(
@@ -358,7 +364,7 @@ fun ManualTocOverlayDialog(
                         Text(
                             text = "Sửa",
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             color = if (isTocEditMode) Color.White else SepiaInk,
                             maxLines = 1,
                             softWrap = false
@@ -368,19 +374,23 @@ fun ManualTocOverlayDialog(
 
                 Spacer(modifier = Modifier.width(8.dp))
 
-                Box(
+                NeoBrutalistPressBox(
+                    onClick = onDismiss,
+                    isCircle = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = SepiaCard,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk,
                     modifier = Modifier
-                        .size(30.dp)
-                        .clip(CircleShape)
-                        .background(SepiaChrome)
-                        .clickable(onClick = onDismiss)
-                        .testTag("manual_toc_close"),
-                    contentAlignment = Alignment.Center
+                        .size(33.dp)
+                        .testTag("manual_toc_close")
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Close,
                         contentDescription = "Đóng mục lục",
-                        tint = SepiaInkMuted,
+                        tint = SepiaInk,
                         modifier = Modifier.size(16.dp)
                     )
                 }
@@ -404,14 +414,17 @@ fun ManualTocOverlayDialog(
                 horizontalArrangement = Arrangement.Start,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = SepiaAccentSoft,
-                    border = BorderStroke(0.9.dp, SepiaAccent.copy(alpha = 0.45f)),
+                NeoBrutalistPressBox(
+                    onClick = { showAddChapterDialog = true },
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = SepiaCard,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk,
                     modifier = Modifier
-                        .height(30.dp)
-                        .clip(RoundedCornerShape(50))
-                        .clickable { showAddChapterDialog = true }
+                        .height(33.dp)
                         .testTag("toc_add_new_chapter_button")
                 ) {
                     Row(
@@ -421,7 +434,7 @@ fun ManualTocOverlayDialog(
                         Text(
                             text = "+ Thêm chương",
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             color = SepiaAccent,
                             maxLines = 1,
                             softWrap = false
@@ -631,7 +644,7 @@ private fun AddNewChapterDialog(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
                     .background(SepiaCard)
-                    .border(1.dp, SepiaBorder, RoundedCornerShape(12.dp))
+                    .border(1.5.dp, SepiaInk, RoundedCornerShape(12.dp))
                     .padding(horizontal = 12.dp, vertical = 10.dp)
             ) {
                 if (titleText.isEmpty()) {
@@ -662,29 +675,41 @@ private fun AddNewChapterDialog(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(onClick = onDismiss) {
+                NeoBrutalistPressBox(
+                    onClick = onDismiss,
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = SepiaCard,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk
+                ) {
                     Text(
                         text = "Hủy",
                         fontSize = 13.sp,
-                        color = SepiaInkMuted,
-                        fontWeight = FontWeight.SemiBold
+                        color = SepiaInk,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
                     )
                 }
-                Spacer(modifier = Modifier.width(6.dp))
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (titleText.isNotBlank()) SepiaAccent else SepiaBorder,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .clickable(enabled = titleText.isNotBlank()) {
-                            onConfirm(titleText.trim())
-                        }
-                        .testTag("toc_add_chapter_confirm")
+                Spacer(modifier = Modifier.width(8.dp))
+                NeoBrutalistPressBox(
+                    onClick = { onConfirm(titleText.trim()) },
+                    enabled = titleText.isNotBlank(),
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (titleText.isNotBlank()) SepiaAccent else SepiaBorder,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk,
+                    modifier = Modifier.testTag("toc_add_chapter_confirm")
                 ) {
                     Text(
                         text = "Thêm chương",
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontWeight = FontWeight.Bold,
                         color = Color.White,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
@@ -722,7 +747,7 @@ private fun RenameTocItemDialog(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
                     .background(SepiaCard)
-                    .border(1.dp, SepiaBorder, RoundedCornerShape(12.dp))
+                    .border(1.5.dp, SepiaInk, RoundedCornerShape(12.dp))
                     .padding(horizontal = 12.dp, vertical = 10.dp)
             ) {
                 BasicTextField(
@@ -746,29 +771,41 @@ private fun RenameTocItemDialog(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(onClick = onDismiss) {
+                NeoBrutalistPressBox(
+                    onClick = onDismiss,
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = SepiaCard,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk
+                ) {
                     Text(
                         text = "Hủy",
                         fontSize = 13.sp,
-                        color = SepiaInkMuted,
-                        fontWeight = FontWeight.SemiBold
+                        color = SepiaInk,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
                     )
                 }
-                Spacer(modifier = Modifier.width(6.dp))
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (titleText.isNotBlank()) SepiaAccent else SepiaBorder,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .clickable(enabled = titleText.isNotBlank()) {
-                            onConfirm(titleText.trim())
-                        }
-                        .testTag("toc_rename_confirm")
+                Spacer(modifier = Modifier.width(8.dp))
+                NeoBrutalistPressBox(
+                    onClick = { onConfirm(titleText.trim()) },
+                    enabled = titleText.isNotBlank(),
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (titleText.isNotBlank()) SepiaAccent else SepiaBorder,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk,
+                    modifier = Modifier.testTag("toc_rename_confirm")
                 ) {
                     Text(
                         text = "OK",
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontWeight = FontWeight.Bold,
                         color = Color.White,
                         modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp)
                     )
@@ -861,30 +898,41 @@ fun UndoConfirmDialog(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(
+                NeoBrutalistPressBox(
                     onClick = onDismiss,
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = SepiaCard,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk,
                     modifier = Modifier.testTag("undo_cancel_button")
                 ) {
                     Text(
                         text = "Hủy",
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = SepiaInkMuted
+                        fontWeight = FontWeight.Bold,
+                        color = SepiaInk,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
                     )
                 }
                 Spacer(modifier = Modifier.width(8.dp))
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = SepiaAccent,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .clickable { onConfirmUndo(dontAskAgain) }
-                        .testTag("undo_confirm_button")
+                NeoBrutalistPressBox(
+                    onClick = { onConfirmUndo(dontAskAgain) },
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = SepiaAccent,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk,
+                    modifier = Modifier.testTag("undo_confirm_button")
                 ) {
                     Text(
                         text = "Hoàn tác",
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontWeight = FontWeight.Bold,
                         color = Color.White,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
@@ -955,7 +1003,7 @@ fun AddManualTocDialog(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
                     .background(SepiaCard)
-                    .border(1.dp, SepiaBorder, RoundedCornerShape(12.dp))
+                    .border(1.5.dp, SepiaInk, RoundedCornerShape(12.dp))
                     .padding(horizontal = 12.dp, vertical = 10.dp)
             ) {
                 if (titleText.isEmpty()) {
@@ -988,29 +1036,41 @@ fun AddManualTocDialog(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(onClick = onDismiss) {
+                NeoBrutalistPressBox(
+                    onClick = onDismiss,
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = SepiaCard,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk
+                ) {
                     Text(
                         text = "Hủy",
                         fontSize = 13.sp,
-                        color = SepiaInkMuted,
-                        fontWeight = FontWeight.SemiBold
+                        color = SepiaInk,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
                     )
                 }
-                Spacer(modifier = Modifier.width(6.dp))
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (titleText.isNotBlank()) SepiaAccent else SepiaBorder,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .clickable(enabled = titleText.isNotBlank()) {
-                            onConfirm(titleText.trim())
-                        }
-                        .testTag("manual_add_toc_confirm")
+                Spacer(modifier = Modifier.width(8.dp))
+                NeoBrutalistPressBox(
+                    onClick = { onConfirm(titleText.trim()) },
+                    enabled = titleText.isNotBlank(),
+                    isPill = true,
+                    shadowOffset = 3.dp,
+                    pressDepth = 2.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (titleText.isNotBlank()) SepiaAccent else SepiaBorder,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk,
+                    modifier = Modifier.testTag("manual_add_toc_confirm")
                 ) {
                     Text(
                         text = "Thêm mục",
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontWeight = FontWeight.Bold,
                         color = Color.White,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )

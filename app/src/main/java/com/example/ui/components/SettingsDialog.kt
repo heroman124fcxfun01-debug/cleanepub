@@ -161,35 +161,22 @@ fun SettingsDialog(
                     .padding(horizontal = 16.dp, vertical = 14.dp),
                 contentAlignment = Alignment.Center
             ) {
+                val inkBorder = neoInkBorderColor()
+                val hardShadow = neoHardShadowColor()
                 Box(
                     modifier = Modifier
                         .widthIn(max = 390.dp)
                         .fillMaxWidth()
-                        .shadow(
-                            elevation = 14.dp,
-                            shape = dialogShape,
-                            ambientColor = Color.Black.copy(alpha = 0.22f),
-                            spotColor = Color.Black.copy(alpha = 0.34f)
+                        .padding(end = 4.dp, bottom = 4.dp)
+                        .neoHardOffsetShadow(
+                            cornerRadius = 18.dp,
+                            offsetX = 4.dp,
+                            offsetY = 4.dp,
+                            shadowColor = hardShadow
                         )
                         .clip(dialogShape)
-                        .background(MaterialTheme.colorScheme.surface)
-                        .border(
-                            width = 0.9.dp,
-                            brush = Brush.verticalGradient(
-                                colors = if (isDark) {
-                                    listOf(
-                                        Color.White.copy(alpha = 0.22f),
-                                        Color.White.copy(alpha = 0.05f)
-                                    )
-                                } else {
-                                    listOf(
-                                        Color.White.copy(alpha = 0.92f),
-                                        Color.White.copy(alpha = 0.35f)
-                                    )
-                                }
-                            ),
-                            shape = dialogShape
-                        )
+                        .background(neoPaperSurfaceColor())
+                        .border(width = 1.5.dp, color = inkBorder, shape = dialogShape)
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
@@ -201,9 +188,9 @@ fun SettingsDialog(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                        verticalArrangement = Arrangement.spacedBy(7.dp)
                     ) {
-                        // Header: "Cài đặt" (13.sp Bold) + circular X button (24.dp, icon 14.dp)
+                        // Header: "Cài đặt" (14.sp ExtraBold) + Neo-Brutalist circular X stamp
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -211,26 +198,30 @@ fun SettingsDialog(
                         ) {
                             Text(
                                 text = "Cài đặt",
-                                fontSize = 13.sp,
-                                lineHeight = 16.sp,
-                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                lineHeight = 17.sp,
+                                fontWeight = FontWeight.ExtraBold,
                                 color = MaterialTheme.colorScheme.onSurface,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
-                            Box(
+                            NeoBrutalistPressBox(
+                                onClick = onDismiss,
+                                isCircle = true,
+                                shadowOffset = 2.5.dp,
+                                pressDepth = 1.8.dp,
+                                borderWidth = 1.5.dp,
+                                containerColor = neoSecondaryPaperColor(),
+                                borderColor = inkBorder,
+                                shadowColor = hardShadow,
                                 modifier = Modifier
-                                    .size(24.dp)
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                                    .clickable(onClick = onDismiss)
-                                    .testTag("settings_close_button"),
-                                contentAlignment = Alignment.Center
+                                    .size(29.dp)
+                                    .testTag("settings_close_button")
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.Close,
                                     contentDescription = "Đóng cài đặt",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    tint = MaterialTheme.colorScheme.onSurface,
                                     modifier = Modifier.size(14.dp)
                                 )
                             }
@@ -322,40 +313,24 @@ private fun CompactSectionCardShell(
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit
 ) {
-    val isDark = LocalIsDarkTheme.current
     val shape = RoundedCornerShape(12.dp)
+    val inkBorder = neoInkBorderColor()
+    val hardShadow = neoHardShadowColor()
 
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .shadow(
-                elevation = 2.dp,
-                shape = shape,
-                ambientColor = Color.Black.copy(alpha = 0.05f),
-                spotColor = Color.Black.copy(alpha = 0.09f)
+            .padding(end = 3.dp, bottom = 3.dp)
+            .neoHardOffsetShadow(
+                cornerRadius = 12.dp,
+                offsetX = 3.dp,
+                offsetY = 3.dp,
+                shadowColor = hardShadow
             )
             .clip(shape)
-            .background(
-                brush = Brush.verticalGradient(
-                    colors = if (isDark) {
-                        listOf(IosPillTopDark, IosPillBottomDark)
-                    } else {
-                        listOf(IosPillTopLight, IosPillBottomLight)
-                    }
-                )
-            )
-            .border(
-                width = 0.8.dp,
-                brush = Brush.verticalGradient(
-                    colors = if (isDark) {
-                        listOf(Color.White.copy(alpha = 0.16f), Color.White.copy(alpha = 0.04f))
-                    } else {
-                        listOf(Color.White.copy(alpha = 0.92f), IosPillBorderBottomLight)
-                    }
-                ),
-                shape = shape
-            )
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .background(neoPaperSurfaceColor())
+            .border(width = 1.5.dp, color = inkBorder, shape = shape)
+            .padding(horizontal = 10.dp, vertical = 7.dp)
     ) {
         content()
     }
@@ -369,9 +344,10 @@ private fun CompactCircleIcon(
 ) {
     Box(
         modifier = Modifier
-            .size(22.dp)
-            .clip(CircleShape)
-            .background(containerColor),
+            .size(24.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .background(containerColor)
+            .border(1.2.dp, neoInkBorderColor(), RoundedCornerShape(7.dp)),
         contentAlignment = Alignment.Center
     ) {
         Icon(
@@ -510,65 +486,83 @@ private fun CompactErrorMemoryCard(
                 )
             }
 
-            // Bottom row: Compact Xuất / Nhập pill buttons (height 24.dp, 10.sp)
+            // Bottom row: Neo-Brutalist Xuất / Nhập 3D pill buttons
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                OutlinedButton(
+                NeoBrutalistPressBox(
                     onClick = onExportClick,
-                    shape = RoundedCornerShape(50),
-                    border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    isPill = true,
+                    shadowOffset = 2.5.dp,
+                    pressDepth = 1.8.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    borderColor = neoInkBorderColor(),
+                    shadowColor = neoHardShadowColor(),
                     modifier = Modifier
                         .weight(1f)
-                        .height(24.dp)
+                        .height(30.dp)
                         .testTag("settings_export_error_lib_button")
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.FileUpload,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "Xuất",
-                        fontSize = 10.sp,
-                        lineHeight = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1,
-                        softWrap = false
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.FileUpload,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Xuất",
+                            fontSize = 10.sp,
+                            lineHeight = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
 
-                OutlinedButton(
+                NeoBrutalistPressBox(
                     onClick = onImportClick,
-                    shape = RoundedCornerShape(50),
-                    border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f)),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    isPill = true,
+                    shadowOffset = 2.5.dp,
+                    pressDepth = 1.8.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    borderColor = neoInkBorderColor(),
+                    shadowColor = neoHardShadowColor(),
                     modifier = Modifier
                         .weight(1f)
-                        .height(24.dp)
+                        .height(30.dp)
                         .testTag("settings_import_error_lib_button")
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.FileDownload,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "Nhập",
-                        fontSize = 10.sp,
-                        lineHeight = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.secondary,
-                        maxLines = 1,
-                        softWrap = false
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.FileDownload,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Nhập",
+                            fontSize = 10.sp,
+                            lineHeight = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.secondary,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
             }
         }
@@ -643,21 +637,23 @@ private fun CompactCustomReplaceSectionCard(
                     )
                 }
 
-                // Isolated Search icon touch target (28.dp circle, 15.dp icon)
-                Box(
+                // Isolated 3D Search stamp button
+                NeoBrutalistPressBox(
+                    onClick = onToggleSearch,
+                    isCircle = true,
+                    shadowOffset = 2.5.dp,
+                    pressDepth = 1.8.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (isSearchActive) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        neoSecondaryPaperColor()
+                    },
+                    borderColor = neoInkBorderColor(),
+                    shadowColor = neoHardShadowColor(),
                     modifier = Modifier
-                        .size(28.dp)
-                        .clip(CircleShape)
-                        .background(
-                            if (isSearchActive) {
-                                MaterialTheme.colorScheme.primaryContainer
-                            } else {
-                                MaterialTheme.colorScheme.surfaceVariant
-                            }
-                        )
-                        .clickable(onClick = onToggleSearch)
-                        .testTag("settings_replace_search_button"),
-                    contentAlignment = Alignment.Center
+                        .size(30.dp)
+                        .testTag("settings_replace_search_button")
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Search,
@@ -665,18 +661,18 @@ private fun CompactCustomReplaceSectionCard(
                         tint = if (isSearchActive) {
                             MaterialTheme.colorScheme.primary
                         } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                            MaterialTheme.colorScheme.onSurface
                         },
-                        modifier = Modifier.size(15.dp)
+                        modifier = Modifier.size(14.dp)
                     )
                 }
             }
 
-            // Compact quick-add pair row: [Từ lỗi] -> [Từ đúng] + [+ Lưu] (24.dp pill)
+            // Compact quick-add pair row: [Từ lỗi] -> [Từ đúng] + [+ Lưu] (Neo-Brutalist pill)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
             ) {
                 CompactInlineTextField(
                     value = findInput,
@@ -702,35 +698,41 @@ private fun CompactCustomReplaceSectionCard(
                 )
 
                 val canAdd = findInput.isNotEmpty()
-                Button(
+                NeoBrutalistPressBox(
                     onClick = onAddRule,
                     enabled = canAdd,
-                    shape = RoundedCornerShape(50),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = Color.White,
-                        disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                    ),
+                    isPill = true,
+                    shadowOffset = 2.5.dp,
+                    pressDepth = 1.8.dp,
+                    borderWidth = 1.5.dp,
+                    containerColor = if (canAdd) MaterialTheme.colorScheme.primary else neoSecondaryPaperColor(),
+                    borderColor = neoInkBorderColor(),
+                    shadowColor = neoHardShadowColor(),
                     modifier = Modifier
-                        .height(24.dp)
+                        .height(29.dp)
                         .testTag("settings_replace_save_button")
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Add,
-                        contentDescription = null,
-                        modifier = Modifier.size(12.dp)
-                    )
-                    Spacer(modifier = Modifier.width(2.dp))
-                    Text(
-                        text = "Lưu",
-                        fontSize = 10.sp,
-                        lineHeight = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        softWrap = false
-                    )
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Add,
+                            contentDescription = null,
+                            tint = if (canAdd) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text(
+                            text = "Lưu",
+                            fontSize = 10.sp,
+                            lineHeight = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (canAdd) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
             }
 
@@ -801,14 +803,14 @@ private fun CompactCustomReplaceSectionCard(
                 }
             }
 
-            // Fixed-height 175.dp square scrollable table box
+            // Fixed-height 175.dp square scrollable table box with crisp 1.5dp ink border
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(175.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(tableSurfaceColor)
-                    .border(0.8.dp, tableBorderColor, RoundedCornerShape(12.dp))
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(neoPaperSurfaceColor())
+                    .border(1.5.dp, neoInkBorderColor(), RoundedCornerShape(10.dp))
                     .testTag("settings_replace_table_box")
             ) {
                 // Fixed Header Row: light gray bg, height 24.dp, 3 aligned columns
@@ -984,12 +986,12 @@ private fun CompactInlineTextField(
 ) {
     Box(
         modifier = modifier
-            .height(24.dp)
+            .height(26.dp)
             .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.surface)
+            .background(neoPaperSurfaceColor())
             .border(
-                width = 0.7.dp,
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+                width = 1.5.dp,
+                color = neoInkBorderColor(),
                 shape = RoundedCornerShape(8.dp)
             )
             .padding(horizontal = 7.dp),

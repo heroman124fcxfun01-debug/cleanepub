@@ -17,14 +17,21 @@ import com.example.data.ReaderPreferences
 import com.example.data.ReaderScrollDirection
 import com.example.data.ReaderVoiceProfile
 import com.example.data.TtsEngineType
+import com.example.pipeline.CleaningOptions
+import com.example.pipeline.EpubCleanPipeline
+import com.example.pipeline.EpubMetadataEditor
 import com.example.pipeline.FilePathResolver
 import com.example.pipeline.PreparedWorkspace
+import com.example.pipeline.ProcessingPhase
 import com.example.pipeline.SourceFileInfo
 import com.example.service.AudioPlaybackStateHolder
 import com.example.service.BookAudioPlaybackService
 import com.example.service.BookAudioPlaybackState
 import com.example.ui.theme.ReaderFontRegistry
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -53,10 +60,29 @@ data class ActiveBookReaderState(
 sealed interface LibraryImportFlowState {
     data object Idle : LibraryImportFlowState
     data class AskCleanConfirmation(val uri: Uri, val source: SourceFileInfo) : LibraryImportFlowState
+    data class AskBatchCleanConfirmation(val items: List<Pair<Uri, SourceFileInfo>>) : LibraryImportFlowState
     data class ImportingDirect(val fileName: String) : LibraryImportFlowState
     data class CleaningInProgress(val source: SourceFileInfo) : LibraryImportFlowState
     data class FinalizingCleanImport(val bookTitle: String) : LibraryImportFlowState
     data class CleanCompleted(val book: LibraryBook, val totalFixes: Int) : LibraryImportFlowState
+    data class BatchProcessing(
+        val currentIndex: Int,
+        val totalCount: Int,
+        val currentBookName: String,
+        val currentBookProgress: Float,
+        val statusDetail: String,
+        val isCleaning: Boolean,
+        val successCount: Int,
+        val failedCount: Int
+    ) : LibraryImportFlowState
+    data class BatchCompleted(
+        val totalCount: Int,
+        val successCount: Int,
+        val failedCount: Int,
+        val totalFixes: Int,
+        val wasCleaned: Boolean,
+        val wasCancelled: Boolean
+    ) : LibraryImportFlowState
     data class Error(val message: String) : LibraryImportFlowState
 }
 
@@ -89,6 +115,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     val readerState: StateFlow<ActiveBookReaderState> = _readerState.asStateFlow()
 
     val audioPlaybackState: StateFlow<BookAudioPlaybackState> = AudioPlaybackStateHolder.state
+
+    private var batchImportJob: Job? = null
 
     init {
         refreshLibrary()
@@ -124,6 +152,192 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
             uri = uri,
             source = inspected
         )
+    }
+
+    /**
+     * Multi-book entry point from Book Library (`OpenMultipleDocuments`):
+     * - 1 book -> preserves single-book workflow (Ask Clean -> Sửa tiếp / OK)
+     * - 2+ books -> opens batch confirmation (Có, dọn tự động | Không, nhập trực tiếp)
+     */
+    fun onLibraryFilesPicked(uris: List<Uri>) {
+        if (_isImporting.value || uris.isEmpty()) return
+        val valid = uris.mapNotNull { uri ->
+            FilePathResolver.inspectSourceFile(getApplication(), uri)?.let { source ->
+                uri to source
+            }
+        }
+        if (valid.isEmpty()) {
+            _statusMessage.value = "Chỉ hỗ trợ nhập tệp .epub hoặc .pdf vào Thư viện sách."
+            return
+        }
+        if (valid.size == 1) {
+            _importFlowState.value = LibraryImportFlowState.AskCleanConfirmation(
+                uri = valid.first().first,
+                source = valid.first().second
+            )
+        } else {
+            _importFlowState.value = LibraryImportFlowState.AskBatchCleanConfirmation(valid)
+        }
+    }
+
+    fun startBatchImportIntoLibrary(
+        cleanBeforeImport: Boolean,
+        cleaningOptions: CleaningOptions
+    ) {
+        val current = _importFlowState.value as? LibraryImportFlowState.AskBatchCleanConfirmation ?: return
+        val items = current.items
+        val total = items.size
+        _isImporting.value = true
+
+        batchImportJob?.cancel()
+        batchImportJob = viewModelScope.launch {
+            var successCount = 0
+            var failedCount = 0
+            var totalFixesAccum = 0
+            var cancelled = false
+            val appCtx = getApplication<Application>()
+
+            try {
+                for ((idx, pair) in items.withIndex()) {
+                    coroutineContext.ensureActive()
+                    val (uri, source) = pair
+                    _importFlowState.value = LibraryImportFlowState.BatchProcessing(
+                        currentIndex = idx,
+                        totalCount = total,
+                        currentBookName = source.displayName,
+                        currentBookProgress = 0.05f,
+                        statusDetail = if (cleanBeforeImport) {
+                            "Đang dọn sách ${idx + 1}/$total…"
+                        } else {
+                            "Đang nhập sách ${idx + 1}/$total…"
+                        },
+                        isCleaning = cleanBeforeImport,
+                        successCount = successCount,
+                        failedCount = failedCount
+                    )
+
+                    if (!cleanBeforeImport) {
+                        val res = libraryManager.importBookFromUri(appCtx, uri)
+                        if (res.isSuccess) {
+                            successCount++
+                            val (loadedBooks, loadedCollections) = withContext(Dispatchers.IO) {
+                                libraryManager.loadLibraryIndex()
+                            }
+                            _books.value = loadedBooks
+                            _collections.value = loadedCollections
+                        } else {
+                            failedCount++
+                        }
+                    } else {
+                        var sessionDirToClean: File? = null
+                        try {
+                            val pipeline = EpubCleanPipeline(appCtx)
+                            val meta = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    EpubMetadataEditor.readMetadataFromSource(appCtx, source)
+                                }.getOrNull()
+                            }
+                            coroutineContext.ensureActive()
+
+                            val snap = pipeline.run(
+                                source = source,
+                                metadata = meta,
+                                options = cleaningOptions,
+                                onUpdate = { update ->
+                                    _importFlowState.value = LibraryImportFlowState.BatchProcessing(
+                                        currentIndex = idx,
+                                        totalCount = total,
+                                        currentBookName = source.displayName,
+                                        currentBookProgress = update.progressFraction.coerceIn(0.05f, 0.88f),
+                                        statusDetail = update.statusDetail.ifBlank { "Đang làm sạch tự động…" },
+                                        isCleaning = true,
+                                        successCount = successCount,
+                                        failedCount = failedCount
+                                    )
+                                }
+                            )
+                            coroutineContext.ensureActive()
+
+                            val workspace = snap.workspace
+                            if (snap.phase != ProcessingPhase.COMPLETED || workspace == null) {
+                                failedCount++
+                                continue
+                            }
+                            sessionDirToClean = File(workspace.sessionDirPath)
+
+                            _importFlowState.value = LibraryImportFlowState.BatchProcessing(
+                                currentIndex = idx,
+                                totalCount = total,
+                                currentBookName = source.displayName,
+                                currentBookProgress = 0.94f,
+                                statusDetail = "Đang lưu vào Thư viện sách…",
+                                isCleaning = true,
+                                successCount = successCount,
+                                failedCount = failedCount
+                            )
+
+                            val finalTempEpub = pipeline.rebuildEpubWithSelectedDiffs(
+                                workspace = workspace,
+                                diffs = snap.diffs,
+                                regenerateToc = snap.regenerateToc
+                            )
+
+                            val importRes = libraryManager.importCleanedEpubFromFile(
+                                context = appCtx,
+                                cleanedEpubFile = finalTempEpub,
+                                fallbackTitle = workspace.bookTitle
+                            )
+                            if (importRes.isSuccess) {
+                                successCount++
+                                totalFixesAccum += snap.stats.junkLinksRemoved +
+                                    snap.stats.whitespaceFixes +
+                                    snap.diffs.count { it.accepted } +
+                                    snap.stats.mergedParagraphs +
+                                    snap.stats.headersFootersRemoved +
+                                    snap.stats.footnotesRemoved +
+                                    snap.stats.unicodeSanitized +
+                                    snap.stats.dialoguesFormatted
+
+                                val (loadedBooks, loadedCollections) = withContext(Dispatchers.IO) {
+                                    libraryManager.loadLibraryIndex()
+                                }
+                                _books.value = loadedBooks
+                                _collections.value = loadedCollections
+                            } else {
+                                failedCount++
+                            }
+                        } catch (ce: CancellationException) {
+                            cancelled = true
+                            throw ce
+                        } catch (_: Exception) {
+                            failedCount++
+                        } finally {
+                            if (sessionDirToClean != null) {
+                                withContext(Dispatchers.IO) {
+                                    runCatching { sessionDirToClean.deleteRecursively() }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (_: CancellationException) {
+                cancelled = true
+            } finally {
+                _isImporting.value = false
+                _importFlowState.value = LibraryImportFlowState.BatchCompleted(
+                    totalCount = total,
+                    successCount = successCount,
+                    failedCount = failedCount,
+                    totalFixes = totalFixesAccum,
+                    wasCleaned = cleanBeforeImport,
+                    wasCancelled = cancelled
+                )
+            }
+        }
+    }
+
+    fun cancelBatchImport() {
+        batchImportJob?.cancel()
     }
 
     fun confirmDirectImportWithoutCleaning() {
