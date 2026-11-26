@@ -19,19 +19,29 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Cài đặt thư viện và chép file WASM offline
+      - name: Tải trọn bộ model VieNeu (~380MB) và file WASM vào thư mục web của Android
         run: |
-          npm install
-          mkdir -p public/ort
-          cp -f node_modules/onnxruntime-web/dist/*.wasm public/ort/ 2>/dev/null || true
-          cp -f node_modules/onnxruntime-web/dist/*.mjs public/ort/ 2>/dev/null || true
+          INDEX_PATH=$(find . -maxdepth 6 -name "index.html" -not -path "*/build/*" -not -path "*/.git/*" | head -n 1)
+          if [ -n "$INDEX_PATH" ]; then
+            WEB_ROOT=$(dirname "$INDEX_PATH")
+          elif [ -d "app/src/main/assets/public" ]; then
+            WEB_ROOT="app/src/main/assets/public"
+          elif [ -d "app/src/main/assets" ]; then
+            WEB_ROOT="app/src/main/assets"
+          else
+            WEB_ROOT="public"
+          fi
+          echo "Thu muc web duoc chon: $WEB_ROOT"
 
-      - name: Tự động tải trọn bộ model VieNeu (~380MB)
-        run: |
-          mkdir -p public/models
-          node -e '
+          npm --prefix /tmp/ort install onnxruntime-web
+          mkdir -p "$WEB_ROOT/ort" "$WEB_ROOT/models"
+          cp -f /tmp/ort/node_modules/onnxruntime-web/dist/*.wasm "$WEB_ROOT/ort/" 2>/dev/null || true
+          cp -f /tmp/ort/node_modules/onnxruntime-web/dist/*.mjs "$WEB_ROOT/ort/" 2>/dev/null || true
+
+          WEB_ROOT="$WEB_ROOT" node -e '
             const fs = require("fs");
             const path = require("path");
+            const WEB_ROOT = process.env.WEB_ROOT;
             const REPO = "duyquangnvx/vieneu-web-models";
             const BASE = `https://huggingface.co/${REPO}/resolve/main/`;
             (async () => {
@@ -47,14 +57,15 @@ jobs:
                 if (!r.ok) throw new Error("Loi tai file: " + f);
                 const buf = Buffer.from(await r.arrayBuffer());
                 const flatName = f.split("/").pop();
-                fs.writeFileSync("public/models/" + flatName, buf);
+                fs.writeFileSync(path.join(WEB_ROOT, "models", flatName), buf);
                 if (f.includes("/")) {
-                  fs.mkdirSync(path.dirname("public/models/" + f), { recursive: true });
-                  fs.writeFileSync("public/models/" + f, buf);
+                  const nested = path.join(WEB_ROOT, "models", f);
+                  fs.mkdirSync(path.dirname(nested), { recursive: true });
+                  fs.writeFileSync(nested, buf);
                 }
               }
-              const totalBytes = fs.readdirSync("public/models").reduce((s, f) => {
-                const st = fs.statSync("public/models/" + f);
+              const totalBytes = fs.readdirSync(path.join(WEB_ROOT, "models")).reduce((s, f) => {
+                const st = fs.statSync(path.join(WEB_ROOT, "models", f));
                 return st.isFile() ? s + st.size : s;
               }, 0);
               console.log("TONG DUNG LUONG MODEL:", (totalBytes / 1024 / 1024).toFixed(1), "MB");
@@ -62,54 +73,25 @@ jobs:
             })();
           '
 
-      - name: Build giao diện Web
-        run: npm run build
-
-      - name: Đóng gói sang Android (Capacitor)
+      - name: Cấu hình không nén file model lớn và tăng RAM đóng gói
         run: |
-          if [ -d "dist" ]; then WEB_DIR="dist"; else WEB_DIR="build"; fi
-          npm install @capacitor/core @capacitor/cli @capacitor/android
-          if [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.ts" ]; then
-            npx cap init "DocSachAI" "com.docsach.ai" --web-dir=$WEB_DIR
-          fi
-          rm -rf android
-          npx cap add android
-
-      - name: Cấp quyền Micro, tăng RAM đóng gói và giữ nguyên file model lớn
-        run: |
-          echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
-          sed -i 's|<application|<uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <application|' android/app/src/main/AndroidManifest.xml
-          sed -i 's|android {|android {\n    aaptOptions { noCompress += ["onnx", "bin", "wasm", "data", "onnx_data"] }|' android/app/build.gradle
-          mkdir -p android/app/src/main/java/com/docsach/ai
-          rm -f android/app/src/main/java/com/docsach/ai/MainActivity.*
-          cat << 'EOF' > android/app/src/main/java/com/docsach/ai/MainActivity.java
-          package com.docsach.ai;
-
-          import android.Manifest;
-          import android.content.pm.PackageManager;
-          import android.os.Bundle;
-          import android.webkit.PermissionRequest;
-          import androidx.core.app.ActivityCompat;
-          import androidx.core.content.ContextCompat;
-          import com.getcapacitor.BridgeActivity;
-          import com.getcapacitor.BridgeWebChromeClient;
-
-          public class MainActivity extends BridgeActivity {
-              @Override
-              public void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                      ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, 101);
-                  }
-                  this.bridge.getWebView().setWebChromeClient(new BridgeWebChromeClient(this.bridge) {
-                      @Override
-                      public void onPermissionRequest(final PermissionRequest request) {
-                          runOnUiThread(() -> request.grant(request.getResources()));
-                      }
-                  });
+          echo "" >> gradle.properties
+          echo "org.gradle.jvmargs=-Xmx4096m" >> gradle.properties
+          node -e '
+            const fs = require("fs");
+            for (const f of ["app/build.gradle", "app/build.gradle.kts"]) {
+              if (!fs.existsSync(f)) continue;
+              let txt = fs.readFileSync(f, "utf8");
+              if (!txt.includes("onnx_data")) {
+                if (f.endsWith(".kts")) {
+                  txt = txt.replace(/android\s*\{/, "android {\n    androidResources {\n        noCompress += listOf(\"onnx\", \"bin\", \"wasm\", \"data\", \"onnx_data\")\n    }");
+                } else {
+                  txt = txt.replace(/android\s*\{/, "android {\n    aaptOptions {\n        noCompress \"onnx\", \"bin\", \"wasm\", \"data\", \"onnx_data\"\n    }");
+                }
+                fs.writeFileSync(f, txt);
               }
-          }
-          EOF
+            }
+          '
 
       - name: Cài đặt Java 17
         uses: actions/setup-java@v4
@@ -119,13 +101,14 @@ jobs:
 
       - name: Biên dịch file APK
         run: |
-          cd android
           chmod +x gradlew
           ./gradlew assembleDebug
+          APK_FILE=$(find app/build/outputs/apk -name "*.apk" | head -n 1)
+          echo "APK_PATH=$APK_FILE" >> $GITHUB_ENV
 
       - name: Xuất thẳng file APK ra mục Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
           name: Ban-full-offline-${{ github.run_number }}
-          files: android/app/build/outputs/apk/debug/app-debug.apk
+          files: ${{ env.APK_PATH }}
