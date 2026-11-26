@@ -34,8 +34,10 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowBackIosNew
+import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.AutoStories
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.CollectionsBookmark
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -49,7 +51,9 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -79,10 +83,13 @@ import androidx.compose.ui.unit.sp
 import com.example.data.BookCollection
 import com.example.data.LibraryBook
 import com.example.data.LibraryManager
+import com.example.ui.LibraryImportFlowState
 import com.example.ui.components.IosFloatingDialog
 import com.example.ui.components.IosPrimaryButton
 import com.example.ui.theme.IosBlue
 import com.example.ui.theme.IosDarkBlue
+import com.example.ui.theme.IosGreen
+import com.example.ui.theme.IosGreenSoft
 import com.example.ui.theme.IosHairline
 import com.example.ui.theme.IosRed
 import com.example.ui.theme.IosSeparator
@@ -102,8 +109,17 @@ fun BookLibraryScreen(
     books: List<LibraryBook>,
     collections: List<BookCollection>,
     isImporting: Boolean,
+    importFlowState: LibraryImportFlowState = LibraryImportFlowState.Idle,
+    cleaningProgressPercent: Int = 0,
+    cleaningStatusMessage: String = "",
     onBackClick: () -> Unit,
     onImportBookClick: () -> Unit,
+    onConfirmCleanBeforeImport: () -> Unit = {},
+    onConfirmDirectImportNoClean: () -> Unit = {},
+    onCancelAutoClean: () -> Unit = {},
+    onContinueEditCleanedBook: () -> Unit = {},
+    onAcceptCleanedBookOk: () -> Unit = {},
+    onDismissImportFlow: () -> Unit = {},
     onOpenBook: (LibraryBook) -> Unit,
     onDeleteBook: (String) -> Unit,
     onCreateCollection: (String) -> Unit,
@@ -392,6 +408,19 @@ fun BookLibraryScreen(
             onDismiss = { assignCollectionBook = null }
         )
     }
+
+    // Dialog 4: Clean-on-Import Workflow (Ask Có/Không -> Spinning Auto-Clean -> Sửa tiếp / OK)
+    LibraryImportFlowDialogs(
+        flowState = importFlowState,
+        cleaningProgressPercent = cleaningProgressPercent,
+        cleaningStatusMessage = cleaningStatusMessage,
+        onConfirmClean = onConfirmCleanBeforeImport,
+        onConfirmNoClean = onConfirmDirectImportNoClean,
+        onCancelClean = onCancelAutoClean,
+        onContinueEdit = onContinueEditCleanedBook,
+        onFinishOk = onAcceptCleanedBookOk,
+        onDismiss = onDismissImportFlow
+    )
 }
 
 @Composable
@@ -1282,3 +1311,362 @@ private fun PickCollectionForBookDialog(
         }
     }
 }
+
+/**
+ * iOS Floating Dialog sequence for Book Library Import:
+ * 1. AskCleanConfirmation: "Bạn có muốn dọn sách không?" (Không | Có)
+ * 2. CleaningInProgress / ImportingDirect / FinalizingCleanImport: Spinning loader + live progress
+ * 3. CleanCompleted: Green checkmark + "Sửa tiếp" (opens Cleaning Review/Editor) | "OK" (stays in Library)
+ * 4. Error: Friendly error message
+ */
+@Composable
+private fun LibraryImportFlowDialogs(
+    flowState: LibraryImportFlowState,
+    cleaningProgressPercent: Int,
+    cleaningStatusMessage: String,
+    onConfirmClean: () -> Unit,
+    onConfirmNoClean: () -> Unit,
+    onCancelClean: () -> Unit,
+    onContinueEdit: () -> Unit,
+    onFinishOk: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val isDark = LocalIsDarkTheme.current
+    val accentBlue = if (isDark) IosDarkBlue else IosBlue
+
+    when (flowState) {
+        is LibraryImportFlowState.Idle -> Unit
+
+        is LibraryImportFlowState.AskCleanConfirmation -> {
+            IosFloatingDialog(onDismissRequest = onDismiss) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .background(accentBlue.copy(alpha = 0.12f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.AutoFixHigh,
+                            contentDescription = null,
+                            tint = accentBlue,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
+                    Text(
+                        text = "Bạn có muốn dọn sách không?",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Text(
+                        text = flowState.source.displayName,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = accentBlue,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Text(
+                        text = "Chọn \"Có\" để tự động dọn link rác, chuẩn hóa phông, khoảng trắng và chính tả trước khi lưu vào Thư viện sách.",
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(2.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = onConfirmNoClean,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(42.dp)
+                                .testTag("library_import_no_clean_button"),
+                            shape = RoundedCornerShape(50),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                        ) {
+                            Text(
+                                text = "Không",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1
+                            )
+                        }
+
+                        Box(modifier = Modifier.weight(1f)) {
+                            IosPrimaryButton(
+                                text = "Có",
+                                height = 42.dp,
+                                onClick = onConfirmClean,
+                                modifier = Modifier.testTag("library_import_yes_clean_button")
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        is LibraryImportFlowState.ImportingDirect -> {
+            IosFloatingDialog(onDismissRequest = {}) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 22.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(34.dp),
+                        strokeWidth = 3.dp,
+                        color = accentBlue
+                    )
+                    Text(
+                        text = "Đang thêm sách vào thư viện…",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        textAlign = TextAlign.Center
+                    )
+                    Text(
+                        text = flowState.fileName,
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+
+        is LibraryImportFlowState.CleaningInProgress,
+        is LibraryImportFlowState.FinalizingCleanImport -> {
+            val isFinalizing = flowState is LibraryImportFlowState.FinalizingCleanImport
+            val displayPercent = if (isFinalizing) 100 else cleaningProgressPercent
+            val displayTitle = if (isFinalizing) {
+                "Đang lưu vào Thư viện sách…"
+            } else {
+                "Đang tự động dọn sách…"
+            }
+            val displaySubtitle = if (isFinalizing) {
+                (flowState as LibraryImportFlowState.FinalizingCleanImport).bookTitle
+            } else {
+                cleaningStatusMessage.ifBlank { "Đang phân tích và làm sạch nội dung…" }
+            }
+
+            IosFloatingDialog(onDismissRequest = {}) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .testTag("library_auto_clean_spinner"),
+                        strokeWidth = 3.2.dp,
+                        color = accentBlue
+                    )
+
+                    Text(
+                        text = displayTitle,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        textAlign = TextAlign.Center
+                    )
+
+                    LinearProgressIndicator(
+                        progress = { (displayPercent / 100f).coerceIn(0f, 1f) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(5.dp)
+                            .clip(RoundedCornerShape(50)),
+                        color = accentBlue,
+                        trackColor = accentBlue.copy(alpha = 0.16f)
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = displaySubtitle,
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "$displayPercent%",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = accentBlue
+                        )
+                    }
+
+                    if (!isFinalizing) {
+                        TextButton(
+                            onClick = onCancelClean,
+                            modifier = Modifier.testTag("library_cancel_auto_clean_button")
+                        ) {
+                            Text(
+                                text = "Hủy quét",
+                                fontSize = 12.sp,
+                                color = IosRed,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        is LibraryImportFlowState.CleanCompleted -> {
+            IosFloatingDialog(onDismissRequest = onFinishOk) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(CircleShape)
+                            .background(if (isDark) IosGreen.copy(alpha = 0.18f) else IosGreenSoft),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.CheckCircle,
+                            contentDescription = null,
+                            tint = IosGreen,
+                            modifier = Modifier.size(26.dp)
+                        )
+                    }
+
+                    Text(
+                        text = "Đã dọn sách xong!",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Text(
+                        text = flowState.book.title,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Text(
+                        text = if (flowState.totalFixes > 0) {
+                            "Đã tự động sửa ${flowState.totalFixes} lỗi và thêm sẵn vào Thư viện sách."
+                        } else {
+                            "Nội dung đã chuẩn sạch và được thêm sẵn vào Thư viện sách."
+                        },
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = onContinueEdit,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(42.dp)
+                                .testTag("library_clean_continue_edit_button"),
+                            shape = RoundedCornerShape(50),
+                            border = BorderStroke(1.dp, accentBlue.copy(alpha = 0.55f))
+                        ) {
+                            Text(
+                                text = "Sửa tiếp",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = accentBlue,
+                                maxLines = 1
+                            )
+                        }
+
+                        Box(modifier = Modifier.weight(1f)) {
+                            IosPrimaryButton(
+                                text = "OK",
+                                height = 42.dp,
+                                onClick = onFinishOk,
+                                modifier = Modifier.testTag("library_clean_ok_button")
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        is LibraryImportFlowState.Error -> {
+            IosFloatingDialog(onDismissRequest = onDismiss) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "Không thể xử lý tệp",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = IosRed
+                    )
+                    Text(
+                        text = flowState.message,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                    IosPrimaryButton(
+                        text = "Đóng",
+                        height = 40.dp,
+                        onClick = onDismiss
+                    )
+                }
+            }
+        }
+    }
+}
+

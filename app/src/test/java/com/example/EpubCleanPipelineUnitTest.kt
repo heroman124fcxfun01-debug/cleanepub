@@ -1491,10 +1491,141 @@ class EpubCleanPipelineUnitTest {
             assertEquals("1.5x", com.example.data.LibraryManager.formatSpeechRate(1.5f))
 
             assertEquals(com.example.data.ReaderVoiceProfile.FEMALE_2, com.example.data.ReaderVoiceProfile.FEMALE_1.next())
-            assertEquals(com.example.data.ReaderVoiceProfile.MALE_1, com.example.data.ReaderVoiceProfile.FEMALE_2.next())
-            assertEquals(com.example.data.ReaderVoiceProfile.FEMALE_1, com.example.data.ReaderVoiceProfile.MALE_1.next())
+            assertEquals(com.example.data.ReaderVoiceProfile.FEMALE_3, com.example.data.ReaderVoiceProfile.FEMALE_2.next())
+            assertEquals(com.example.data.ReaderVoiceProfile.MALE_1, com.example.data.ReaderVoiceProfile.FEMALE_3.next())
+            assertEquals(com.example.data.ReaderVoiceProfile.FEMALE_1, com.example.data.ReaderVoiceProfile.MALE_3.next())
+
+            // Verify max font size 48sp, scroll direction parsing, and TTS chunking/sanitization
+            assertEquals(48f, com.example.data.LibraryManager.MAX_FONT_SIZE_SP, 0.001f)
+            assertEquals(
+                com.example.data.ReaderScrollDirection.HORIZONTAL,
+                com.example.data.ReaderScrollDirection.fromKey("horizontal")
+            )
+            assertTrue(com.example.data.LibraryManager.splitParagraphIntoTtsChunks("   *** --- ***   ").isEmpty())
+            val longPara = (1..20).joinToString(" ") { "Câu văn tiếng Việt thử nghiệm số $it rất rõ ràng." }
+            val chunks = com.example.data.LibraryManager.splitParagraphIntoTtsChunks(longPara, maxChunkLength = 180)
+            assertTrue("Long paragraph should split into multiple safe TTS chunks", chunks.size >= 4)
+            assertTrue("Every TTS chunk must stay within max length", chunks.all { it.length <= 180 })
         } finally {
             tempRoot.deleteRecursively()
         }
     }
+
+    @Test
+    fun audioSettings_characterScannerAndPitchAndAmbientWorkOffline() {
+        val chapter1 = listOf(
+            "Chương 1: Khởi đầu tại Gia Mã Đế Quốc.",
+            "Tiêu Viêm khẽ nói: \"Huân Nhi, hôm nay trời thật đẹp.\"",
+            "Huân Nhi mỉm cười đáp: \"Tiêu Viêm ca ca, chúng ta đi tập luyện thôi.\"",
+            "Nhưng bất ngờ Dược Lão trầm giọng bảo: \"Tiêu Viêm, đừng lơ là!\"",
+            "Nạp Lan Yên Nhiên lạnh giọng hỏi: \"Tiêu Viêm đang ở đâu?\"",
+            "Tiêu Huân Nhi và Tiêu Viêm cùng nhìn về phía Hải Ba Đông.",
+            "Hải Ba Đông cười nói: \"Ta đã chờ Tiêu Viêm từ sáng.\"",
+            "Mỹ Đỗ Toa khẽ nhíu mày: \"Ngươi là Tiêu Viêm sao?\"",
+            "Vân Vận thở dài nói: \"Tiêu Viêm, hãy cẩn thận với Hồn Điện.\"",
+            "Lâm Động cũng ghé qua thăm Tiêu Viêm và Dược Lão.",
+            "Tiêu Viêm gật đầu cảm ơn Dược Lão, Hải Ba Đông, Vân Vận và Mỹ Đỗ Toa."
+        )
+        val top7 = com.example.audio.StoryCharacterScanner.scanTopCharacters(listOf(chapter1), maxCharacters = 7)
+        assertTrue("Should detect characters from story", top7.isNotEmpty())
+        assertTrue("Should return at most 7 characters", top7.size <= 7)
+        assertTrue("Tiêu Viêm should be top character", top7.first().name == "Tiêu Viêm")
+        assertFalse("Should not include stop word 'Chương'", top7.any { it.name.equals("Chương", true) })
+
+        val names = top7.map { it.name }
+        val speaker1 = com.example.audio.StoryCharacterScanner.detectSpeakerForParagraph(
+            paragraph = "Dược Lão trầm giọng bảo: \"Hãy tập trung.\"",
+            previousParagraph = null,
+            characterNames = names
+        )
+        assertEquals("Dược Lão", speaker1)
+
+        val narratorLine = com.example.audio.StoryCharacterScanner.detectSpeakerForParagraph(
+            paragraph = "Gió mùa thu nhẹ nhàng thổi qua khu rừng vắng lặng.",
+            previousParagraph = null,
+            characterNames = names
+        )
+        assertEquals(null, narratorLine)
+
+        // Custom voice pitch override & reset behavior
+        val basePrefs = com.example.data.ReaderPreferences()
+        assertEquals(
+            com.example.data.ReaderVoiceProfile.MALE_1.pitch,
+            basePrefs.effectivePitchFor(com.example.data.ReaderVoiceProfile.MALE_1),
+            0.001f
+        )
+        val tunedPrefs = basePrefs.copy(
+            customVoicePitches = mapOf(com.example.data.ReaderVoiceProfile.MALE_1.storageKey to 1.35f)
+        )
+        assertEquals(
+            1.35f,
+            tunedPrefs.effectivePitchFor(com.example.data.ReaderVoiceProfile.MALE_1),
+            0.001f
+        )
+
+        // Ambient sound tracks include Off + 3 gentle melodious tracks
+        assertEquals(4, com.example.audio.AmbientSoundTrack.entries.size)
+        assertEquals(
+            com.example.audio.AmbientSoundTrack.MELODIC_PAD,
+            com.example.audio.AmbientSoundTrack.fromKey("melodic_pad")
+        )
+
+        // Verify bundled sample book ("Đêm Trăng Đồi Gió") has 3 chapters and scans 7 distinct characters
+        val sampleChapters = com.example.data.SampleBookSeeder.SAMPLE_CHAPTERS.map { it.paragraphs }
+        assertEquals(3, sampleChapters.size)
+        val sampleTop7 = com.example.audio.StoryCharacterScanner.scanTopCharacters(sampleChapters, maxCharacters = 7)
+        assertEquals("Sample book should scan exactly 7 characters", 7, sampleTop7.size)
+        val detectedSet = sampleTop7.map { it.name }.toSet()
+        assertTrue("Expected Minh Khang in top 7: $detectedSet", "Minh Khang" in detectedSet)
+        assertTrue("Expected Lan Chi in top 7: $detectedSet", "Lan Chi" in detectedSet)
+        assertTrue("Expected Ông Bảy in top 7: $detectedSet", "Ông Bảy" in detectedSet)
+    }
+
+    @Test
+    fun vietnameseTtsTextNormalizer_andAdvancedSettings_workCorrectly() {
+        // 1. Mở rộng từ viết tắt tiếng Việt, xóa *, #, [2], đổi gạch ngang thoại thành dấu phẩy
+        val raw = "— BS. Minh và TS. Hùng đến TP.HCM [2] *xem* tr. 15, ch. 3 #ghi chú - rất chi tiết, v.v."
+        val normalized = com.example.audio.VietnameseTtsTextNormalizer.normalizeForTts(raw)
+        assertTrue("Expected Bác sĩ: $normalized", normalized.contains("Bác sĩ Minh"))
+        assertTrue("Expected Tiến sĩ: $normalized", normalized.contains("Tiến sĩ Hùng"))
+        assertTrue("Expected Thành phố Hồ Chí Minh: $normalized", normalized.contains("Thành phố Hồ Chí Minh"))
+        assertTrue("Expected trang 15: $normalized", normalized.contains("trang 15"))
+        assertTrue("Expected chương 3: $normalized", normalized.contains("chương 3"))
+        assertTrue("Expected vân vân: $normalized", normalized.contains("vân vân"))
+        assertFalse("Should remove [2]: $normalized", normalized.contains("[2]"))
+        assertFalse("Should remove *: $normalized", normalized.contains("*"))
+        assertFalse("Should remove #: $normalized", normalized.contains("#"))
+        assertFalse("Should remove em-dash: $normalized", normalized.contains("—"))
+        assertTrue("Dialogue dash in middle should become comma: $normalized", normalized.contains(", rất chi tiết"))
+
+        // 2. Tách câu thông minh KHÔNG cắt nhầm ở số thập phân (3.14, 10.000) hoặc viết tắt (Mr. Nam)
+        val multi = "Nhiệt độ là 3.14 độ và giá 10.000 đồng. Mr. Nam gật đầu cười! Cậu có khỏe không?"
+        val sentences = com.example.audio.VietnameseTtsTextNormalizer.splitIntoSmartSentences(multi)
+        assertEquals("Should split into exactly 3 smart sentences: $sentences", 3, sentences.size)
+        assertEquals("Nhiệt độ là 3.14 độ và giá 10.000 đồng.", sentences[0])
+        assertEquals("Mr. Nam gật đầu cười!", sentences[1])
+        assertEquals("Cậu có khỏe không?", sentences[2])
+
+        // 3. Kiểm tra làm tròn bước nhảy 0.05f và chế độ Tùy chỉnh nâng cao
+        assertEquals(
+            0.85f,
+            com.example.data.LibraryManager.snapFloatStep(0.84f, 0.05f, 0.60f, 1.40f),
+            0.001f
+        )
+        val advPrefs = com.example.data.ReaderPreferences(
+            advancedCustomEnabled = true,
+            customPitch = 1.25f,
+            customSpeechRate = 1.35f,
+            sentencePauseMs = 450
+        )
+        assertEquals(1.25f, advPrefs.resolvePlaybackPitch(com.example.data.ReaderVoiceProfile.FEMALE_1), 0.001f)
+        assertEquals(1.35f, advPrefs.resolvePlaybackRate(com.example.data.ReaderVoiceProfile.FEMALE_1), 0.001f)
+        // Khi đọc phân vai nhân vật vẫn giữ cao độ đặc trưng của nhân vật
+        assertEquals(
+            com.example.data.ReaderVoiceProfile.MALE_3.pitch,
+            advPrefs.resolvePlaybackPitch(com.example.data.ReaderVoiceProfile.MALE_3, isCharacterOverride = true),
+            0.001f
+        )
+    }
 }
+

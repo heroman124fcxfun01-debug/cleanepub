@@ -383,6 +383,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    /**
+     * Triggered from BookLibraryScreen when the user imports a book and chooses "Có" to auto-clean it
+     * using the current cleaning options before adding it to the Book Library.
+     */
+    fun startAutoCleanForLibraryImport(source: SourceFileInfo) {
+        viewModelScope.launch {
+            val meta = withContext(Dispatchers.IO) {
+                runCatching {
+                    EpubMetadataEditor.readMetadataFromSource(appContext, source)
+                }.getOrNull()
+            }
+            startProcessing(source, meta)
+        }
+    }
+
     fun retryProcessing() {
         val lastSource = processingSnapshot.value.sourceFile ?: return
         val lastMeta = processingSnapshot.value.metadata

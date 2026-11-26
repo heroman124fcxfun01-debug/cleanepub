@@ -1,0 +1,716 @@
+package com.example.ui.components
+
+import android.content.Intent
+import android.speech.tts.TextToSpeech
+import android.widget.Toast
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.RestartAlt
+import androidx.compose.material.icons.rounded.SpeakerPhone
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.data.LibraryManager
+import com.example.data.ReaderPreferences
+import com.example.service.DeviceOfflineVoice
+import com.example.ui.theme.IosBlue
+import java.util.Locale
+import kotlin.math.roundToInt
+
+/**
+ * Hai mục nâng cấp chuyên sâu cho Android Offline TTS trong bảng Cài đặt nghe sách:
+ * 1. Danh sách giọng gốc tiếng Việt Offline trên máy (xếp hạng ưu tiên QUALITY_HIGH lên đầu)
+ *    + nút "Tải thêm giọng chất lượng cao" gọi `TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA`.
+ * 2. Chế độ "Tùy chỉnh nâng cao" gồm 3 thanh trượt:
+ *    - Độ cao giọng (Pitch): 0.60f .. 1.40f (bước 0.05f)
+ *    - Tốc độ đọc (Speech Rate): 0.70f .. 1.80f (bước 0.05f)
+ *    - Thời gian ngắt nghỉ giữa các câu (Sentence Pause): 150ms .. 800ms (`playSilentUtterance`)
+ *    kèm nút "Nghe thử" trực tiếp và nút "Khôi phục mặc định".
+ */
+@Composable
+fun DeviceOfflineVoicesSection(
+    availableDeviceVoices: List<DeviceOfflineVoice>,
+    selectedSystemVoiceName: String?,
+    onSelectSystemVoice: (String?) -> Unit,
+    onRefreshDeviceVoices: () -> Unit,
+    onPreviewSystemVoice: (String?) -> Unit
+) {
+    val context = LocalContext.current
+    val cardBg = Color(0xFFF2F2F7)
+    val itemBg = Color(0xFFFFFFFF)
+    val borderCol = Color(0xFFE5E5EA)
+    val primaryInk = Color(0xFF1C1C1E)
+    val secondaryInk = Color(0xFF6E6E73)
+    val highQualityGreen = Color(0xFF1E8E3E)
+
+    val highQualityCount = availableDeviceVoices.count { it.isHighQuality }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(cardBg)
+            .padding(12.dp)
+            .testTag("device_offline_voices_section"),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // Tiêu đề mục + nút làm mới danh sách giọng trên máy
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .clip(CircleShape)
+                        .background(IosBlue.copy(alpha = 0.12f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.SpeakerPhone,
+                        contentDescription = null,
+                        tint = IosBlue,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+                Column {
+                    Text(
+                        text = "Giọng gốc trên thiết bị (Offline)",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = primaryInk,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = if (availableDeviceVoices.isEmpty()) {
+                            "Đang dùng giọng tiếng Việt mặc định của hệ thống"
+                        } else {
+                            "Tìm thấy ${availableDeviceVoices.size} giọng Việt offline ($highQualityCount chất lượng cao)"
+                        },
+                        fontSize = 10.sp,
+                        color = secondaryInk,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(itemBg)
+                    .border(0.5.dp, borderCol, CircleShape)
+                    .clickable(onClick = onRefreshDeviceVoices)
+                    .testTag("refresh_device_voices_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Refresh,
+                    contentDescription = "Quét lại giọng trên thiết bị",
+                    tint = IosBlue,
+                    modifier = Modifier.size(15.dp)
+                )
+            }
+        }
+
+        // Danh sách tùy chọn giọng gốc
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(itemBg)
+                .border(0.5.dp, borderCol, RoundedCornerShape(12.dp))
+        ) {
+            // Tùy chọn mặc định: Tự động chọn giọng chất lượng cao nhất theo hồ sơ Nam/Nữ
+            val isAutoSelected = selectedSystemVoiceName.isNullOrBlank()
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onSelectSystemVoice(null) }
+                    .padding(horizontal = 12.dp, vertical = 9.dp)
+                    .testTag("device_voice_auto"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AutoAwesome,
+                        contentDescription = null,
+                        tint = if (isAutoSelected) IosBlue else secondaryInk,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Column {
+                        Text(
+                            text = "Tự động (Ưu tiên chất lượng cao)",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isAutoSelected) IosBlue else primaryInk
+                        )
+                        Text(
+                            text = "Tự chọn giọng Offline cao nhất theo hồ sơ Nam / Nữ",
+                            fontSize = 10.sp,
+                            color = secondaryInk
+                        )
+                    }
+                }
+                if (isAutoSelected) {
+                    Icon(
+                        imageVector = Icons.Rounded.Check,
+                        contentDescription = "Đang chọn",
+                        tint = IosBlue,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            availableDeviceVoices.forEachIndexed { idx, voice ->
+                HorizontalDivider(
+                    thickness = 0.5.dp,
+                    color = borderCol,
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+                val isSelected = selectedSystemVoiceName == voice.voiceName
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelectSystemVoice(voice.voiceName) }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("device_voice_item_$idx"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = voice.displayLabel,
+                                fontSize = 12.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                color = if (isSelected) IosBlue else primaryInk,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (voice.isHighQuality) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(50))
+                                        .background(highQualityGreen.copy(alpha = 0.12f))
+                                        .padding(horizontal = 6.dp, vertical = 1.dp)
+                                ) {
+                                    Text(
+                                        text = voice.qualityLabel,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = highQualityGreen
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            text = "${voice.voiceName} • Offline",
+                            fontSize = 9.sp,
+                            color = secondaryInk,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(26.dp)
+                                .clip(CircleShape)
+                                .background(cardBg)
+                                .clickable { onPreviewSystemVoice(voice.voiceName) }
+                                .testTag("device_voice_preview_$idx"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PlayArrow,
+                                contentDescription = "Nghe thử ${voice.displayLabel}",
+                                tint = primaryInk,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+
+                        if (isSelected) {
+                            Icon(
+                                imageVector = Icons.Rounded.Check,
+                                contentDescription = "Đã chọn",
+                                tint = IosBlue,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Nút gọi Intent hệ thống ACTION_INSTALL_TTS_DATA để tải thêm gói giọng tiếng Việt chất lượng cao
+        Surface(
+            shape = RoundedCornerShape(50),
+            color = itemBg,
+            border = BorderStroke(0.6.dp, IosBlue.copy(alpha = 0.45f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(50))
+                .clickable {
+                    val installIntent = Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    val launched = runCatching {
+                        context.startActivity(installIntent)
+                        true
+                    }.getOrDefault(false)
+                    if (!launched) {
+                        val fallbackIntent = Intent("com.android.settings.TTS_SETTINGS").apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        runCatching { context.startActivity(fallbackIntent) }.onFailure {
+                            Toast.makeText(
+                                context,
+                                "Vui lòng mở Cài đặt Android → Chuyển văn bản thành giọng nói để tải thêm giọng tiếng Việt.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+                .testTag("install_tts_data_button")
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Download,
+                    contentDescription = null,
+                    tint = IosBlue,
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(modifier = Modifier.size(6.dp))
+                Text(
+                    text = "Tải thêm giọng chất lượng cao",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = IosBlue
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Bảng "Tùy chỉnh nâng cao" với 3 thanh trượt chuyên sâu:
+ * - Độ cao giọng (Pitch): 0.60f -> 1.40f (bước 0.05f)
+ * - Tốc độ đọc (Speech Rate): 0.70f -> 1.80f (bước 0.05f)
+ * - Thời gian ngắt nghỉ giữa các câu (Sentence Pause): 150ms -> 800ms
+ * Kèm nút "Nghe thử" ngay khi kéo thanh trượt và nút "Khôi phục mặc định".
+ */
+@Composable
+fun AdvancedCustomVoiceSettingsSection(
+    readerPrefs: ReaderPreferences,
+    onToggleAdvancedEnabled: (Boolean) -> Unit,
+    onPitchChanged: (Float) -> Unit,
+    onSpeechRateChanged: (Float) -> Unit,
+    onSentencePauseChanged: (Int) -> Unit,
+    onPreviewAdvanced: (pitch: Float, rate: Float, pauseMs: Int) -> Unit,
+    onResetDefaults: () -> Unit
+) {
+    val cardBg = Color(0xFFF2F2F7)
+    val itemBg = Color(0xFFFFFFFF)
+    val borderCol = Color(0xFFE5E5EA)
+    val primaryInk = Color(0xFF1C1C1E)
+    val secondaryInk = Color(0xFF6E6E73)
+
+    // Trạng thái kéo mượt tại chỗ (đồng bộ theo readerPrefs và lưu ngay khi thả/thay đổi)
+    var sliderPitch by remember(readerPrefs.customPitch) { mutableFloatStateOf(readerPrefs.customPitch) }
+    var sliderRate by remember(readerPrefs.customSpeechRate) { mutableFloatStateOf(readerPrefs.customSpeechRate) }
+    var sliderPauseMs by remember(readerPrefs.sentencePauseMs) { mutableIntStateOf(readerPrefs.sentencePauseMs) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(cardBg)
+            .padding(12.dp)
+            .testTag("advanced_tts_settings_section"),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        // Header + Công tắc bật/tắt chế độ Tùy chỉnh nâng cao
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .clip(CircleShape)
+                        .background(IosBlue.copy(alpha = 0.12f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Tune,
+                        contentDescription = null,
+                        tint = IosBlue,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+                Column {
+                    Text(
+                        text = "Tùy chỉnh nâng cao",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = primaryInk
+                    )
+                    Text(
+                        text = "Tinh chỉnh độ cao, tốc độ & nhịp thở giữa các câu",
+                        fontSize = 10.sp,
+                        color = secondaryInk,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            Switch(
+                checked = readerPrefs.advancedCustomEnabled,
+                onCheckedChange = onToggleAdvancedEnabled,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = IosBlue,
+                    uncheckedThumbColor = Color.White,
+                    uncheckedTrackColor = Color(0xFFD1D1D6),
+                    uncheckedBorderColor = Color.Transparent
+                ),
+                modifier = Modifier
+                    .scale(0.75f)
+                    .height(26.dp)
+                    .testTag("advanced_tts_mode_switch")
+            )
+        }
+
+        // Thẻ chứa 3 thanh trượt tinh chỉnh
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(itemBg)
+                .border(0.5.dp, borderCol, RoundedCornerShape(12.dp))
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // 1. Thanh trượt Độ cao giọng (Pitch): 0.60f -> 1.40f (bước 0.05f => 16 khoảng => 15 điểm giữa)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Độ cao giọng (Pitch)",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = primaryInk
+                    )
+                    Text(
+                        text = String.format(Locale.US, "%.2fx", sliderPitch),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = IosBlue
+                    )
+                }
+                Slider(
+                    value = sliderPitch,
+                    onValueChange = { raw ->
+                        sliderPitch = LibraryManager.snapFloatStep(
+                            value = raw,
+                            step = LibraryManager.STEP_ADVANCED_PITCH,
+                            min = LibraryManager.MIN_ADVANCED_PITCH,
+                            max = LibraryManager.MAX_ADVANCED_PITCH
+                        )
+                    },
+                    onValueChangeFinished = { onPitchChanged(sliderPitch) },
+                    valueRange = LibraryManager.MIN_ADVANCED_PITCH..LibraryManager.MAX_ADVANCED_PITCH,
+                    steps = 15,
+                    colors = SliderDefaults.colors(
+                        thumbColor = IosBlue,
+                        activeTrackColor = IosBlue,
+                        inactiveTrackColor = Color(0xFFD1D1D6)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(26.dp)
+                        .testTag("advanced_pitch_slider")
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("0.60 (Trầm)", fontSize = 9.sp, color = secondaryInk)
+                    Text("1.00 (Chuẩn)", fontSize = 9.sp, color = secondaryInk)
+                    Text("1.40 (Cao)", fontSize = 9.sp, color = secondaryInk)
+                }
+            }
+
+            HorizontalDivider(thickness = 0.5.dp, color = borderCol)
+
+            // 2. Thanh trượt Tốc độ đọc (Speech Rate): 0.70f -> 1.80f (bước 0.05f => 22 khoảng => 21 điểm giữa)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Tốc độ đọc (Speech Rate)",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = primaryInk
+                    )
+                    Text(
+                        text = String.format(Locale.US, "%.2fx", sliderRate),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = IosBlue
+                    )
+                }
+                Slider(
+                    value = sliderRate,
+                    onValueChange = { raw ->
+                        sliderRate = LibraryManager.snapFloatStep(
+                            value = raw,
+                            step = LibraryManager.STEP_ADVANCED_RATE,
+                            min = LibraryManager.MIN_ADVANCED_RATE,
+                            max = LibraryManager.MAX_ADVANCED_RATE
+                        )
+                    },
+                    onValueChangeFinished = { onSpeechRateChanged(sliderRate) },
+                    valueRange = LibraryManager.MIN_ADVANCED_RATE..LibraryManager.MAX_ADVANCED_RATE,
+                    steps = 21,
+                    colors = SliderDefaults.colors(
+                        thumbColor = IosBlue,
+                        activeTrackColor = IosBlue,
+                        inactiveTrackColor = Color(0xFFD1D1D6)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(26.dp)
+                        .testTag("advanced_rate_slider")
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("0.70x (Chậm)", fontSize = 9.sp, color = secondaryInk)
+                    Text("1.00x (Chuẩn)", fontSize = 9.sp, color = secondaryInk)
+                    Text("1.80x (Nhanh)", fontSize = 9.sp, color = secondaryInk)
+                }
+            }
+
+            HorizontalDivider(thickness = 0.5.dp, color = borderCol)
+
+            // 3. Thanh trượt Thời gian ngắt nghỉ giữa các câu (Sentence Pause): 150ms -> 800ms (bước 50ms => 12 điểm giữa)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Ngắt nghỉ giữa các câu",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = primaryInk
+                    )
+                    Text(
+                        text = "$sliderPauseMs ms",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = IosBlue
+                    )
+                }
+                Slider(
+                    value = sliderPauseMs.toFloat(),
+                    onValueChange = { raw ->
+                        val step = LibraryManager.STEP_SENTENCE_PAUSE_MS
+                        sliderPauseMs = ((raw / step).roundToInt() * step)
+                            .coerceIn(LibraryManager.MIN_SENTENCE_PAUSE_MS, LibraryManager.MAX_SENTENCE_PAUSE_MS)
+                    },
+                    onValueChangeFinished = { onSentencePauseChanged(sliderPauseMs) },
+                    valueRange = LibraryManager.MIN_SENTENCE_PAUSE_MS.toFloat()..LibraryManager.MAX_SENTENCE_PAUSE_MS.toFloat(),
+                    steps = 12,
+                    colors = SliderDefaults.colors(
+                        thumbColor = IosBlue,
+                        activeTrackColor = IosBlue,
+                        inactiveTrackColor = Color(0xFFD1D1D6)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(26.dp)
+                        .testTag("advanced_pause_slider")
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("150ms (Gấp)", fontSize = 9.sp, color = secondaryInk)
+                    Text("300ms (Tự nhiên)", fontSize = 9.sp, color = secondaryInk)
+                    Text("800ms (Khoan thai)", fontSize = 9.sp, color = secondaryInk)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(2.dp))
+
+            // Hàng nút bấm: "Nghe thử" & "Khôi phục mặc định"
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = IosBlue,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(50))
+                        .clickable {
+                            onPitchChanged(sliderPitch)
+                            onSpeechRateChanged(sliderRate)
+                            onSentencePauseChanged(sliderPauseMs)
+                            onPreviewAdvanced(sliderPitch, sliderRate, sliderPauseMs)
+                        }
+                        .testTag("advanced_tts_preview_button")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PlayArrow,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.size(4.dp))
+                        Text(
+                            text = "Nghe thử",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = cardBg,
+                    border = BorderStroke(0.5.dp, borderCol),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(50))
+                        .clickable {
+                            sliderPitch = LibraryManager.DEFAULT_ADVANCED_PITCH
+                            sliderRate = LibraryManager.DEFAULT_ADVANCED_RATE
+                            sliderPauseMs = LibraryManager.DEFAULT_SENTENCE_PAUSE_MS
+                            onResetDefaults()
+                        }
+                        .testTag("advanced_tts_reset_button")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.RestartAlt,
+                            contentDescription = null,
+                            tint = secondaryInk,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.size(4.dp))
+                        Text(
+                            text = "Khôi phục mặc định",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = primaryInk,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+    }
+}

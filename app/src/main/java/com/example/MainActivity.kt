@@ -12,6 +12,16 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -19,7 +29,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -33,9 +46,12 @@ import androidx.navigation.compose.rememberNavController
 import com.example.data.ErrorMemoryManager
 import com.example.pipeline.FilePathResolver
 import com.example.pipeline.ProcessingPhase
+import com.example.service.BookAudioPlaybackService
 import com.example.ui.BookLibraryViewModel
+import com.example.ui.LibraryImportFlowState
 import com.example.ui.MainViewModel
 import com.example.ui.components.EpubMetadataEditorDialog
+import com.example.ui.components.FloatingBackgroundAudioBanner
 import com.example.ui.components.SettingsDialog
 import com.example.ui.screens.BookLibraryScreen
 import com.example.ui.screens.BookReaderScreen
@@ -142,9 +158,11 @@ private fun EpubCleanNavHost(
     val libraryBooks by libraryViewModel.books.collectAsStateWithLifecycle()
     val libraryCollections by libraryViewModel.collections.collectAsStateWithLifecycle()
     val isImportingLibraryBook by libraryViewModel.isImporting.collectAsStateWithLifecycle()
+    val libraryImportFlowState by libraryViewModel.importFlowState.collectAsStateWithLifecycle()
     val libraryToastMessage by libraryViewModel.statusMessage.collectAsStateWithLifecycle()
     val bookReaderState by libraryViewModel.readerState.collectAsStateWithLifecycle()
     val bookReaderPrefs by libraryViewModel.readerPrefs.collectAsStateWithLifecycle()
+    val audioPlaybackState by libraryViewModel.audioPlaybackState.collectAsStateWithLifecycle()
 
     LaunchedEffect(statusToastMessage) {
         val msg = statusToastMessage
@@ -172,22 +190,37 @@ private fun EpubCleanNavHost(
     var showReviewMetadataDialog by remember { mutableStateOf(false) }
     var coverPickerForReview by remember { mutableStateOf(false) }
 
-    // Re-check MANAGE_EXTERNAL_STORAGE when returning from Android Settings
+    // Re-check MANAGE_EXTERNAL_STORAGE & newly installed offline TTS voices on ON_RESUME
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 viewModel.refreshStoragePermission()
+                if (libraryViewModel.audioPlaybackState.value.isTtsReady) {
+                    BookAudioPlaybackService.refreshDeviceVoices(context)
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Request POST_NOTIFICATIONS on Android 13+ for Foreground Service progress visibility
+    // Request POST_NOTIFICATIONS on Android 13+ for Foreground Service progress & background audio controls
     val notifPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
         onResult = { /* Service continues safely regardless of notification permission */ }
     )
+
+    LaunchedEffect(audioPlaybackState.isPlaying) {
+        if (audioPlaybackState.isPlaying && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val notifGranted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!notifGranted) {
+                notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
 
     val legacyStorageLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions(),
@@ -234,12 +267,12 @@ private fun EpubCleanNavHost(
         }
     )
 
-    // Direct offline import picker for Book Library (.epub / .pdf)
+    // Direct offline import picker for Book Library (.epub / .pdf) -> prompts "Có muốn dọn sách không?"
     val libraryImportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri ->
             if (uri != null) {
-                libraryViewModel.importBookFromUri(uri)
+                libraryViewModel.onLibraryFilePicked(uri)
             }
         }
     )
@@ -264,9 +297,35 @@ private fun EpubCleanNavHost(
     )
 
     // Automatic screen transition when processing completes in foreground or background
-    LaunchedEffect(snapshot.phase) {
+    LaunchedEffect(snapshot.phase, libraryImportFlowState) {
         val currentRoute = navController.currentDestination?.route
-        if (snapshot.phase == ProcessingPhase.COMPLETED && currentRoute == ROUTE_PROCESSING) {
+        if (libraryImportFlowState is LibraryImportFlowState.CleaningInProgress) {
+            when (snapshot.phase) {
+                ProcessingPhase.COMPLETED -> {
+                    val ws = snapshot.workspace
+                    if (ws != null) {
+                        val totalFixes = snapshot.stats.junkLinksRemoved +
+                            snapshot.stats.whitespaceFixes +
+                            snapshot.stats.spellingFixes +
+                            snapshot.stats.mergedParagraphs +
+                            snapshot.stats.headersFootersRemoved +
+                            snapshot.stats.footnotesRemoved +
+                            snapshot.stats.unicodeSanitized +
+                            snapshot.stats.dialoguesFormatted
+                        libraryViewModel.onCleaningCompletedForLibrary(ws, totalFixes)
+                    }
+                }
+                ProcessingPhase.ERROR -> {
+                    libraryViewModel.onCleaningFailedOrCancelled(
+                        snapshot.errorMessage ?: "Quá trình dọn sách gặp lỗi."
+                    )
+                }
+                ProcessingPhase.CANCELLED -> {
+                    libraryViewModel.onCleaningFailedOrCancelled(null)
+                }
+                else -> Unit
+            }
+        } else if (snapshot.phase == ProcessingPhase.COMPLETED && currentRoute == ROUTE_PROCESSING) {
             navController.navigate(ROUTE_REVIEW) {
                 popUpTo(ROUTE_PROCESSING) { inclusive = true }
                 launchSingleTop = true
@@ -301,10 +360,13 @@ private fun EpubCleanNavHost(
         }
     }
 
-    NavHost(
-        navController = navController,
-        startDestination = ROUTE_HOME
-    ) {
+    val currentRoute = currentBackStackEntry?.destination?.route
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        NavHost(
+            navController = navController,
+            startDestination = ROUTE_HOME
+        ) {
         composable(ROUTE_HOME) {
             MainScreen(
                 recentFiles = recentFiles,
@@ -360,6 +422,9 @@ private fun EpubCleanNavHost(
                 books = libraryBooks,
                 collections = libraryCollections,
                 isImporting = isImportingLibraryBook,
+                importFlowState = libraryImportFlowState,
+                cleaningProgressPercent = (snapshot.progressFraction * 100f).toInt().coerceIn(0, 100),
+                cleaningStatusMessage = snapshot.statusDetail,
                 onBackClick = { navController.popBackStack() },
                 onImportBookClick = {
                     libraryImportLauncher.launch(
@@ -370,6 +435,32 @@ private fun EpubCleanNavHost(
                             "*/*"
                         )
                     )
+                },
+                onConfirmCleanBeforeImport = {
+                    val source = libraryViewModel.startCleaningFlowForPickedFile()
+                    if (source != null) {
+                        viewModel.startAutoCleanForLibraryImport(source)
+                    }
+                },
+                onConfirmDirectImportNoClean = {
+                    libraryViewModel.confirmDirectImportWithoutCleaning()
+                },
+                onCancelAutoClean = {
+                    viewModel.cancelProcessing()
+                    libraryViewModel.dismissImportFlow()
+                },
+                onContinueEditCleanedBook = {
+                    libraryViewModel.dismissImportFlow()
+                    navController.navigate(ROUTE_REVIEW) {
+                        launchSingleTop = true
+                    }
+                },
+                onAcceptCleanedBookOk = {
+                    libraryViewModel.dismissImportFlow()
+                    viewModel.resetProcessingSession()
+                },
+                onDismissImportFlow = {
+                    libraryViewModel.dismissImportFlow()
                 },
                 onOpenBook = { book ->
                     libraryViewModel.openBookForReading(book) {
@@ -394,6 +485,7 @@ private fun EpubCleanNavHost(
             BookReaderScreen(
                 readerState = bookReaderState,
                 readerPrefs = bookReaderPrefs,
+                audioPlaybackState = audioPlaybackState,
                 onBackClick = { chapIdx, paraIdx ->
                     libraryViewModel.saveReadingProgress(chapIdx, paraIdx)
                     navController.popBackStack()
@@ -405,10 +497,31 @@ private fun EpubCleanNavHost(
                 onSaveProgress = { chapIdx, paraIdx ->
                     libraryViewModel.saveReadingProgress(chapIdx, paraIdx)
                 },
+                onSetFontSize = { size -> libraryViewModel.setReaderFontSize(size) },
                 onAdjustFontSize = { delta -> libraryViewModel.adjustReaderFontSize(delta) },
                 onSelectPaperTheme = { theme -> libraryViewModel.selectReaderPaperTheme(theme) },
+                onSelectScrollDirection = { dir -> libraryViewModel.selectScrollDirection(dir) },
+                onAdjustPageMargin = { delta -> libraryViewModel.adjustPageMargin(delta) },
+                onAdjustLineHeight = { delta -> libraryViewModel.adjustLineHeightMultiplier(delta) },
+                onAdjustLetterSpacing = { delta -> libraryViewModel.adjustLetterSpacing(delta) },
                 onCycleSpeechRate = { libraryViewModel.cycleSpeechRate() },
-                onCycleVoiceProfile = { libraryViewModel.cycleVoiceProfile() }
+                onCycleVoiceProfile = { libraryViewModel.cycleVoiceProfile() },
+                onSelectNarratorVoice = { profile -> libraryViewModel.selectNarratorVoice(profile) },
+                onSelectSystemVoice = { voiceName -> libraryViewModel.selectSystemDeviceVoice(voiceName) },
+                onToggleAdvancedCustom = { enabled -> libraryViewModel.setAdvancedVoiceCustomEnabled(enabled) },
+                onAdvancedPitchChanged = { pitch -> libraryViewModel.setAdvancedCustomPitch(pitch) },
+                onAdvancedRateChanged = { rate -> libraryViewModel.setAdvancedCustomSpeechRate(rate) },
+                onSentencePauseChanged = { pauseMs -> libraryViewModel.setSentencePauseMs(pauseMs) },
+                onResetAdvancedDefaults = { libraryViewModel.resetAdvancedVoiceSettings() },
+                onSaveVoicePitch = { profile, pitch -> libraryViewModel.saveCustomVoicePitch(profile, pitch) },
+                onResetVoicePitch = { profile -> libraryViewModel.resetCustomVoicePitch(profile) },
+                onScanCharacters = { libraryViewModel.scanCharactersForCurrentBook() },
+                onConfirmCharacterAssignments = { map ->
+                    libraryViewModel.confirmCharacterVoiceAssignments(map)
+                },
+                onHideCharacterPicker = { libraryViewModel.hideCharacterVoicePicker() },
+                onSelectAmbientSound = { track -> libraryViewModel.selectAmbientSound(track) },
+                onChangeAmbientVolume = { vol -> libraryViewModel.setAmbientVolume(vol) }
             )
         }
 
@@ -511,6 +624,36 @@ private fun EpubCleanNavHost(
                     navController.popBackStack(ROUTE_HOME, inclusive = false)
                 },
                 onDismissSaveError = { viewModel.dismissSaveState() }
+            )
+        }
+        }
+
+        // Persistent floating Now Playing pill when background audio is active outside BookReaderScreen
+        AnimatedVisibility(
+            visible = audioPlaybackState.hasActiveSession && currentRoute != ROUTE_BOOK_READER,
+            enter = slideInVertically { it } + fadeIn(),
+            exit = slideOutVertically { it } + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .widthIn(max = 560.dp)
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+        ) {
+            FloatingBackgroundAudioBanner(
+                playbackState = audioPlaybackState,
+                onOpenBookClick = {
+                    libraryViewModel.openCurrentlyPlayingBook {
+                        navController.navigate(ROUTE_BOOK_READER) {
+                            launchSingleTop = true
+                        }
+                    }
+                },
+                onTogglePlayPause = {
+                    BookAudioPlaybackService.togglePlayPause(context)
+                },
+                onStopClick = {
+                    BookAudioPlaybackService.stop(context)
+                }
             )
         }
     }

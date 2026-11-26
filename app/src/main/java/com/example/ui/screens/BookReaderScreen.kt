@@ -1,11 +1,11 @@
 package com.example.ui.screens
 
-import android.os.Handler
-import android.os.Looper
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
-import android.speech.tts.Voice
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -18,6 +18,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -35,17 +36,23 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowBackIosNew
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Headphones
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Remove
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
@@ -54,6 +61,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -82,12 +91,19 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import com.example.audio.AmbientSoundTrack
 import com.example.data.LibraryChapterMeta
 import com.example.data.LibraryManager
 import com.example.data.ReaderPaperTheme
 import com.example.data.ReaderPreferences
+import com.example.data.ReaderScrollDirection
 import com.example.data.ReaderVoiceProfile
+import com.example.service.BookAudioPlaybackService
+import com.example.service.BookAudioPlaybackState
 import com.example.ui.ActiveBookReaderState
+import com.example.ui.components.AnimatedAudioPlayingBars
+import com.example.ui.components.ReaderAudioSettingsSheetContent
 import com.example.ui.theme.IosBlue
 import com.example.ui.theme.ReaderBrownInk
 import com.example.ui.theme.ReaderBrownPaper
@@ -98,42 +114,91 @@ import com.example.ui.theme.ReaderWhitePaper
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import java.util.Locale
+import kotlin.math.ceil
+
+private data class ReaderPageSlice(
+    val paragraphIndex: Int,
+    val text: String
+)
+
+private data class ReaderPageData(
+    val isFirstPageOfChapter: Boolean,
+    val slices: List<ReaderPageSlice>
+) {
+    val firstParagraphIndex: Int
+        get() = slices.firstOrNull()?.paragraphIndex ?: 0
+}
 
 @OptIn(ExperimentalMaterial3Api::class, kotlinx.coroutines.FlowPreview::class)
 @Composable
 fun BookReaderScreen(
     readerState: ActiveBookReaderState,
     readerPrefs: ReaderPreferences,
+    audioPlaybackState: BookAudioPlaybackState,
     onBackClick: (chapterIndex: Int, paragraphIndex: Int) -> Unit,
     onSelectChapter: (chapterIndex: Int, startParagraphIndex: Int, continueAudio: Boolean) -> Unit,
     onConsumeAutoContinueAudio: () -> Unit,
     onSaveProgress: (chapterIndex: Int, paragraphIndex: Int) -> Unit,
+    onSetFontSize: (Float) -> Unit,
     onAdjustFontSize: (Float) -> Unit,
     onSelectPaperTheme: (ReaderPaperTheme) -> Unit,
+    onSelectScrollDirection: (ReaderScrollDirection) -> Unit,
+    onAdjustPageMargin: (Float) -> Unit,
+    onAdjustLineHeight: (Float) -> Unit,
+    onAdjustLetterSpacing: (Float) -> Unit,
     onCycleSpeechRate: () -> Unit,
-    onCycleVoiceProfile: () -> Unit
+    onCycleVoiceProfile: () -> Unit,
+    onSelectNarratorVoice: (ReaderVoiceProfile) -> Unit,
+    onSelectSystemVoice: (String?) -> Unit,
+    onToggleAdvancedCustom: (Boolean) -> Unit,
+    onAdvancedPitchChanged: (Float) -> Unit,
+    onAdvancedRateChanged: (Float) -> Unit,
+    onSentencePauseChanged: (Int) -> Unit,
+    onResetAdvancedDefaults: () -> Unit,
+    onSaveVoicePitch: (ReaderVoiceProfile, Float) -> Unit,
+    onResetVoicePitch: (ReaderVoiceProfile) -> Unit,
+    onScanCharacters: () -> Unit,
+    onConfirmCharacterAssignments: (Map<String, ReaderVoiceProfile>) -> Unit,
+    onHideCharacterPicker: () -> Unit,
+    onSelectAmbientSound: (AmbientSoundTrack) -> Unit,
+    onChangeAmbientVolume: (Float) -> Unit
 ) {
     val context = LocalContext.current
-    val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val listState = rememberLazyListState()
+
+    val notifPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { /* Service continues cleanly regardless */ }
+    )
 
     var showTocSheet by remember { mutableStateOf(false) }
     var showAppearancePopover by remember { mutableStateOf(false) }
     var showAudioBar by remember { mutableStateOf(false) }
+    var showAudioSettingsSheet by remember { mutableStateOf(false) }
 
-    // Offline Android TextToSpeech state
-    var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
-    var isTtsReady by remember { mutableStateOf(false) }
-    var isPlayingAudio by remember { mutableStateOf(false) }
-    var speakingParagraphIndex by remember { mutableIntStateOf(-1) }
-    var activeUtteranceId by remember { mutableStateOf("") }
+    // Track current visible paragraph cleanly across BOTH Vertical and Horizontal reading modes
+    var currentTrackedParagraphIndex by remember(readerState.currentChapterIndex) {
+        mutableIntStateOf(readerState.targetParagraphIndex)
+    }
 
-    // Latest reactive references for UtteranceProgressListener callbacks
+    // Derive reactive audio states from persistent background BookAudioPlaybackService
+    val isThisBookActiveInService = readerState.book?.id != null &&
+        audioPlaybackState.bookId == readerState.book.id
+    val isPlayingAudio = audioPlaybackState.isPlaying && isThisBookActiveInService
+    val isAnyAudioPlaying = audioPlaybackState.isPlaying
+    val speakingParagraphIndex = if (
+        isThisBookActiveInService &&
+        audioPlaybackState.chapterIndex == readerState.currentChapterIndex
+    ) {
+        audioPlaybackState.paragraphIndex
+    } else {
+        -1
+    }
+    val activeSpeakerName = if (isThisBookActiveInService) audioPlaybackState.activeSpeakerName else null
+
     val latestState by rememberUpdatedState(readerState)
-    val latestPrefs by rememberUpdatedState(readerPrefs)
-    val latestPlaying by rememberUpdatedState(isPlayingAudio)
     val latestSpeakingIdx by rememberUpdatedState(speakingParagraphIndex)
-    val latestUtteranceId by rememberUpdatedState(activeUtteranceId)
+    val latestTrackedPara by rememberUpdatedState(currentTrackedParagraphIndex)
 
     // Resolve paper & ink colors from selected theme
     val paperBg = when (readerPrefs.paperTheme) {
@@ -153,154 +218,121 @@ fun BookReaderScreen(
         ReaderPaperTheme.PURE_WHITE -> Color(0xFFF2F2F7)
     }
 
+    fun requestNotifPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
     fun currentVisibleParagraphIndex(): Int {
-        // Item 0 is the chapter title header; paragraphs start at LazyColumn item index 1
-        val firstIdx = listState.firstVisibleItemIndex
-        return (firstIdx - 1).coerceIn(0, (readerState.paragraphs.size - 1).coerceAtLeast(0))
-    }
-
-    fun stopAudio() {
-        isPlayingAudio = false
-        activeUtteranceId = ""
-        runCatching { ttsEngine?.stop() }
-    }
-
-    fun speakParagraphAt(index: Int) {
-        val engine = ttsEngine ?: return
-        if (!isTtsReady) return
-        val paragraphs = latestState.paragraphs
-        if (paragraphs.isEmpty()) return
-
-        val safeIndex = index.coerceIn(0, paragraphs.lastIndex)
-        val text = paragraphs[safeIndex].trim()
-        if (text.isEmpty()) {
-            if (safeIndex + 1 < paragraphs.size) {
-                speakParagraphAt(safeIndex + 1)
-            } else {
-                stopAudio()
-            }
-            return
+        val maxIdx = (readerState.paragraphs.size - 1).coerceAtLeast(0)
+        return if (readerPrefs.scrollDirection == ReaderScrollDirection.VERTICAL) {
+            (listState.firstVisibleItemIndex - 1).coerceIn(0, maxIdx)
+        } else {
+            latestTrackedPara.coerceIn(0, maxIdx)
         }
+    }
 
-        // Configure Offline Vietnamese voice + custom profile pitch/rate
-        applyOfflineVietnameseVoiceProfile(
-            tts = engine,
-            profile = latestPrefs.voiceProfile,
-            baseSpeechRate = latestPrefs.speechRate
+    fun playFromParagraph(paraIdx: Int) {
+        val bookId = readerState.book?.id ?: return
+        requestNotifPermissionIfNeeded()
+        BookAudioPlaybackService.playAt(
+            context = context,
+            bookId = bookId,
+            chapterIndex = readerState.currentChapterIndex,
+            paragraphIndex = paraIdx.coerceAtLeast(0)
         )
-
-        val uttId = "reader_${latestState.currentChapterIndex}_${safeIndex}_${System.nanoTime()}"
-        activeUtteranceId = uttId
-        speakingParagraphIndex = safeIndex
-        isPlayingAudio = true
-
-        engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, uttId)
     }
 
-    // Initialize Offline Android TTS & strictly clean up in DisposableEffect
-    DisposableEffect(context) {
-        var localTts: TextToSpeech? = null
-        localTts = TextToSpeech(context.applicationContext) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                localTts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) = Unit
-
-                    override fun onDone(utteranceId: String?) {
-                        mainHandler.post {
-                            if (utteranceId != latestUtteranceId || !latestPlaying) return@post
-                            val paras = latestState.paragraphs
-                            val nextIdx = latestSpeakingIdx + 1
-                            if (nextIdx < paras.size) {
-                                speakParagraphAt(nextIdx)
-                            } else if (latestState.currentChapterIndex + 1 < latestState.toc.size) {
-                                // Auto-advance to the next chapter and continue reading seamlessly
-                                onSelectChapter(latestState.currentChapterIndex + 1, 0, true)
-                            } else {
-                                isPlayingAudio = false
-                                speakingParagraphIndex = -1
-                                activeUtteranceId = ""
-                            }
-                        }
-                    }
-
-                    @Deprecated("Deprecated in Java")
-                    override fun onError(utteranceId: String?) {
-                        mainHandler.post {
-                            if (utteranceId == latestUtteranceId) {
-                                isPlayingAudio = false
-                            }
-                        }
-                    }
-
-                    override fun onError(utteranceId: String?, errorCode: Int) {
-                        mainHandler.post {
-                            if (utteranceId == latestUtteranceId) {
-                                isPlayingAudio = false
-                            }
-                        }
-                    }
-                })
-                mainHandler.post {
-                    isTtsReady = true
-                }
-            }
-        }
-        ttsEngine = localTts
+    // Save reading progress on leaving reader WITHOUT stopping background playback!
+    DisposableEffect(Unit) {
         onDispose {
+            BookAudioPlaybackService.setAmbientPreview(context, false)
             onSaveProgress(
                 latestState.currentChapterIndex,
                 if (latestSpeakingIdx >= 0) latestSpeakingIdx else currentVisibleParagraphIndex()
             )
-            runCatching {
-                localTts.stop()
-                localTts.shutdown()
-            }
-            ttsEngine = null
-            isTtsReady = false
-            isPlayingAudio = false
         }
     }
 
-    // Scroll to saved/target paragraph whenever a chapter finishes loading
-    LaunchedEffect(readerState.chapterLoadNonce) {
+    // Live ambient sound preview & device offline voice scan whenever Audio Settings sheet opens
+    LaunchedEffect(showAudioSettingsSheet) {
+        if (showAudioSettingsSheet) {
+            BookAudioPlaybackService.refreshDeviceVoices(context)
+        }
+        BookAudioPlaybackService.setAmbientPreview(context, showAudioSettingsSheet)
+    }
+
+    // Auto-sync visual reader chapter whenever background service advances to another chapter
+    LaunchedEffect(
+        audioPlaybackState.bookId,
+        audioPlaybackState.chapterIndex,
+        audioPlaybackState.isPlaying,
+        readerState.book?.id
+    ) {
+        val openBookId = readerState.book?.id
+        if (openBookId != null &&
+            audioPlaybackState.bookId == openBookId &&
+            audioPlaybackState.isPlaying &&
+            audioPlaybackState.chapterIndex != readerState.currentChapterIndex &&
+            !readerState.isLoadingChapter
+        ) {
+            onSelectChapter(
+                audioPlaybackState.chapterIndex,
+                audioPlaybackState.paragraphIndex.coerceAtLeast(0),
+                false
+            )
+        }
+    }
+
+    // Scroll to saved/target paragraph whenever a chapter finishes loading (Vertical mode)
+    LaunchedEffect(readerState.chapterLoadNonce, readerPrefs.scrollDirection) {
         if (readerState.chapterLoadNonce == 0L || readerState.isLoadingChapter) return@LaunchedEffect
-        val targetItem = (readerState.targetParagraphIndex + 1)
-            .coerceIn(0, readerState.paragraphs.size)
-        listState.scrollToItem(targetItem)
-
-        if (readerState.autoContinueAudioOnChapterReady && isTtsReady) {
+        currentTrackedParagraphIndex = readerState.targetParagraphIndex
+        if (readerPrefs.scrollDirection == ReaderScrollDirection.VERTICAL) {
+            val targetItem = (readerState.targetParagraphIndex + 1)
+                .coerceIn(0, readerState.paragraphs.size)
+            listState.scrollToItem(targetItem)
+        }
+        if (readerState.autoContinueAudioOnChapterReady) {
             onConsumeAutoContinueAudio()
-            speakParagraphAt(readerState.targetParagraphIndex)
+            playFromParagraph(readerState.targetParagraphIndex)
         }
     }
 
-    // Smoothly scroll to the active spoken paragraph when TTS advances
-    LaunchedEffect(speakingParagraphIndex, isPlayingAudio) {
-        if (isPlayingAudio && speakingParagraphIndex >= 0 && speakingParagraphIndex < readerState.paragraphs.size) {
-            val targetItemIndex = speakingParagraphIndex + 1
-            val visibleIndices = listState.layoutInfo.visibleItemsInfo.map { it.index }
-            if (targetItemIndex !in visibleIndices) {
-                runCatching { listState.animateScrollToItem(targetItemIndex) }
+    // Smoothly scroll to the active spoken paragraph when background TTS advances (Vertical mode)
+    LaunchedEffect(speakingParagraphIndex, isPlayingAudio, readerPrefs.scrollDirection) {
+        if (isPlayingAudio &&
+            speakingParagraphIndex >= 0 &&
+            speakingParagraphIndex < readerState.paragraphs.size
+        ) {
+            currentTrackedParagraphIndex = speakingParagraphIndex
+            if (readerPrefs.scrollDirection == ReaderScrollDirection.VERTICAL) {
+                val targetItemIndex = speakingParagraphIndex + 1
+                val visibleIndices = listState.layoutInfo.visibleItemsInfo.map { it.index }
+                if (targetItemIndex !in visibleIndices) {
+                    runCatching { listState.animateScrollToItem(targetItemIndex) }
+                }
             }
-            onSaveProgress(readerState.currentChapterIndex, speakingParagraphIndex)
         }
     }
 
-    // Re-apply speed / voice immediately if user changes them while playing
-    LaunchedEffect(readerPrefs.speechRate, readerPrefs.voiceProfile) {
-        if (isPlayingAudio && speakingParagraphIndex >= 0) {
-            speakParagraphAt(speakingParagraphIndex)
-        }
-    }
-
-    // Debounced auto-save scroll progress as the user reads
-    LaunchedEffect(listState, readerState.currentChapterIndex, readerState.book?.id) {
+    // Debounced auto-save scroll progress as the user reads (Vertical mode)
+    LaunchedEffect(listState, readerState.currentChapterIndex, readerState.book?.id, readerPrefs.scrollDirection) {
+        if (readerPrefs.scrollDirection != ReaderScrollDirection.VERTICAL) return@LaunchedEffect
         snapshotFlow { listState.firstVisibleItemIndex }
             .distinctUntilChanged()
             .debounce(900L)
             .collect { firstIdx ->
                 if (!readerState.isLoadingChapter && readerState.paragraphs.isNotEmpty()) {
                     val paraIdx = (firstIdx - 1).coerceIn(0, readerState.paragraphs.lastIndex)
+                    currentTrackedParagraphIndex = paraIdx
                     onSaveProgress(readerState.currentChapterIndex, paraIdx)
                 }
             }
@@ -312,12 +344,17 @@ fun BookReaderScreen(
         } else {
             currentVisibleParagraphIndex()
         }
-        stopAudio()
+        // Keep background audio running smoothly when returning to Library / Main Screen!
+        BookAudioPlaybackService.setAmbientPreview(context, false)
         onBackClick(readerState.currentChapterIndex, paraToSave)
     }
 
     BackHandler {
         when {
+            showAudioSettingsSheet -> {
+                showAudioSettingsSheet = false
+                onHideCharacterPicker()
+            }
             showAppearancePopover -> showAppearancePopover = false
             showTocSheet -> showTocSheet = false
             else -> exitReader()
@@ -391,32 +428,100 @@ fun BookReaderScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Add,
-                            contentDescription = "Tùy chỉnh chữ và màu giấy",
+                            contentDescription = "Tùy chỉnh chữ, lề và kiểu lật trang",
                             tint = if (showAppearancePopover) IosBlue else inkColor,
                             modifier = Modifier.size(21.dp)
                         )
                     }
 
-                    IconButton(
-                        onClick = {
-                            showAppearancePopover = false
-                            if (showAudioBar) {
-                                stopAudio()
-                                showAudioBar = false
-                            } else {
-                                showAudioBar = true
-                            }
-                        },
+                    // Headphones button + live animated running indicator right next to it when audio is active
+                    Row(
                         modifier = Modifier
-                            .size(48.dp)
-                            .testTag("reader_audio_button")
+                            .height(48.dp)
+                            .clip(RoundedCornerShape(50))
+                            .clickable {
+                                showAppearancePopover = false
+                                if (!showAudioBar) {
+                                    showAudioBar = true
+                                    if (!isPlayingAudio) {
+                                        val startIdx = if (speakingParagraphIndex in readerState.paragraphs.indices) {
+                                            speakingParagraphIndex
+                                        } else {
+                                            currentVisibleParagraphIndex()
+                                        }
+                                        playFromParagraph(startIdx)
+                                    }
+                                } else {
+                                    showAudioBar = false
+                                }
+                            }
+                            .padding(horizontal = if (isAnyAudioPlaying) 10.dp else 14.dp)
+                            .testTag("reader_audio_button"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Headphones,
                             contentDescription = "Nghe đọc sách",
-                            tint = if (showAudioBar || isPlayingAudio) IosBlue else inkColor,
+                            tint = if (showAudioBar || isAnyAudioPlaying) IosBlue else inkColor,
                             modifier = Modifier.size(20.dp)
                         )
+                        if (isAnyAudioPlaying) {
+                            AnimatedAudioPlayingBars(
+                                color = IosBlue,
+                                maxHeight = 13.dp,
+                                barWidth = 2.3.dp,
+                                modifier = Modifier.testTag("reader_audio_running_indicator")
+                            )
+                        }
+                    }
+
+                    // Audio Settings button right beside Listen button: Gear icon + mini Headphones corner badge
+                    IconButton(
+                        onClick = {
+                            showAppearancePopover = false
+                            showTocSheet = false
+                            showAudioSettingsSheet = true
+                        },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("reader_audio_settings_button")
+                    ) {
+                        val settingsTint = if (
+                            showAudioSettingsSheet ||
+                            readerPrefs.ambientSound != AmbientSoundTrack.NONE ||
+                            readerState.characterVoiceAssignments.isNotEmpty()
+                        ) {
+                            IosBlue
+                        } else {
+                            inkColor
+                        }
+                        Box(
+                            modifier = Modifier.size(24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Settings,
+                                contentDescription = "Cài đặt nghe sách",
+                                tint = settingsTint,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .size(12.dp)
+                                    .clip(CircleShape)
+                                    .background(paperBg),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Headphones,
+                                    contentDescription = null,
+                                    tint = settingsTint,
+                                    modifier = Modifier.size(9.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -436,55 +541,64 @@ fun BookReaderScreen(
                     IosFloatingAudioPill(
                         isPlaying = isPlayingAudio,
                         speechRate = readerPrefs.speechRate,
-                        voiceProfile = readerPrefs.voiceProfile,
+                        voiceLabel = activeSpeakerName ?: readerPrefs.voiceProfile.shortLabel,
                         onPrevParagraph = {
-                            val currentIdx = if (speakingParagraphIndex >= 0) {
-                                speakingParagraphIndex
+                            if (isThisBookActiveInService) {
+                                BookAudioPlaybackService.prevParagraph(context)
                             } else {
-                                currentVisibleParagraphIndex()
-                            }
-                            if (currentIdx > 0) {
-                                speakParagraphAt(currentIdx - 1)
-                            } else if (readerState.currentChapterIndex > 0) {
-                                onSelectChapter(readerState.currentChapterIndex - 1, 0, true)
+                                val prev = (currentVisibleParagraphIndex() - 1).coerceAtLeast(0)
+                                playFromParagraph(prev)
                             }
                         },
                         onTogglePlayPause = {
                             if (isPlayingAudio) {
-                                stopAudio()
+                                BookAudioPlaybackService.pause(context)
                             } else {
                                 val startIdx = if (speakingParagraphIndex in readerState.paragraphs.indices) {
                                     speakingParagraphIndex
                                 } else {
                                     currentVisibleParagraphIndex()
                                 }
-                                speakParagraphAt(startIdx)
+                                playFromParagraph(startIdx)
                             }
                         },
                         onNextParagraph = {
-                            val currentIdx = if (speakingParagraphIndex >= 0) {
-                                speakingParagraphIndex
+                            if (isThisBookActiveInService) {
+                                BookAudioPlaybackService.nextParagraph(context)
                             } else {
-                                currentVisibleParagraphIndex()
-                            }
-                            if (currentIdx + 1 < readerState.paragraphs.size) {
-                                speakParagraphAt(currentIdx + 1)
-                            } else if (readerState.currentChapterIndex + 1 < readerState.toc.size) {
-                                onSelectChapter(readerState.currentChapterIndex + 1, 0, true)
+                                val next = (currentVisibleParagraphIndex() + 1)
+                                    .coerceAtMost((readerState.paragraphs.size - 1).coerceAtLeast(0))
+                                playFromParagraph(next)
                             }
                         },
                         onCycleSpeed = onCycleSpeechRate,
-                        onCycleVoice = onCycleVoiceProfile
+                        onCycleVoice = onCycleVoiceProfile,
+                        onStopAndClose = {
+                            BookAudioPlaybackService.stop(context)
+                            showAudioBar = false
+                        }
                     )
                 }
             }
 
-            // 3. Reading Content Area (distraction-free Apple Books typography)
-            Box(
+            // 3. Reading Content Area (Vertical Scroll OR Horizontal Page-Flip)
+            // Tapping anywhere on the reading content collapses the floating audio pill while keeping audio running!
+            BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {
+                            if (showAppearancePopover) showAppearancePopover = false
+                            if (showAudioBar) showAudioBar = false
+                        }
+                    )
             ) {
+                val viewportWidthDp = maxWidth.value
+                val viewportHeightDp = maxHeight.value
+
                 if (readerState.isLoadingChapter && readerState.paragraphs.isEmpty()) {
                     Box(
                         modifier = Modifier.fillMaxSize(),
@@ -498,155 +612,269 @@ fun BookReaderScreen(
                     }
                 } else {
                     val fontSize = readerPrefs.fontSizeSp
-                    val lineHeightSp = (fontSize * 1.56f).sp
+                    val lineHeightSp = (fontSize * readerPrefs.lineHeightMultiplier).sp
+                    val letterSpacingSp = readerPrefs.letterSpacingSp.sp
+                    val pageMarginDp = readerPrefs.pageMarginDp.dp
+                    val paragraphGapDp = (fontSize * 0.55f).coerceIn(8f, 22f).dp
 
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .testTag("reader_paragraphs_list"),
-                        contentPadding = PaddingValues(
-                            start = 22.dp,
-                            end = 22.dp,
-                            top = 10.dp,
-                            bottom = 44.dp
-                        ),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        // Chapter Title Header
-                        item(key = "chapter_header_${readerState.currentChapterIndex}") {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(bottom = 8.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(
-                                    text = readerState.book?.title.orEmpty(),
-                                    fontSize = 11.sp,
-                                    lineHeight = 14.sp,
-                                    color = subtleInk,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = readerState.currentChapterTitle.ifBlank {
+                    if (readerPrefs.scrollDirection == ReaderScrollDirection.VERTICAL) {
+                        // --- VERTICAL SCROLL READING MODE ---
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .testTag("reader_paragraphs_list"),
+                            contentPadding = PaddingValues(
+                                start = pageMarginDp,
+                                end = pageMarginDp,
+                                top = 10.dp,
+                                bottom = 44.dp
+                            ),
+                            verticalArrangement = Arrangement.spacedBy(paragraphGapDp)
+                        ) {
+                            item(key = "chapter_header_${readerState.currentChapterIndex}") {
+                                ChapterTitleBlock(
+                                    bookTitle = readerState.book?.title.orEmpty(),
+                                    chapterTitle = readerState.currentChapterTitle.ifBlank {
                                         "Chương ${readerState.currentChapterIndex + 1}"
                                     },
-                                    fontSize = (fontSize + 3f).coerceAtMost(26f).sp,
-                                    lineHeight = ((fontSize + 3f) * 1.3f).sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = inkColor
+                                    fontSize = fontSize,
+                                    letterSpacingSp = readerPrefs.letterSpacingSp,
+                                    inkColor = inkColor,
+                                    subtleInk = subtleInk
                                 )
                             }
-                        }
 
-                        // Chapter Paragraphs
-                        itemsIndexed(
-                            items = readerState.paragraphs,
-                            key = { idx, _ -> "p_${readerState.currentChapterIndex}_$idx" }
-                        ) { index, paragraph ->
-                            val isSpeakingThis = speakingParagraphIndex == index &&
-                                (isPlayingAudio || showAudioBar)
-                            val highlightBg = if (isSpeakingThis) {
-                                IosBlue.copy(alpha = 0.14f)
-                            } else {
-                                Color.Transparent
-                            }
-
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(highlightBg)
-                                    .clickable(
-                                        interactionSource = remember { MutableInteractionSource() },
-                                        indication = null
-                                    ) {
+                            itemsIndexed(
+                                items = readerState.paragraphs,
+                                key = { idx, _ -> "p_${readerState.currentChapterIndex}_$idx" }
+                            ) { index, paragraph ->
+                                val isSpeakingThis = speakingParagraphIndex == index &&
+                                    (isPlayingAudio || showAudioBar)
+                                ReaderParagraphBox(
+                                    text = paragraph,
+                                    fontSize = fontSize,
+                                    lineHeightSp = lineHeightSp,
+                                    letterSpacingSp = letterSpacingSp,
+                                    inkColor = inkColor,
+                                    highlighted = isSpeakingThis,
+                                    onClick = {
                                         if (showAppearancePopover) {
                                             showAppearancePopover = false
-                                        } else if (showAudioBar) {
-                                            speakParagraphAt(index)
+                                        }
+                                        if (showAudioBar) {
+                                            showAudioBar = false
                                         }
                                     }
-                                    .padding(
-                                        horizontal = if (isSpeakingThis) 8.dp else 0.dp,
-                                        vertical = if (isSpeakingThis) 5.dp else 0.dp
-                                    )
-                            ) {
-                                Text(
-                                    text = paragraph,
-                                    fontSize = fontSize.sp,
-                                    lineHeight = lineHeightSp,
-                                    color = inkColor,
-                                    textAlign = TextAlign.Justify
+                                )
+                            }
+
+                            item(key = "chapter_footer_${readerState.currentChapterIndex}") {
+                                ChapterFooterNavigation(
+                                    currentChapterIndex = readerState.currentChapterIndex,
+                                    totalChapters = readerState.toc.size.coerceAtLeast(1),
+                                    inkColor = inkColor,
+                                    subtleInk = subtleInk,
+                                    subtleSurface = subtleSurface,
+                                    onPrevChapter = {
+                                        val keepPlaying = isPlayingAudio
+                                        onSelectChapter(readerState.currentChapterIndex - 1, 0, keepPlaying)
+                                    },
+                                    onNextChapter = {
+                                        val keepPlaying = isPlayingAudio
+                                        onSelectChapter(readerState.currentChapterIndex + 1, 0, keepPlaying)
+                                    }
                                 )
                             }
                         }
+                    } else {
+                        // --- HORIZONTAL PAGE-FLIPPING MODE (Apple Books HorizontalPager) ---
+                        val pages = remember(
+                            readerState.paragraphs,
+                            readerState.currentChapterIndex,
+                            viewportWidthDp,
+                            viewportHeightDp,
+                            readerPrefs.fontSizeSp,
+                            readerPrefs.pageMarginDp,
+                            readerPrefs.lineHeightMultiplier,
+                            readerPrefs.letterSpacingSp
+                        ) {
+                            paginateChapterIntoPages(
+                                paragraphs = readerState.paragraphs,
+                                viewportWidthDp = viewportWidthDp,
+                                viewportHeightDp = viewportHeightDp,
+                                marginDp = readerPrefs.pageMarginDp,
+                                fontSizeSp = readerPrefs.fontSizeSp,
+                                lineHeightMultiplier = readerPrefs.lineHeightMultiplier,
+                                letterSpacingSp = readerPrefs.letterSpacingSp
+                            )
+                        }
 
-                        // Minimalist Chapter Navigation Footer
-                        item(key = "chapter_footer_${readerState.currentChapterIndex}") {
-                            val hasPrev = readerState.currentChapterIndex > 0
-                            val hasNext = readerState.currentChapterIndex + 1 < readerState.toc.size
+                        val initialPage = remember(readerState.chapterLoadNonce, pages.size) {
+                            findPageIndexForParagraph(pages, readerState.targetParagraphIndex)
+                        }
+                        val pagerState = rememberPagerState(
+                            initialPage = initialPage.coerceIn(0, (pages.size - 1).coerceAtLeast(0)),
+                            pageCount = { pages.size.coerceAtLeast(1) }
+                        )
+
+                        // Jump to saved paragraph when chapter changes or layout re-paginates
+                        LaunchedEffect(readerState.chapterLoadNonce, pages.size) {
+                            val targetPage = findPageIndexForParagraph(
+                                pages,
+                                if (isPlayingAudio && speakingParagraphIndex >= 0) {
+                                    speakingParagraphIndex
+                                } else {
+                                    currentTrackedParagraphIndex
+                                }
+                            )
+                            val clamped = targetPage.coerceIn(0, (pages.size - 1).coerceAtLeast(0))
+                            if (pagerState.currentPage != clamped) {
+                                pagerState.scrollToPage(clamped)
+                            }
+                        }
+
+                        // Auto-turn page when TTS advances to a paragraph on another page
+                        LaunchedEffect(speakingParagraphIndex, isPlayingAudio, pages.size) {
+                            if (isPlayingAudio && speakingParagraphIndex >= 0) {
+                                val targetPage = findPageIndexForParagraph(pages, speakingParagraphIndex)
+                                    .coerceIn(0, (pages.size - 1).coerceAtLeast(0))
+                                if (pagerState.currentPage != targetPage) {
+                                    runCatching { pagerState.animateScrollToPage(targetPage) }
+                                }
+                            }
+                        }
+
+                        // Save progress whenever user swipes to a new horizontal page
+                        LaunchedEffect(pagerState, pages, readerState.currentChapterIndex) {
+                            snapshotFlow { pagerState.currentPage }
+                                .distinctUntilChanged()
+                                .debounce(500L)
+                                .collect { pageIdx ->
+                                    val paraIdx = pages.getOrNull(pageIdx)?.firstParagraphIndex ?: 0
+                                    currentTrackedParagraphIndex = paraIdx
+                                    onSaveProgress(readerState.currentChapterIndex, paraIdx)
+                                }
+                        }
+
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            HorizontalPager(
+                                state = pagerState,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f)
+                                    .testTag("reader_horizontal_pager")
+                            ) { pageIndex ->
+                                val page = pages.getOrNull(pageIndex)
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(
+                                            horizontal = pageMarginDp,
+                                            vertical = 8.dp
+                                        ),
+                                    verticalArrangement = Arrangement.spacedBy(paragraphGapDp)
+                                ) {
+                                    if (page != null && page.isFirstPageOfChapter) {
+                                        ChapterTitleBlock(
+                                            bookTitle = readerState.book?.title.orEmpty(),
+                                            chapterTitle = readerState.currentChapterTitle.ifBlank {
+                                                "Chương ${readerState.currentChapterIndex + 1}"
+                                            },
+                                            fontSize = fontSize,
+                                            letterSpacingSp = readerPrefs.letterSpacingSp,
+                                            inkColor = inkColor,
+                                            subtleInk = subtleInk
+                                        )
+                                    }
+
+                                    page?.slices?.forEach { slice ->
+                                        val isSpeakingThis = speakingParagraphIndex == slice.paragraphIndex &&
+                                            (isPlayingAudio || showAudioBar)
+                                        ReaderParagraphBox(
+                                            text = slice.text,
+                                            fontSize = fontSize,
+                                            lineHeightSp = lineHeightSp,
+                                            letterSpacingSp = letterSpacingSp,
+                                            inkColor = inkColor,
+                                            highlighted = isSpeakingThis,
+                                            onClick = {
+                                                if (showAppearancePopover) {
+                                                    showAppearancePopover = false
+                                                }
+                                                if (showAudioBar) {
+                                                    showAudioBar = false
+                                                }
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Compact Horizontal Page Indicator + Prev/Next Chapter pills on edge pages
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(top = 20.dp),
+                                    .padding(horizontal = 16.dp, vertical = 6.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                if (hasPrev) {
+                                val hasPrevChap = readerState.currentChapterIndex > 0
+                                val hasNextChap = readerState.currentChapterIndex + 1 < readerState.toc.size
+                                val onFirstPage = pagerState.currentPage == 0
+                                val onLastPage = pagerState.currentPage >= pages.lastIndex
+
+                                if (onFirstPage && hasPrevChap) {
                                     Surface(
                                         shape = RoundedCornerShape(50),
                                         color = subtleSurface,
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(50))
                                             .clickable {
-                                                stopAudio()
-                                                onSelectChapter(readerState.currentChapterIndex - 1, 0, false)
+                                                val keepPlaying = isPlayingAudio
+                                                onSelectChapter(readerState.currentChapterIndex - 1, 0, keepPlaying)
                                             }
-                                            .testTag("reader_prev_chapter_button")
                                     ) {
                                         Text(
                                             text = "← Chương trước",
-                                            fontSize = 12.sp,
+                                            fontSize = 11.sp,
                                             fontWeight = FontWeight.Medium,
                                             color = inkColor,
-                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                                         )
                                     }
                                 } else {
-                                    Spacer(modifier = Modifier.width(1.dp))
+                                    Spacer(modifier = Modifier.width(64.dp))
                                 }
 
                                 Text(
-                                    text = "${readerState.currentChapterIndex + 1} / ${readerState.toc.size.coerceAtLeast(1)}",
+                                    text = "Trang ${pagerState.currentPage + 1} / ${pages.size.coerceAtLeast(1)}  •  Ch.${readerState.currentChapterIndex + 1}/${readerState.toc.size.coerceAtLeast(1)}",
                                     fontSize = 11.sp,
-                                    color = subtleInk
+                                    color = subtleInk,
+                                    maxLines = 1
                                 )
 
-                                if (hasNext) {
+                                if (onLastPage && hasNextChap) {
                                     Surface(
                                         shape = RoundedCornerShape(50),
                                         color = subtleSurface,
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(50))
                                             .clickable {
-                                                stopAudio()
-                                                onSelectChapter(readerState.currentChapterIndex + 1, 0, false)
+                                                val keepPlaying = isPlayingAudio
+                                                onSelectChapter(readerState.currentChapterIndex + 1, 0, keepPlaying)
                                             }
-                                            .testTag("reader_next_chapter_button")
                                     ) {
                                         Text(
                                             text = "Chương sau →",
-                                            fontSize = 12.sp,
+                                            fontSize = 11.sp,
                                             fontWeight = FontWeight.Medium,
                                             color = inkColor,
-                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                                         )
                                     }
                                 } else {
-                                    Spacer(modifier = Modifier.width(1.dp))
+                                    Spacer(modifier = Modifier.width(64.dp))
                                 }
                             }
                         }
@@ -655,7 +883,7 @@ fun BookReaderScreen(
             }
         }
 
-        // 4. Floating iOS Popover for "+" (EXACTLY 2 options: Font size & 3 Paper colors)
+        // 4. Floating iOS Popover for "+" (Font 13..48sp, Scroll/Page mode, Margin, Line/Letter Spacing, 3 Paper themes)
         if (showAppearancePopover) {
             Box(
                 modifier = Modifier
@@ -676,10 +904,17 @@ fun BookReaderScreen(
                     contentAlignment = Alignment.TopEnd
                 ) {
                     IosReaderAppearancePopover(
-                        fontSizeSp = readerPrefs.fontSizeSp,
-                        selectedTheme = readerPrefs.paperTheme,
+                        prefs = readerPrefs,
+                        onSetFontSize = onSetFontSize,
                         onDecreaseFont = { onAdjustFontSize(-1f) },
                         onIncreaseFont = { onAdjustFontSize(1f) },
+                        onSelectScrollDirection = onSelectScrollDirection,
+                        onDecreaseMargin = { onAdjustPageMargin(-4f) },
+                        onIncreaseMargin = { onAdjustPageMargin(4f) },
+                        onDecreaseLineHeight = { onAdjustLineHeight(-0.1f) },
+                        onIncreaseLineHeight = { onAdjustLineHeight(0.1f) },
+                        onDecreaseLetterSpacing = { onAdjustLetterSpacing(-0.25f) },
+                        onIncreaseLetterSpacing = { onAdjustLetterSpacing(0.25f) },
                         onSelectTheme = onSelectPaperTheme
                     )
                 }
@@ -710,11 +945,235 @@ fun BookReaderScreen(
                     currentChapterIndex = readerState.currentChapterIndex,
                     onSelectChapter = { idx ->
                         showTocSheet = false
-                        stopAudio()
-                        onSelectChapter(idx, 0, false)
+                        val keepPlaying = isPlayingAudio
+                        onSelectChapter(idx, 0, keepPlaying)
                     }
                 )
             }
+        }
+    }
+
+    // 6. iOS Audio Settings Sheet (Narrator, All Voices + Pitch Lưu/Reset, Scan 7 Characters -> OK, Ambient Sound)
+    if (showAudioSettingsSheet) {
+        val audioSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = {
+                showAudioSettingsSheet = false
+                onHideCharacterPicker()
+            },
+            sheetState = audioSheetState,
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+            containerColor = Color(0xFFFFFFFF),
+            contentColor = Color(0xFF1C1C1E)
+        ) {
+            val currentDensity = LocalDensity.current
+            CompositionLocalProvider(
+                LocalDensity provides Density(
+                    density = currentDensity.density,
+                    fontScale = currentDensity.fontScale.coerceAtMost(1.0f)
+                )
+            ) {
+                ReaderAudioSettingsSheetContent(
+                    readerPrefs = readerPrefs,
+                    availableDeviceVoices = audioPlaybackState.availableDeviceVoices,
+                    isScanningCharacters = readerState.isScanningCharacters,
+                    scannedCharacters = readerState.scannedCharacters,
+                    showCharacterVoicePicker = readerState.showCharacterVoicePicker,
+                    savedCharacterAssignments = readerState.characterVoiceAssignments,
+                    onSelectNarratorVoice = onSelectNarratorVoice,
+                    onSelectSystemVoice = onSelectSystemVoice,
+                    onRefreshDeviceVoices = {
+                        BookAudioPlaybackService.refreshDeviceVoices(context)
+                    },
+                    onPreviewSystemVoice = { voiceName ->
+                        BookAudioPlaybackService.previewVoice(
+                            context = context,
+                            profile = readerPrefs.voiceProfile,
+                            pitch = readerPrefs.resolvePlaybackPitch(readerPrefs.voiceProfile),
+                            rate = readerPrefs.resolvePlaybackRate(readerPrefs.voiceProfile),
+                            pauseMs = readerPrefs.sentencePauseMs,
+                            systemVoiceName = voiceName
+                        )
+                    },
+                    onToggleAdvancedCustom = onToggleAdvancedCustom,
+                    onAdvancedPitchChanged = onAdvancedPitchChanged,
+                    onAdvancedRateChanged = onAdvancedRateChanged,
+                    onSentencePauseChanged = onSentencePauseChanged,
+                    onPreviewAdvanced = { pitch, rate, pauseMs ->
+                        BookAudioPlaybackService.previewVoice(
+                            context = context,
+                            profile = readerPrefs.voiceProfile,
+                            pitch = pitch,
+                            rate = rate,
+                            pauseMs = pauseMs,
+                            systemVoiceName = readerPrefs.selectedSystemVoiceName
+                        )
+                    },
+                    onResetAdvancedDefaults = onResetAdvancedDefaults,
+                    onPreviewVoice = { profile, pitch ->
+                        BookAudioPlaybackService.previewVoice(
+                            context = context,
+                            profile = profile,
+                            pitch = pitch,
+                            pauseMs = readerPrefs.sentencePauseMs
+                        )
+                    },
+                    onSaveVoicePitch = onSaveVoicePitch,
+                    onResetVoicePitch = onResetVoicePitch,
+                    onScanCharactersClick = onScanCharacters,
+                    onConfirmCharacterAssignments = onConfirmCharacterAssignments,
+                    onSelectAmbientSound = onSelectAmbientSound,
+                    onChangeAmbientVolume = onChangeAmbientVolume,
+                    onClose = {
+                        showAudioSettingsSheet = false
+                        onHideCharacterPicker()
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChapterTitleBlock(
+    bookTitle: String,
+    chapterTitle: String,
+    fontSize: Float,
+    letterSpacingSp: Float,
+    inkColor: Color,
+    subtleInk: Color
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            text = bookTitle,
+            fontSize = 11.sp,
+            lineHeight = 14.sp,
+            color = subtleInk,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            text = chapterTitle,
+            fontSize = (fontSize + 3f).coerceAtMost(50f).sp,
+            lineHeight = ((fontSize + 3f).coerceAtMost(50f) * 1.25f).sp,
+            letterSpacing = letterSpacingSp.sp,
+            fontWeight = FontWeight.Bold,
+            color = inkColor
+        )
+    }
+}
+
+@Composable
+private fun ReaderParagraphBox(
+    text: String,
+    fontSize: Float,
+    lineHeightSp: androidx.compose.ui.unit.TextUnit,
+    letterSpacingSp: androidx.compose.ui.unit.TextUnit,
+    inkColor: Color,
+    highlighted: Boolean,
+    onClick: () -> Unit
+) {
+    val highlightBg = if (highlighted) {
+        IosBlue.copy(alpha = 0.14f)
+    } else {
+        Color.Transparent
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(highlightBg)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(
+                horizontal = if (highlighted) 8.dp else 0.dp,
+                vertical = if (highlighted) 5.dp else 0.dp
+            )
+    ) {
+        Text(
+            text = text,
+            fontSize = fontSize.sp,
+            lineHeight = lineHeightSp,
+            letterSpacing = letterSpacingSp,
+            color = inkColor,
+            textAlign = TextAlign.Justify
+        )
+    }
+}
+
+@Composable
+private fun ChapterFooterNavigation(
+    currentChapterIndex: Int,
+    totalChapters: Int,
+    inkColor: Color,
+    subtleInk: Color,
+    subtleSurface: Color,
+    onPrevChapter: () -> Unit,
+    onNextChapter: () -> Unit
+) {
+    val hasPrev = currentChapterIndex > 0
+    val hasNext = currentChapterIndex + 1 < totalChapters
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 20.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (hasPrev) {
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = subtleSurface,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .clickable(onClick = onPrevChapter)
+                    .testTag("reader_prev_chapter_button")
+            ) {
+                Text(
+                    text = "← Chương trước",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = inkColor,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                )
+            }
+        } else {
+            Spacer(modifier = Modifier.width(1.dp))
+        }
+
+        Text(
+            text = "${currentChapterIndex + 1} / $totalChapters",
+            fontSize = 11.sp,
+            color = subtleInk
+        )
+
+        if (hasNext) {
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = subtleSurface,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .clickable(onClick = onNextChapter)
+                    .testTag("reader_next_chapter_button")
+            ) {
+                Text(
+                    text = "Chương sau →",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = inkColor,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                )
+            }
+        } else {
+            Spacer(modifier = Modifier.width(1.dp))
         }
     }
 }
@@ -727,12 +1186,13 @@ fun BookReaderScreen(
 private fun IosFloatingAudioPill(
     isPlaying: Boolean,
     speechRate: Float,
-    voiceProfile: ReaderVoiceProfile,
+    voiceLabel: String,
     onPrevParagraph: () -> Unit,
     onTogglePlayPause: () -> Unit,
     onNextParagraph: () -> Unit,
     onCycleSpeed: () -> Unit,
-    onCycleVoice: () -> Unit
+    onCycleVoice: () -> Unit,
+    onStopAndClose: () -> Unit
 ) {
     val pillShape = RoundedCornerShape(50)
 
@@ -757,7 +1217,6 @@ private fun IosFloatingAudioPill(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        // Prev paragraph
         Box(
             modifier = Modifier
                 .size(30.dp)
@@ -774,7 +1233,6 @@ private fun IosFloatingAudioPill(
             )
         }
 
-        // Play / Pause
         Box(
             modifier = Modifier
                 .size(28.dp)
@@ -792,7 +1250,6 @@ private fun IosFloatingAudioPill(
             )
         }
 
-        // Next paragraph
         Box(
             modifier = Modifier
                 .size(30.dp)
@@ -816,7 +1273,6 @@ private fun IosFloatingAudioPill(
                 .background(Color.White.copy(alpha = 0.22f))
         )
 
-        // Speed pill (0.8x -> 1.0x -> 1.2x -> 1.5x -> 1.8x)
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(50))
@@ -837,53 +1293,82 @@ private fun IosFloatingAudioPill(
             )
         }
 
-        // Voice switch pill (Nữ 1 -> Nữ 2 -> Nam 1)
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(50))
                 .background(Color.White.copy(alpha = 0.14f))
                 .clickable(onClick = onCycleVoice)
                 .padding(horizontal = 9.dp, vertical = 4.dp)
+                .widthIn(max = 86.dp)
                 .testTag("audio_voice_button"),
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = voiceProfile.shortLabel,
+                text = voiceLabel,
                 fontSize = 11.sp,
                 lineHeight = 13.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = Color.White,
                 maxLines = 1,
-                softWrap = false
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .size(24.dp)
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = 0.14f))
+                .clickable(onClick = onStopAndClose)
+                .testTag("audio_stop_button"),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Close,
+                contentDescription = "Dừng đọc sách",
+                tint = Color.White,
+                modifier = Modifier.size(13.dp)
             )
         }
     }
 }
 
 /**
- * Floating iOS Popover (`RoundedCornerShape(16.dp)`, subtle frosted card, soft shadow)
- * containing strictly 2 controls:
- * 1. Font size (`-` / value / `+`, `13.sp` – `24.sp`)
- * 2. Paper theme (3 circular color buttons with `#007AFF` active ring)
+ * Floating iOS Popover (`RoundedCornerShape(16.dp)`, frosted card, soft shadow):
+ * - Cỡ chữ (13..48sp) with `-`/`+` & quick Slider
+ * - Kiểu lật trang (`Cuộn dọc` | `Lật ngang`)
+ * - Lề trang (`8..44 dp`)
+ * - Giãn dòng (`1.2x..2.4x`)
+ * - Giãn chữ (`0.0..3.0 sp`)
+ * - 3 màu trang giấy (`#E6D5B8`, `#FAF3DD`, `#FFFFFF`)
  */
 @Composable
 private fun IosReaderAppearancePopover(
-    fontSizeSp: Float,
-    selectedTheme: ReaderPaperTheme,
+    prefs: ReaderPreferences,
+    onSetFontSize: (Float) -> Unit,
     onDecreaseFont: () -> Unit,
     onIncreaseFont: () -> Unit,
+    onSelectScrollDirection: (ReaderScrollDirection) -> Unit,
+    onDecreaseMargin: () -> Unit,
+    onIncreaseMargin: () -> Unit,
+    onDecreaseLineHeight: () -> Unit,
+    onIncreaseLineHeight: () -> Unit,
+    onDecreaseLetterSpacing: () -> Unit,
+    onIncreaseLetterSpacing: () -> Unit,
     onSelectTheme: (ReaderPaperTheme) -> Unit
 ) {
     val shape = RoundedCornerShape(16.dp)
 
     Surface(
         modifier = Modifier
-            .width(214.dp)
+            .width(256.dp)
+            .heightIn(max = 460.dp)
             .shadow(
                 elevation = 14.dp,
                 shape = shape,
                 ambientColor = Color.Black.copy(alpha = 0.12f),
-                spotColor = Color.Black.copy(alpha = 0.20f)
+                spotColor = Color.Black.copy(alpha = 0.22f)
             )
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -892,94 +1377,134 @@ private fun IosReaderAppearancePopover(
             )
             .testTag("reader_appearance_popover"),
         shape = shape,
-        color = Color(0xF5FFFFFF),
+        color = Color(0xF7FFFFFF),
         border = BorderStroke(0.5.dp, Color(0xFFE5E5EA))
     ) {
         Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            modifier = Modifier
+                .verticalScroll(rememberScrollState())
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Option 1: Font size `-` | number | `+`
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            // 1. Font Size (13..48 sp) with `-`/`+` AND quick slider
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                PopoverStepperRow(
+                    label = "Cỡ chữ",
+                    valueText = prefs.fontSizeSp.toInt().toString(),
+                    canDecrease = prefs.fontSizeSp > LibraryManager.MIN_FONT_SIZE_SP,
+                    canIncrease = prefs.fontSizeSp < LibraryManager.MAX_FONT_SIZE_SP,
+                    decreaseTag = "reader_font_decrease_button",
+                    increaseTag = "reader_font_increase_button",
+                    onDecrease = onDecreaseFont,
+                    onIncrease = onIncreaseFont
+                )
+                Slider(
+                    value = prefs.fontSizeSp,
+                    onValueChange = onSetFontSize,
+                    valueRange = LibraryManager.MIN_FONT_SIZE_SP..LibraryManager.MAX_FONT_SIZE_SP,
+                    colors = SliderDefaults.colors(
+                        thumbColor = IosBlue,
+                        activeTrackColor = IosBlue,
+                        inactiveTrackColor = Color(0xFFE5E5EA)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(26.dp)
+                        .testTag("reader_font_slider")
+                )
+            }
+
+            HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFE5E5EA))
+
+            // 2. Scroll Direction (Cuộn dọc | Lật ngang)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
-                    text = "Cỡ chữ",
+                    text = "Kiểu lật trang",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Color(0xFF1C1C1E)
                 )
-
                 Row(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .background(Color(0xFFF2F2F7))
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        .fillMaxWidth()
+                        .height(30.dp)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(Color(0xFFE5E5EA))
+                        .padding(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .clip(CircleShape)
-                            .clickable(
-                                enabled = fontSizeSp > LibraryManager.MIN_FONT_SIZE_SP,
-                                onClick = onDecreaseFont
+                    ReaderScrollDirection.entries.forEach { dir ->
+                        val active = prefs.scrollDirection == dir
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxSize()
+                                .then(
+                                    if (active) {
+                                        Modifier.shadow(2.dp, RoundedCornerShape(7.dp))
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(if (active) Color.White else Color.Transparent)
+                                .clickable { onSelectScrollDirection(dir) }
+                                .testTag("reader_scroll_${dir.storageKey}"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = dir.label,
+                                fontSize = 11.sp,
+                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+                                color = if (active) Color(0xFF1C1C1E) else Color(0xFF6E6E73),
+                                maxLines = 1
                             )
-                            .testTag("reader_font_decrease_button"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Remove,
-                            contentDescription = "Giảm cỡ chữ",
-                            tint = if (fontSizeSp > LibraryManager.MIN_FONT_SIZE_SP) {
-                                Color(0xFF1C1C1E)
-                            } else {
-                                Color(0xFFAEAEB2)
-                            },
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-
-                    Text(
-                        text = fontSizeSp.toInt().toString(),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFF1C1C1E),
-                        modifier = Modifier.width(22.dp),
-                        textAlign = TextAlign.Center
-                    )
-
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .clip(CircleShape)
-                            .clickable(
-                                enabled = fontSizeSp < LibraryManager.MAX_FONT_SIZE_SP,
-                                onClick = onIncreaseFont
-                            )
-                            .testTag("reader_font_increase_button"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Add,
-                            contentDescription = "Tăng cỡ chữ",
-                            tint = if (fontSizeSp < LibraryManager.MAX_FONT_SIZE_SP) {
-                                Color(0xFF1C1C1E)
-                            } else {
-                                Color(0xFFAEAEB2)
-                            },
-                            modifier = Modifier.size(16.dp)
-                        )
+                        }
                     }
                 }
             }
 
             HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFE5E5EA))
 
-            // Option 2: 3 circular paper theme swatches with #007AFF ring when active
+            // 3. Page Margin (Lề trang)
+            PopoverStepperRow(
+                label = "Lề trang",
+                valueText = "${prefs.pageMarginDp.toInt()}",
+                canDecrease = prefs.pageMarginDp > LibraryManager.MIN_PAGE_MARGIN_DP,
+                canIncrease = prefs.pageMarginDp < LibraryManager.MAX_PAGE_MARGIN_DP,
+                decreaseTag = "reader_margin_decrease",
+                increaseTag = "reader_margin_increase",
+                onDecrease = onDecreaseMargin,
+                onIncrease = onIncreaseMargin
+            )
+
+            // 4. Line Spacing (Giãn dòng)
+            PopoverStepperRow(
+                label = "Giãn dòng",
+                valueText = String.format(Locale.US, "%.1fx", prefs.lineHeightMultiplier),
+                canDecrease = prefs.lineHeightMultiplier > LibraryManager.MIN_LINE_HEIGHT_MULT + 0.01f,
+                canIncrease = prefs.lineHeightMultiplier < LibraryManager.MAX_LINE_HEIGHT_MULT - 0.01f,
+                decreaseTag = "reader_line_decrease",
+                increaseTag = "reader_line_increase",
+                onDecrease = onDecreaseLineHeight,
+                onIncrease = onIncreaseLineHeight
+            )
+
+            // 5. Letter Spacing (Giãn chữ)
+            PopoverStepperRow(
+                label = "Giãn chữ",
+                valueText = String.format(Locale.US, "%.2f", prefs.letterSpacingSp),
+                canDecrease = prefs.letterSpacingSp > LibraryManager.MIN_LETTER_SPACING_SP + 0.01f,
+                canIncrease = prefs.letterSpacingSp < LibraryManager.MAX_LETTER_SPACING_SP - 0.01f,
+                decreaseTag = "reader_letter_decrease",
+                increaseTag = "reader_letter_increase",
+                onDecrease = onDecreaseLetterSpacing,
+                onIncrease = onIncreaseLetterSpacing
+            )
+
+            HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFE5E5EA))
+
+            // 6. Paper Color (3 circular swatches with #007AFF ring when active)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -998,26 +1523,102 @@ private fun IosReaderAppearancePopover(
                 ) {
                     PaperSwatchCircle(
                         color = ReaderBrownPaper,
-                        selected = selectedTheme == ReaderPaperTheme.BOOK_BROWN,
+                        selected = prefs.paperTheme == ReaderPaperTheme.BOOK_BROWN,
                         contentDescription = "Màu nâu sách",
                         tag = "paper_theme_brown",
                         onClick = { onSelectTheme(ReaderPaperTheme.BOOK_BROWN) }
                     )
                     PaperSwatchCircle(
                         color = ReaderCreamPaper,
-                        selected = selectedTheme == ReaderPaperTheme.WARM_CREAM,
+                        selected = prefs.paperTheme == ReaderPaperTheme.WARM_CREAM,
                         contentDescription = "Màu vàng ngả",
                         tag = "paper_theme_cream",
                         onClick = { onSelectTheme(ReaderPaperTheme.WARM_CREAM) }
                     )
                     PaperSwatchCircle(
                         color = ReaderWhitePaper,
-                        selected = selectedTheme == ReaderPaperTheme.PURE_WHITE,
+                        selected = prefs.paperTheme == ReaderPaperTheme.PURE_WHITE,
                         contentDescription = "Màu trắng",
                         tag = "paper_theme_white",
                         onClick = { onSelectTheme(ReaderPaperTheme.PURE_WHITE) }
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PopoverStepperRow(
+    label: String,
+    valueText: String,
+    canDecrease: Boolean,
+    canIncrease: Boolean,
+    decreaseTag: String,
+    increaseTag: String,
+    onDecrease: () -> Unit,
+    onIncrease: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color(0xFF1C1C1E)
+        )
+
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(Color(0xFFF2F2F7))
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(26.dp)
+                    .clip(CircleShape)
+                    .clickable(enabled = canDecrease, onClick = onDecrease)
+                    .testTag(decreaseTag),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Remove,
+                    contentDescription = "Giảm $label",
+                    tint = if (canDecrease) Color(0xFF1C1C1E) else Color(0xFFAEAEB2),
+                    modifier = Modifier.size(15.dp)
+                )
+            }
+
+            Text(
+                text = valueText,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color(0xFF1C1C1E),
+                modifier = Modifier.width(34.dp),
+                textAlign = TextAlign.Center,
+                maxLines = 1
+            )
+
+            Box(
+                modifier = Modifier
+                    .size(26.dp)
+                    .clip(CircleShape)
+                    .clickable(enabled = canIncrease, onClick = onIncrease)
+                    .testTag(increaseTag),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Add,
+                    contentDescription = "Tăng $label",
+                    tint = if (canIncrease) Color(0xFF1C1C1E) else Color(0xFFAEAEB2),
+                    modifier = Modifier.size(15.dp)
+                )
             }
         }
     }
@@ -1134,67 +1735,114 @@ private fun ReaderTocBottomSheetContent(
     }
 }
 
-/**
- * Selects the best available 100% Offline Vietnamese `Voice` from `tts.voices`
- * (`!voice.isNetworkConnectionRequired`) for each of the 3 curated voice profiles
- * (`Nữ 1`, `Nữ 2`, `Nam 1`) and applies each profile's natural pitch & cadence tuning.
- */
-private fun applyOfflineVietnameseVoiceProfile(
-    tts: TextToSpeech,
-    profile: ReaderVoiceProfile,
-    baseSpeechRate: Float
-) {
-    val viLocale = Locale("vi", "VN")
-    runCatching { tts.language = viLocale }
+// -----------------------------------------------------------------------------
+// Dynamic Horizontal Pagination (Adapts to screen size, font 13..48sp, margins, line & letter spacing)
+// -----------------------------------------------------------------------------
 
-    val offlineViVoices: List<Voice> = runCatching {
-        tts.voices
-            ?.filter { v ->
-                v.locale?.language.equals("vi", ignoreCase = true) &&
-                    !v.isNetworkConnectionRequired
-            }
-            ?.sortedBy { it.name.lowercase(Locale.ROOT) }
-            .orEmpty()
-    }.getOrDefault(emptyList())
+private fun paginateChapterIntoPages(
+    paragraphs: List<String>,
+    viewportWidthDp: Float,
+    viewportHeightDp: Float,
+    marginDp: Float,
+    fontSizeSp: Float,
+    lineHeightMultiplier: Float,
+    letterSpacingSp: Float
+): List<ReaderPageData> {
+    if (paragraphs.isEmpty()) {
+        return listOf(ReaderPageData(isFirstPageOfChapter = true, slices = emptyList()))
+    }
+    val contentWidth = (viewportWidthDp - marginDp * 2f).coerceAtLeast(120f)
+    // Reserve ~44dp for bottom page bar & padding
+    val usableHeight = (viewportHeightDp - 52f).coerceAtLeast(140f)
+    val avgCharWidth = (fontSizeSp * 0.54f + letterSpacingSp).coerceAtLeast(6f)
+    val charsPerLine = (contentWidth / avgCharWidth).toInt().coerceAtLeast(6)
+    val lineHeightDp = (fontSizeSp * lineHeightMultiplier).coerceAtLeast(16f)
+    val paraGapDp = (fontSizeSp * 0.55f).coerceIn(8f, 22f)
+    val firstPageHeaderReserveDp = (fontSizeSp * 2.6f + 36f).coerceAtMost(usableHeight * 0.45f)
 
-    if (offlineViVoices.isNotEmpty()) {
-        val chosen = pickBestOfflineVietnameseVoice(offlineViVoices, profile)
-        if (chosen != null) {
-            runCatching { tts.voice = chosen }
+    val pages = mutableListOf<ReaderPageData>()
+    var currentSlices = mutableListOf<ReaderPageSlice>()
+    var isFirstPage = true
+    var usedHeight = firstPageHeaderReserveDp
+
+    fun flushPage() {
+        if (currentSlices.isNotEmpty() || isFirstPage) {
+            pages.add(ReaderPageData(isFirstPageOfChapter = isFirstPage, slices = currentSlices))
+            currentSlices = mutableListOf()
+            isFirstPage = false
+            usedHeight = 0f
         }
     }
 
-    val effectiveRate = (baseSpeechRate * profile.rateFactor).coerceIn(0.65f, 2.2f)
-    runCatching {
-        tts.setPitch(profile.pitch)
-        tts.setSpeechRate(effectiveRate)
+    for (paraIdx in paragraphs.indices) {
+        var remaining = paragraphs[paraIdx].trim()
+        if (remaining.isEmpty()) continue
+
+        while (remaining.isNotEmpty()) {
+            val estLines = ceil(remaining.length.toDouble() / charsPerLine).toInt().coerceAtLeast(1)
+            val estHeight = estLines * lineHeightDp + paraGapDp
+            val spaceLeft = usableHeight - usedHeight
+
+            if (estHeight <= spaceLeft) {
+                currentSlices.add(ReaderPageSlice(paragraphIndex = paraIdx, text = remaining))
+                usedHeight += estHeight
+                remaining = ""
+            } else {
+                val linesThatFit = ((spaceLeft - paraGapDp) / lineHeightDp).toInt()
+                if (linesThatFit >= 2) {
+                    val maxChars = (linesThatFit * charsPerLine).coerceAtLeast(24)
+                    if (maxChars >= remaining.length) {
+                        currentSlices.add(ReaderPageSlice(paragraphIndex = paraIdx, text = remaining))
+                        usedHeight += estHeight
+                        remaining = ""
+                    } else {
+                        var cut = remaining.lastIndexOf(' ', startIndex = maxChars)
+                        if (cut < maxChars / 2) cut = maxChars
+                        val head = remaining.substring(0, cut).trim()
+                        if (head.isNotEmpty()) {
+                            currentSlices.add(ReaderPageSlice(paragraphIndex = paraIdx, text = head))
+                        }
+                        remaining = remaining.substring(cut).trimStart()
+                        flushPage()
+                    }
+                } else {
+                    if (currentSlices.isNotEmpty() || isFirstPage) {
+                        flushPage()
+                    } else {
+                        // Even on an empty page (e.g. 48sp on small screen), force at least 1 slice
+                        val forceChars = (charsPerLine * 2).coerceAtLeast(20).coerceAtMost(remaining.length)
+                        var cut = if (forceChars < remaining.length) {
+                            remaining.lastIndexOf(' ', startIndex = forceChars)
+                        } else {
+                            remaining.length
+                        }
+                        if (cut <= 0) cut = forceChars
+                        currentSlices.add(
+                            ReaderPageSlice(
+                                paragraphIndex = paraIdx,
+                                text = remaining.substring(0, cut).trim()
+                            )
+                        )
+                        remaining = remaining.substring(cut).trimStart()
+                        flushPage()
+                    }
+                }
+            }
+        }
     }
+
+    if (currentSlices.isNotEmpty() || pages.isEmpty()) {
+        pages.add(ReaderPageData(isFirstPageOfChapter = isFirstPage, slices = currentSlices))
+    }
+    return pages
 }
 
-private fun pickBestOfflineVietnameseVoice(
-    voices: List<Voice>,
-    profile: ReaderVoiceProfile
-): Voice? {
-    if (voices.isEmpty()) return null
-    val maleHints = listOf("male", "-vic-", "-vie-", "nam", "_m_")
-    val femaleHints = listOf("female", "-gft-", "-vif-", "-vid-", "nu", "_f_")
-
-    val maleCandidates = voices.filter { v ->
-        val n = v.name.lowercase(Locale.ROOT)
-        maleHints.any { n.contains(it) }
+private fun findPageIndexForParagraph(pages: List<ReaderPageData>, paragraphIndex: Int): Int {
+    if (pages.isEmpty()) return 0
+    val exact = pages.indexOfFirst { page ->
+        page.slices.any { it.paragraphIndex == paragraphIndex }
     }
-    val femaleCandidates = voices.filter { v ->
-        val n = v.name.lowercase(Locale.ROOT)
-        femaleHints.any { n.contains(it) } || v !in maleCandidates
-    }
-
-    return when (profile) {
-        ReaderVoiceProfile.FEMALE_1 -> femaleCandidates.getOrNull(0) ?: voices.first()
-        ReaderVoiceProfile.FEMALE_2 -> femaleCandidates.getOrNull(1)
-            ?: voices.getOrNull(1)
-            ?: voices.first()
-        ReaderVoiceProfile.MALE_1 -> maleCandidates.firstOrNull()
-            ?: voices.lastOrNull()
-            ?: voices.first()
-    }
+    if (exact >= 0) return exact
+    val nearest = pages.indexOfLast { it.firstParagraphIndex <= paragraphIndex }
+    return nearest.coerceAtLeast(0)
 }
