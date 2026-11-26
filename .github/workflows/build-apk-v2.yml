@@ -99,10 +99,17 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Cài đặt Gradle
+        uses: gradle/actions/setup-gradle@v4
+
       - name: Biên dịch file APK
         run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug
+          if [ -f "./gradlew" ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug
+          else
+            gradle assembleDebug
+          fi
           APK_FILE=$(find app/build/outputs/apk -name "*.apk" | head -n 1)
           echo "APK_PATH=$APK_FILE" >> $GITHUB_ENV
 
