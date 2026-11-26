@@ -1,16 +1,7 @@
-name: Build Android APK
+name: Build Full Offline APK
 
 on:
   push:
-    branches:
-      - main
-      - master
-    tags:
-      - 'v*'
-  pull_request:
-    branches:
-      - main
-      - master
   workflow_dispatch:
 
 permissions:
@@ -18,87 +9,123 @@ permissions:
 
 jobs:
   build-apk:
-    name: Build Cleanbook v2.0 APK
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
+      - name: Lấy mã nguồn
         uses: actions/checkout@v4
-        with:
-          lfs: true
 
-      - name: Set up JDK 21
+      - name: Cài đặt Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cài đặt thư viện và chép file WASM offline
+        run: |
+          npm install
+          mkdir -p public/ort
+          cp -f node_modules/onnxruntime-web/dist/*.wasm public/ort/ 2>/dev/null || true
+          cp -f node_modules/onnxruntime-web/dist/*.mjs public/ort/ 2>/dev/null || true
+
+      - name: Tự động tải trọn bộ model VieNeu (~380MB)
+        run: |
+          mkdir -p public/models
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const REPO = "duyquangnvx/vieneu-web-models";
+            const BASE = `https://huggingface.co/${REPO}/resolve/main/`;
+            (async () => {
+              const apiRes = await fetch(`https://huggingface.co/api/models/${REPO}`);
+              if (!apiRes.ok) throw new Error("Khong lay duoc danh sach file tu Hugging Face");
+              const info = await apiRes.json();
+              const files = (info.siblings || [])
+                .map(s => s.rfilename)
+                .filter(f => f && !f.startsWith(".") && f !== "README.md");
+              for (const f of files) {
+                console.log("Dang tai:", f);
+                const r = await fetch(BASE + f);
+                if (!r.ok) throw new Error("Loi tai file: " + f);
+                const buf = Buffer.from(await r.arrayBuffer());
+                const flatName = f.split("/").pop();
+                fs.writeFileSync("public/models/" + flatName, buf);
+                if (f.includes("/")) {
+                  fs.mkdirSync(path.dirname("public/models/" + f), { recursive: true });
+                  fs.writeFileSync("public/models/" + f, buf);
+                }
+              }
+              const totalBytes = fs.readdirSync("public/models").reduce((s, f) => {
+                const st = fs.statSync("public/models/" + f);
+                return st.isFile() ? s + st.size : s;
+              }, 0);
+              console.log("TONG DUNG LUONG MODEL:", (totalBytes / 1024 / 1024).toFixed(1), "MB");
+              if (totalBytes < 250 * 1024 * 1024) throw new Error("Chua du dung luong model!");
+            })();
+          '
+
+      - name: Build giao diện Web
+        run: npm run build
+
+      - name: Đóng gói sang Android (Capacitor)
+        run: |
+          if [ -d "dist" ]; then WEB_DIR="dist"; else WEB_DIR="build"; fi
+          npm install @capacitor/core @capacitor/cli @capacitor/android
+          if [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.ts" ]; then
+            npx cap init "DocSachAI" "com.docsach.ai" --web-dir=$WEB_DIR
+          fi
+          rm -rf android
+          npx cap add android
+
+      - name: Cấp quyền Micro, tăng RAM đóng gói và giữ nguyên file model lớn
+        run: |
+          echo "org.gradle.jvmargs=-Xmx4096m" >> android/gradle.properties
+          sed -i 's|<application|<uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <application|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|android {|android {\n    aaptOptions { noCompress += ["onnx", "bin", "wasm", "data", "onnx_data"] }|' android/app/build.gradle
+          mkdir -p android/app/src/main/java/com/docsach/ai
+          rm -f android/app/src/main/java/com/docsach/ai/MainActivity.*
+          cat << 'EOF' > android/app/src/main/java/com/docsach/ai/MainActivity.java
+          package com.docsach.ai;
+
+          import android.Manifest;
+          import android.content.pm.PackageManager;
+          import android.os.Bundle;
+          import android.webkit.PermissionRequest;
+          import androidx.core.app.ActivityCompat;
+          import androidx.core.content.ContextCompat;
+          import com.getcapacitor.BridgeActivity;
+          import com.getcapacitor.BridgeWebChromeClient;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                      ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, 101);
+                  }
+                  this.bridge.getWebView().setWebChromeClient(new BridgeWebChromeClient(this.bridge) {
+                      @Override
+                      public void onPermissionRequest(final PermissionRequest request) {
+                          runOnUiThread(() -> request.grant(request.getResources()));
+                      }
+                  });
+              }
+          }
+          EOF
+
+      - name: Cài đặt Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '21'
+          java-version: '17'
 
-      - name: Accept Android SDK licenses
+      - name: Biên dịch file APK
         run: |
-          if [ -n "${ANDROID_HOME:-}" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
-            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
-          fi
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
 
-      - name: Sync offline ONNX voice models into Android assets (if present)
-        run: |
-          if [ -f "models/manifest.json" ] && [ ! -f "app/src/main/assets/models/manifest.json" ]; then
-            echo "Copying root models/ into app/src/main/assets/models/..."
-            mkdir -p app/src/main/assets/models
-            cp -r models/* app/src/main/assets/models/
-          elif [ -f "public/models/manifest.json" ] && [ ! -f "app/src/main/assets/models/manifest.json" ]; then
-            echo "Copying public/models/ into app/src/main/assets/models/..."
-            mkdir -p app/src/main/assets/models
-            cp -r public/models/* app/src/main/assets/models/
-          elif [ -f "app/src/main/assets/models/manifest.json" ]; then
-            echo "Offline ONNX voice models already bundled in app/src/main/assets/models/."
-          else
-            echo "No models/manifest.json found — APK will run cleanly in safe device-TTS fallback mode."
-          fi
-
-      - name: Prepare debug keystore
-        run: |
-          if [ ! -f debug.keystore ]; then
-            if [ -f debug.keystore.base64 ]; then
-              base64 -d debug.keystore.base64 > debug.keystore
-            else
-              keytool -genkeypair -v \
-                -keystore debug.keystore \
-                -storepass android \
-                -alias androiddebugkey \
-                -keypass android \
-                -keyalg RSA \
-                -keysize 2048 \
-                -validity 10000 \
-                -dname "CN=Android Debug,O=Android,C=US"
-            fi
-          fi
-
-      - name: Set up Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.3.1'
-
-      - name: Run unit tests
-        run: gradle :app:testDebugUnitTest --tests "com.example.EpubCleanPipelineUnitTest" --tests "com.example.ExampleUnitTest" --no-daemon --stacktrace
-
-      - name: Build Debug APK
-        run: gradle :app:assembleDebug --no-daemon
-
-      - name: Prepare APK output
-        run: |
-          mkdir -p release-artifacts
-          cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/Cleanbook-v2.0-debug.apk
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Cleanbook-v2.0-APK
-          path: release-artifacts/Cleanbook-v2.0-debug.apk
-          retention-days: 30
-
-      - name: Publish GitHub Release on version tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Xuất thẳng file APK ra mục Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: release-artifacts/Cleanbook-v2.0-debug.apk
-          generate_release_notes: true
+          tag_name: v1.0.${{ github.run_number }}
+          name: Ban-full-offline-${{ github.run_number }}
+          files: android/app/build/outputs/apk/debug/app-debug.apk
