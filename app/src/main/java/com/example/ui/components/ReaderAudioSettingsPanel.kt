@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.ArrowDropUp
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -128,6 +129,7 @@ fun ReaderAudioSettingsSheetContent(
     onDeleteCustomAmbient: (String) -> Unit = {},
     clonedVoices: List<ClonedVoiceProfile> = emptyList(),
     onSelectClonedVoice: (String?) -> Unit = {},
+    onOpenAiDiagnostics: () -> Unit = {},
     onClose: () -> Unit
 ) {
     var narratorDropdownExpanded by remember { mutableStateOf(false) }
@@ -243,6 +245,42 @@ fun ReaderAudioSettingsSheetContent(
                     "Đang bật AI Nhân bản • Quản lý & tạo thêm giọng trong Studio"
                 } else {
                     "Đang bật Giọng Hệ thống • Đổi chế độ trong tab Studio"
+                },
+                trailingAction = {
+                    NeoBrutalistPressBox(
+                        onClick = onOpenAiDiagnostics,
+                        isPill = true,
+                        shadowOffset = 2.dp,
+                        pressDepth = 1.5.dp,
+                        borderWidth = 1.2.dp,
+                        containerColor = itemBg,
+                        borderColor = borderCol,
+                        shadowColor = neoHardShadowColor(),
+                        modifier = Modifier
+                            .height(27.dp)
+                            .testTag("reader_open_ai_diagnostics_button")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.BugReport,
+                                contentDescription = "Kiểm tra hệ thống AI",
+                                tint = IosBlue,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text(
+                                text = "Kiểm tra AI",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = primaryInk,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
                 }
             ) {
                 Row(

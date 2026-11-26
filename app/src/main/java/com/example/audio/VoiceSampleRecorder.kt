@@ -110,6 +110,9 @@ class VoiceSampleRecorder(context: Context? = null) {
     @Volatile
     private var activeMediaPlayer: MediaPlayer? = null
 
+    @Volatile
+    private var activePreviewToken: Long = 0L
+
     /**
      * Starts recording up to 8 seconds of Mono speech.
      * Caller MUST have verified `RECORD_AUDIO` runtime permission beforehand.
@@ -319,6 +322,7 @@ class VoiceSampleRecorder(context: Context? = null) {
 
         if (resolvedWavPath == null && (samples == null || samples.isEmpty())) return
 
+        val myToken = ++activePreviewToken
         previewJob?.cancel()
         previewJob = scope.launch {
             _uiState.value = _uiState.value.copy(isPlayingPreview = true, errorMessage = null)
@@ -344,12 +348,18 @@ class VoiceSampleRecorder(context: Context? = null) {
                 if (samples != null && samples.isNotEmpty()) {
                     playFloatWithStreamingAudioTrack(samples, rate)
                 }
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(
-                    errorMessage = "Lỗi phát nghe thử: ${e.message ?: "không xác định"}"
-                )
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
+            } catch (e: Throwable) {
+                if (myToken == activePreviewToken) {
+                    _uiState.value = _uiState.value.copy(
+                        errorMessage = "Lỗi phát nghe thử: ${OnnxModelAssetHelper.formatFullThrowable(e)}"
+                    )
+                }
             } finally {
-                _uiState.value = _uiState.value.copy(isPlayingPreview = false)
+                if (myToken == activePreviewToken) {
+                    _uiState.value = _uiState.value.copy(isPlayingPreview = false)
+                }
             }
         }
     }
@@ -379,6 +389,8 @@ class VoiceSampleRecorder(context: Context? = null) {
                 delay(40L)
             }
             true
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
         } catch (_: Exception) {
             false
         } finally {
@@ -461,6 +473,7 @@ class VoiceSampleRecorder(context: Context? = null) {
     }
 
     fun stopPreview() {
+        activePreviewToken++
         previewJob?.cancel()
         previewJob = null
         val mp = activeMediaPlayer

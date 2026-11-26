@@ -71,6 +71,94 @@ data class ParsedTokenizerData(
 )
 
 /**
+ * Single file entry inside `assets/models` or `context.filesDir/models` with exact size in bytes & MB.
+ */
+data class ModelFileEntry(
+    val relativePath: String,
+    val sizeBytes: Long
+) {
+    val sizeMbLabel: String
+        get() = if (sizeBytes >= 0L) {
+            String.format(Locale.US, "%.2f MB", sizeBytes / (1024.0 * 1024.0))
+        } else {
+            "N/A (nén)"
+        }
+}
+
+/**
+ * Full diagnostic report for the "Kiểm tra hệ thống AI" screen.
+ */
+data class AiSystemDiagnosticReport(
+    val inspectedAtMillis: Long,
+    val engineMode: OnnxVoiceEngineMode,
+    val ortEnvironmentStatus: String,
+    val assetsModelsFiles: List<ModelFileEntry>,
+    val totalAssetsBytes: Long,
+    val filesDirModelsPath: String,
+    val filesDirModelsFiles: List<ModelFileEntry>,
+    val totalFilesDirBytes: Long,
+    val mappedRoles: Map<String, String>,
+    val loadedSessions: Map<String, String>,
+    val sessionErrors: Map<String, String>,
+    val copyErrors: List<String>
+) {
+    fun toPlainTextReport(): String = buildString {
+        appendLine("=== KIỂM TRA HỆ THỐNG AI (VieNeu-TTS ONNX) ===")
+        appendLine("Chế độ Engine: $engineMode")
+        appendLine("OrtEnvironment: $ortEnvironmentStatus")
+        appendLine()
+        appendLine("--- 1. THƯ MỤC assets/models (${assetsModelsFiles.size} file • ${formatMb(totalAssetsBytes)}) ---")
+        if (assetsModelsFiles.isEmpty()) {
+            appendLine("(Trống — APK chưa chứa thư mục assets/models)")
+        } else {
+            assetsModelsFiles.forEach { appendLine(" • ${it.relativePath}  [${it.sizeMbLabel}]") }
+        }
+        appendLine()
+        appendLine("--- 2. THƯ MỤC filesDir/models (${filesDirModelsFiles.size} file • ${formatMb(totalFilesDirBytes)}) ---")
+        appendLine("Đường dẫn: $filesDirModelsPath")
+        if (filesDirModelsFiles.isEmpty()) {
+            appendLine("(Trống — chưa có file nào được sao chép sang bộ nhớ nội bộ)")
+        } else {
+            filesDirModelsFiles.forEach { appendLine(" • ${it.relativePath}  [${it.sizeMbLabel}]") }
+        }
+        appendLine()
+        appendLine("--- 3. ÁNH XẠ MODEL ---")
+        mappedRoles.forEach { (role, value) -> appendLine(" • $role: $value") }
+        appendLine()
+        appendLine("--- 4. ORT SESSIONS ĐÃ NẠP ---")
+        if (loadedSessions.isEmpty()) {
+            appendLine("(Chưa nạp được OrtSession nào)")
+        } else {
+            loadedSessions.forEach { (role, sig) -> appendLine(" ✓ $role: $sig") }
+        }
+        if (copyErrors.isNotEmpty()) {
+            appendLine()
+            appendLine("--- LỖI SAO CHÉP ASSETS ---")
+            copyErrors.forEach { appendLine(" ✗ $it") }
+        }
+        if (sessionErrors.isNotEmpty()) {
+            appendLine()
+            appendLine("--- LỖI NẠP ORT SESSION (NGUYÊN VĂN) ---")
+            sessionErrors.forEach { (role, err) -> appendLine(" ✗ [$role]\n$err") }
+        }
+    }
+
+    companion object {
+        fun formatMb(bytes: Long): String = String.format(Locale.US, "%.2f MB", bytes.coerceAtLeast(0L) / (1024.0 * 1024.0))
+    }
+}
+
+/**
+ * Result of an interactive test button inside "Kiểm tra hệ thống AI" (MediaCodec / Encoder / TTS).
+ */
+data class AiDiagnosticTestResult(
+    val title: String,
+    val success: Boolean,
+    val elapsedMs: Long,
+    val detailLog: String
+)
+
+/**
  * Asset copier, recursive model resolver, G2P/tokenizer/voices parser, and FFT log-mel DSP helper
  * for VieNeu-TTS ONNX Runtime on Android.
  */
@@ -79,6 +167,88 @@ object OnnxModelAssetHelper {
     private const val TAG = "VieNeuOnnxAssets"
     const val ASSETS_MODELS_DIR = "models"
     const val FILES_MODELS_DIR = "models"
+
+    /**
+     * Exact sample Vietnamese sentence required for AI ONNX voice cloning preview & diagnostics.
+     */
+    const val AI_VOICE_TEST_SENTENCE =
+        "Nó vẫn hiển thị rất nhiều, vì thế tôi đã bay ra ngoài hà nội để cảm nhận sắc xuân ở đây thật là tươi đẹp."
+
+    /**
+     * Captures the complete verbatim exception string (`e.toString()`) and full cause chain (`e.cause?.message`)
+     * without hiding or truncating underlying `MediaCodec`, `OrtEnvironment`, or `OrtSession` root causes.
+     */
+    fun formatFullThrowable(t: Throwable): String = buildString {
+        append(t.toString())
+        var cause = t.cause
+        var depth = 0
+        while (cause != null && depth < 5) {
+            append("\n  Cause[$depth]: ")
+            append(cause.toString())
+            val msg = cause.message
+            if (!msg.isNullOrBlank() && !cause.toString().contains(msg)) {
+                append(" | message=").append(msg)
+            }
+            cause = cause.cause
+            depth++
+        }
+    }
+
+    /**
+     * Recursively lists every file & exact byte size currently inside `assets/models/`.
+     */
+    fun inspectAssetsModelsFiles(context: Context): Pair<List<ModelFileEntry>, Long> {
+        val appCtx = context.applicationContext
+        val entries = mutableListOf<ModelFileEntry>()
+        fun walk(relPath: String) {
+            val children = runCatching { appCtx.assets.list(relPath)?.toList().orEmpty() }
+                .getOrDefault(emptyList())
+            for (child in children) {
+                if (child.isBlank()) continue
+                val childPath = "$relPath/$child"
+                val sub = runCatching { appCtx.assets.list(childPath) }.getOrNull()
+                if (sub != null && sub.isNotEmpty()) {
+                    walk(childPath)
+                } else {
+                    val size = runCatching {
+                        appCtx.assets.openFd(childPath).use { it.length }
+                    }.getOrElse {
+                        runCatching {
+                            appCtx.assets.open(childPath).use { it.available().toLong() }
+                        }.getOrElse { -1L }
+                    }
+                    val displayRel = childPath.removePrefix("$ASSETS_MODELS_DIR/")
+                    entries.add(ModelFileEntry(relativePath = displayRel, sizeBytes = size))
+                }
+            }
+        }
+        walk(ASSETS_MODELS_DIR)
+        entries.sortBy { it.relativePath }
+        val total = entries.sumOf { it.sizeBytes.coerceAtLeast(0L) }
+        return entries to total
+    }
+
+    /**
+     * Recursively lists every file & exact byte size currently inside `context.filesDir/models/`.
+     */
+    fun inspectFilesDirModelsFiles(context: Context): Triple<String, List<ModelFileEntry>, Long> {
+        val destRoot = File(context.applicationContext.filesDir, FILES_MODELS_DIR)
+        if (!destRoot.exists()) {
+            return Triple(destRoot.absolutePath, emptyList(), 0L)
+        }
+        val entries = destRoot.walkTopDown()
+            .filter { it.isFile && !it.name.endsWith(".tmp") }
+            .map { file ->
+                ModelFileEntry(
+                    relativePath = file.relativeTo(destRoot).path.replace('\\', '/'),
+                    sizeBytes = file.length()
+                )
+            }
+            .sortedBy { it.relativePath }
+            .toList()
+        val total = entries.sumOf { it.sizeBytes.coerceAtLeast(0L) }
+        return Triple(destRoot.absolutePath, entries, total)
+    }
 
     /**
      * Recursively copies the ENTIRE contents of `assets/models/` (including `.onnx`, `.onnx_data`,

@@ -27,11 +27,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.ArrowDropUp
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.GraphicEq
@@ -40,6 +42,7 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.UploadFile
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -98,6 +101,8 @@ fun StudioVoiceCloneSection(
     isImportingFile: Boolean,
     draftClonedVoice: PendingDraftClonedVoice?,
     activeServicePreviewTag: String?,
+    lastAiVerbatimError: String? = null,
+    onOpenAiDiagnostics: () -> Unit = {},
     onImportAudioUri: (Uri, (ImportedVoiceSample) -> Unit) -> Unit,
     onCreateDraftVoice: (name: String, samples: FloatArray, sampleRate: Int) -> Unit,
     onClearDraftVoice: () -> Unit,
@@ -207,7 +212,6 @@ fun StudioVoiceCloneSection(
             recorder.stopPreview()
             localPreviewTarget = null
         } else {
-            recorder.stopPreview()
             localPreviewTarget = tag
             recorder.togglePreviewRecordedSample(
                 samplesOverride = samples,
@@ -786,23 +790,100 @@ fun StudioVoiceCloneSection(
                         draft.usedOnnxEncoder -> "ONNX Encoder"
                         else -> "Vector dự phòng"
                     }
-                    Text(
-                        text = "✓ Đã tạo \"${draft.name}\" (${draft.embedding.size}d • $modeBadge) — Bấm Nghe thử để kiểm tra, rồi bấm Lưu.",
-                        fontSize = 10.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = IosGreen
-                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = "✓ Đã tạo \"${draft.name}\" (${draft.embedding.size}d • $modeBadge) — Bấm Nghe thử để kiểm tra, rồi bấm Lưu.",
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = IosGreen
+                        )
+                        if (draft.synthesizedPreview) {
+                            Text(
+                                text = "Câu mẫu AI ONNX: \"${com.example.audio.OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE}\"",
+                                fontSize = 9.5.sp,
+                                color = secondaryInk
+                            )
+                        }
+                    }
                 }
             }
 
             val noteText = permissionDeniedNote ?: recState.errorMessage
             AnimatedVisibility(visible = !noteText.isNullOrBlank()) {
-                Text(
-                    text = noteText.orEmpty(),
-                    fontSize = 10.5.sp,
-                    color = IosRed,
-                    fontWeight = FontWeight.Medium
-                )
+                SelectionContainer {
+                    Text(
+                        text = noteText.orEmpty(),
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = IosRed,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+
+            // Hiển thị nguyên văn lỗi MediaCodec / OrtEnvironment / OrtSession (không bị cắt ngắn)
+            AnimatedVisibility(visible = !lastAiVerbatimError.isNullOrBlank()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(IosRed.copy(alpha = 0.09f))
+                        .border(1.2.dp, IosRed, RoundedCornerShape(10.dp))
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Chi tiết lỗi AI ONNX (nguyên văn):",
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = IosRed
+                        )
+                        NeoBrutalistPressBox(
+                            onClick = onOpenAiDiagnostics,
+                            isPill = true,
+                            shadowOffset = 1.5.dp,
+                            pressDepth = 1.dp,
+                            borderWidth = 1.dp,
+                            containerColor = paperBg,
+                            borderColor = IosRed,
+                            shadowColor = shadowCol,
+                            modifier = Modifier.height(24.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.BugReport,
+                                    contentDescription = null,
+                                    tint = IosRed,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Text(
+                                    text = "Kiểm tra AI",
+                                    fontSize = 9.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = IosRed
+                                )
+                            }
+                        }
+                    }
+                    SelectionContainer {
+                        Text(
+                            text = lastAiVerbatimError.orEmpty(),
+                            fontSize = 9.5.sp,
+                            lineHeight = 13.5.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = primaryInk
+                        )
+                    }
+                }
             }
         }
 

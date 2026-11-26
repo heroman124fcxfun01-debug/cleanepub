@@ -74,9 +74,16 @@ jobs:
               for (const f of files) {
                 const destPath = path.join(MODELS_DIR, f);
                 fs.mkdirSync(path.dirname(destPath), { recursive: true });
+                const encodedUrl = BASE + f.split("/").map(encodeURIComponent).join("/");
                 console.log("Đang tải:", f, "->", destPath);
-                const r = await fetchWithRetry(BASE + f);
+                const r = await fetchWithRetry(encodedUrl);
                 const buf = Buffer.from(await r.arrayBuffer());
+                if (buf.length < 256) {
+                  const headText = buf.toString("utf8");
+                  if (headText.includes("version https://git-lfs.github.com/spec/v1")) {
+                    throw new Error(`File ${f} bị tải nhầm thành Git LFS pointer (${buf.length} bytes) thay vì dữ liệu nhị phân!`);
+                  }
+                }
                 fs.writeFileSync(destPath, buf);
                 downloadedNames.push(f);
                 console.log("  Đã lưu:", f, `(${(buf.length / 1024 / 1024).toFixed(2)} MB)`);
@@ -92,17 +99,27 @@ jobs:
                 fs.writeFileSync(manifestPath, JSON.stringify(fallbackManifest, null, 2));
               }
 
-              function walkSize(dir) {
+              const listed = [];
+              function walkCollect(dir) {
                 let sum = 0;
                 for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
                   const full = path.join(dir, entry.name);
-                  if (entry.isDirectory()) sum += walkSize(full);
-                  else if (entry.isFile()) sum += fs.statSync(full).size;
+                  if (entry.isDirectory()) sum += walkCollect(full);
+                  else if (entry.isFile()) {
+                    const sz = fs.statSync(full).size;
+                    sum += sz;
+                    listed.push(`${path.relative(MODELS_DIR, full)} (${(sz / 1024 / 1024).toFixed(2)} MB)`);
+                  }
                 }
                 return sum;
               }
-              const totalBytes = walkSize(MODELS_DIR);
-              console.log("TỔNG DUNG LƯỢNG MODEL:", (totalBytes / 1024 / 1024).toFixed(1), "MB");
+              const totalBytes = walkCollect(MODELS_DIR);
+              console.log("=== DANH SÁCH FILE TRONG app/src/main/assets/models ===");
+              for (const row of listed.sort()) console.log(" -", row);
+              console.log("TỔNG DUNG LƯỢNG MODEL:", (totalBytes / 1024 / 1024).toFixed(2), "MB");
+              if (!listed.some(x => x.includes(".onnx"))) {
+                throw new Error("Không có file .onnx nào trong app/src/main/assets/models!");
+              }
               if (totalBytes < 100 * 1024 * 1024) {
                 throw new Error("Dung lượng model tải về quá nhỏ, có thể bị gián đoạn!");
               }
@@ -140,6 +157,8 @@ jobs:
             exit 1
           fi
           ls -lh "$APK_FILE"
+          echo "=== KIỂM TRA FILE assets/models TRONG APK ==="
+          unzip -l "$APK_FILE" | grep "assets/models/" || { echo "LỖI: APK không chứa assets/models/!"; exit 1; }
           echo "APK_PATH=$APK_FILE" >> "$GITHUB_ENV"
 
       - name: Lưu file APK vào GitHub Actions Artifacts

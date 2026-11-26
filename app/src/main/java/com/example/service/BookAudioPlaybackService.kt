@@ -27,6 +27,7 @@ import com.example.audio.ClonedVoiceProfile
 import com.example.audio.ClonedVoiceRepository
 import com.example.audio.OfflineOnnxVoiceEngine
 import com.example.audio.OnnxAudioTrackPlayer
+import com.example.audio.OnnxModelAssetHelper
 import com.example.audio.OnnxVoiceEngineMode
 import com.example.audio.StoryCharacterScanner
 import com.example.audio.VietnameseTtsTextNormalizer
@@ -1081,7 +1082,7 @@ class BookAudioPlaybackService : Service() {
                 val embedding = clonedVoiceRepo.loadEmbedding(targetVoice)
                 val synthResult = if (embedding != null && onnxEngine.isFullOnnxSynthesisReady()) {
                     onnxEngine.synthesizeSentenceDetailed(
-                        sentence = "Xin chào, đây là giọng đọc nhân bản AI ngoại tuyến.",
+                        sentence = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
                         speakerEmbedding = embedding,
                         speed = activePrefs.speechRate.coerceIn(0.8f, 1.5f)
                     )

@@ -208,7 +208,8 @@ fun BookReaderScreen(
     onSelectCustomAmbient: (String) -> Unit = {},
     onDeleteCustomAmbient: (String) -> Unit = {},
     clonedVoices: List<ClonedVoiceProfile> = emptyList(),
-    onSelectClonedVoice: (String?) -> Unit = {}
+    onSelectClonedVoice: (String?) -> Unit = {},
+    onOpenAiDiagnostics: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val listState = rememberLazyListState()
@@ -1240,6 +1241,12 @@ fun BookReaderScreen(
                     onDeleteCustomAmbient = onDeleteCustomAmbient,
                     clonedVoices = clonedVoices,
                     onSelectClonedVoice = onSelectClonedVoice,
+                    onOpenAiDiagnostics = {
+                        BookAudioPlaybackService.stopPreview(context)
+                        showAudioSettingsSheet = false
+                        onHideCharacterPicker()
+                        onOpenAiDiagnostics()
+                    },
                     onClose = {
                         BookAudioPlaybackService.stopPreview(context)
                         showAudioSettingsSheet = false

@@ -62,7 +62,7 @@ android {
     buildConfig = true
   }
   androidResources {
-    noCompress += listOf("onnx", "bin", "data", "onnx_data", "json")
+    noCompress += listOf("onnx", "bin", "data", "onnx_data", "json", "txt", "ort", "npz")
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {

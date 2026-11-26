@@ -104,6 +104,8 @@ class OnnxAudioTrackPlayer {
             } else {
                 false
             }
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
         } catch (_: Exception) {
             false
         } finally {
@@ -145,6 +147,8 @@ class OnnxAudioTrackPlayer {
                 delay(35L)
             }
             !stopped && currentCoroutineContext().isActive
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
         } catch (_: Exception) {
             false
         } finally {

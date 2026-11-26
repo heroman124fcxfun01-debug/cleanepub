@@ -88,6 +88,10 @@ class OfflineOnnxVoiceEngine(context: Context) {
     var discoveredModels: DiscoveredOnnxModels? = null
         private set
 
+    @Volatile
+    var ortEnvironmentStatus: String = "Chưa khởi tạo"
+        private set
+
     private var ortEnv: OrtEnvironment? = null
     private var speakerEncoderSession: OrtSession? = null
     private var prefillSession: OrtSession? = null
@@ -99,23 +103,30 @@ class OfflineOnnxVoiceEngine(context: Context) {
     private var tokenizerData: ParsedTokenizerData? = null
     private var presetVoices: Map<String, FloatArray> = emptyMap()
     private val sessionLoadErrors = LinkedHashMap<String, String>()
+    private val loadedSessionSignatures = LinkedHashMap<String, String>()
 
     /**
      * Copies `assets/models/` -> `context.filesDir/models/` recursively and loads all ONNX sessions
      * from absolute `filesDir` paths on the dedicated worker thread.
      */
-    suspend fun ensureInitialized(): OnnxVoiceEngineMode = withContext(workerDispatcher) {
-        if (engineMode != OnnxVoiceEngineMode.UNINITIALIZED) {
+    suspend fun ensureInitialized(forceResync: Boolean = false): OnnxVoiceEngineMode = withContext(workerDispatcher) {
+        if (!forceResync && engineMode != OnnxVoiceEngineMode.UNINITIALIZED) {
             return@withContext engineMode
         }
 
+        if (forceResync) {
+            closeSessionsLocked()
+            engineMode = OnnxVoiceEngineMode.UNINITIALIZED
+        }
+
         sessionLoadErrors.clear()
+        loadedSessionSignatures.clear()
         lastInitError = null
 
         val discovered = OnnxModelAssetHelper.syncAssetsModelsToFilesDir(appContext)
         discoveredModels = discovered
         if (discovered.copyErrors.isNotEmpty()) {
-            sessionLoadErrors["assets_copy"] = discovered.copyErrors.joinToString("; ")
+            sessionLoadErrors["assets_copy"] = discovered.copyErrors.joinToString("\n")
         }
 
         // Speaker encoder always consumes 16kHz Mono Float32; TTS output is 24kHz (or codec rate)
@@ -131,21 +142,26 @@ class OfflineOnnxVoiceEngine(context: Context) {
         tokenizerData?.outputSampleRate?.let { outputSampleRate = it }
         presetVoices = OnnxModelAssetHelper.parseVoicesJson(discovered.voicesJsonFile)
 
-        if (!discovered.hasAnyOnnxModel) {
-            lastInitError = "Chưa tìm thấy file .onnx nào trong assets/models/ hoặc ${discovered.modelsRootDir.absolutePath}."
-            engineMode = OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
-            return@withContext engineMode
-        }
-
         val env = try {
-            OrtEnvironment.getEnvironment()
+            OrtEnvironment.getEnvironment().also {
+                ortEnvironmentStatus = "OK (OrtEnvironment sẵn sàng)"
+            }
         } catch (e: Throwable) {
-            lastInitError = "Không khởi tạo được OrtEnvironment: ${e.message}"
+            val fullErr = OnnxModelAssetHelper.formatFullThrowable(e)
+            ortEnvironmentStatus = "LỖI: $fullErr"
+            lastInitError = "OrtEnvironment.getEnvironment() thất bại:\n$fullErr"
+            sessionLoadErrors["OrtEnvironment"] = fullErr
             Log.e(TAG, lastInitError, e)
             engineMode = OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
             return@withContext engineMode
         }
         ortEnv = env
+
+        if (!discovered.hasAnyOnnxModel) {
+            lastInitError = "Chưa tìm thấy file .onnx nào trong assets/models/ hoặc ${discovered.modelsRootDir.absolutePath}."
+            engineMode = OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
+            return@withContext engineMode
+        }
 
         val opts = OrtSession.SessionOptions().apply {
             setIntraOpNumThreads(2)
@@ -155,16 +171,19 @@ class OfflineOnnxVoiceEngine(context: Context) {
         fun loadSessionByPath(role: String, file: File?): OrtSession? {
             if (file == null) return null
             if (!file.exists() || file.length() <= 64L) {
-                sessionLoadErrors[role] = "Thiếu hoặc hỏng file ${file.name} (${file.length()} bytes)"
+                sessionLoadErrors[role] = "Thiếu hoặc hỏng file ${file.name} (${file.length()} bytes tại ${file.absolutePath})"
                 return null
             }
             return try {
                 // CRITICAL: Always pass absolute file path on filesDir so ONNX Runtime finds sibling .onnx_data!
                 val session = env.createSession(file.absolutePath, opts)
-                Log.i(TAG, "Loaded $role from ${file.absolutePath} | inputs=${formatInputSignatures(session)}")
+                val sig = "${file.name} (${AiSystemDiagnosticReport.formatMb(file.length())}) | in=[${formatInputSignatures(session)}] | out=[${formatOutputSignatures(session)}]"
+                loadedSessionSignatures[role] = sig
+                Log.i(TAG, "Loaded $role from ${file.absolutePath} | $sig")
                 session
             } catch (e: Throwable) {
-                val msg = "Lỗi nạp ${file.name}: ${e.message ?: e.javaClass.simpleName}"
+                val fullErr = OnnxModelAssetHelper.formatFullThrowable(e)
+                val msg = "OrtSession.createSession(${file.name}) thất bại:\n$fullErr"
                 Log.e(TAG, msg, e)
                 sessionLoadErrors[role] = msg
                 null
@@ -178,7 +197,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
         codecDecoderSession = loadSessionByPath("codec_decoder", discovered.codecDecoderFile)
 
         if (sessionLoadErrors.isNotEmpty()) {
-            lastInitError = sessionLoadErrors.entries.joinToString(" | ") { "${it.key}: ${it.value}" }
+            lastInitError = sessionLoadErrors.entries.joinToString("\n") { "[${it.key}] ${it.value}" }
         }
 
         val anyLoaded = speakerEncoderSession != null ||
@@ -192,6 +211,169 @@ class OfflineOnnxVoiceEngine(context: Context) {
             OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
         }
         engineMode
+    }
+
+    private fun closeSessionsLocked() {
+        runCatching { speakerEncoderSession?.close() }
+        runCatching { prefillSession?.close() }
+        runCatching { decodeStepSession?.close() }
+        runCatching { backboneOrAcousticSession?.close() }
+        runCatching { codecDecoderSession?.close() }
+        speakerEncoderSession = null
+        prefillSession = null
+        decodeStepSession = null
+        backboneOrAcousticSession = null
+        codecDecoderSession = null
+    }
+
+    /**
+     * Collects a complete diagnostic snapshot of `assets/models`, `context.filesDir/models`,
+     * `OrtEnvironment`, mapped model roles, loaded `OrtSession` tensor signatures, and verbatim errors.
+     */
+    suspend fun runFullSystemDiagnostics(forceResync: Boolean = false): AiSystemDiagnosticReport =
+        withContext(workerDispatcher) {
+            ensureInitialized(forceResync = forceResync)
+            val (assetsFiles, totalAssetsBytes) = OnnxModelAssetHelper.inspectAssetsModelsFiles(appContext)
+            val (filesDirPath, filesDirFiles, totalFilesDirBytes) =
+                OnnxModelAssetHelper.inspectFilesDirModelsFiles(appContext)
+            val d = discoveredModels
+            val mapped = linkedMapOf(
+                "speaker_encoder" to (d?.speakerEncoderFile?.name ?: "(không tìm thấy)"),
+                "prefill" to (d?.prefillModelFile?.name ?: "(không tìm thấy)"),
+                "decode_step" to (d?.decodeStepModelFile?.name ?: "(không tìm thấy)"),
+                "backbone / acoustic" to (d?.backboneOrAcousticFile?.name ?: "(không tìm thấy)"),
+                "codec_decoder" to (d?.codecDecoderFile?.name ?: "(không tìm thấy)"),
+                "sea_g2p" to (d?.g2pDictionaryFile?.let { "${it.name} (${g2pLexicon.size} mục)" } ?: "(không tìm thấy)"),
+                "tokenizer.json" to (d?.tokenizerJsonFile?.let { "${it.name} (${tokenizerData?.tokenToId?.size ?: 0} token)" } ?: "(không tìm thấy)"),
+                "config.json" to (d?.configJsonFile?.name ?: "(không tìm thấy)"),
+                "voices.json" to (d?.voicesJsonFile?.let { "${it.name} (${presetVoices.size} preset)" } ?: "(không tìm thấy)"),
+                "manifest.json" to (d?.manifestJsonFile?.name ?: "(không tìm thấy)"),
+                "output_sample_rate" to "${outputSampleRate} Hz"
+            )
+            AiSystemDiagnosticReport(
+                inspectedAtMillis = System.currentTimeMillis(),
+                engineMode = engineMode,
+                ortEnvironmentStatus = ortEnvironmentStatus,
+                assetsModelsFiles = assetsFiles,
+                totalAssetsBytes = totalAssetsBytes,
+                filesDirModelsPath = filesDirPath,
+                filesDirModelsFiles = filesDirFiles,
+                totalFilesDirBytes = totalFilesDirBytes,
+                mappedRoles = mapped,
+                loadedSessions = LinkedHashMap(loadedSessionSignatures),
+                sessionErrors = LinkedHashMap(sessionLoadErrors),
+                copyErrors = d?.copyErrors.orEmpty()
+            )
+        }
+
+    /**
+     * Interactive test for "Kiểm tra hệ thống AI": executes speaker voice creation (`speaker_encoder.onnx`)
+     * and returns verbatim `e.toString()` + `e.cause?.message` if anything fails.
+     */
+    suspend fun runDiagnosticVoiceCreateTest(
+        sampleFloat16k: FloatArray? = null,
+        sampleRate: Int = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
+    ): AiDiagnosticTestResult = withContext(workerDispatcher) {
+        val startMs = System.currentTimeMillis()
+        try {
+            ensureInitialized()
+            val inputSamples = sampleFloat16k?.takeIf { it.isNotEmpty() } ?: FloatArray(16_000 * 3) { i ->
+                val t = i.toDouble() / 16_000.0
+                (0.35 * kotlin.math.sin(2.0 * kotlin.math.PI * 185.0 * t) +
+                    0.18 * kotlin.math.sin(2.0 * kotlin.math.PI * 370.0 * t)).toFloat()
+            }
+            val result = extractSpeakerEmbedding(inputSamples, sampleRate)
+            val elapsed = System.currentTimeMillis() - startMs
+            val ok = result.usedOnnxEncoder && result.embedding.isNotEmpty() && result.errorMessage.isNullOrBlank()
+            val detail = buildString {
+                appendLine("Trạng thái: ${if (ok) "THÀNH CÔNG (ONNX Encoder)" else if (result.embedding.isNotEmpty()) "CẢNH BÁO / DỰ PHÒNG" else "THẤT BẠI"}")
+                appendLine("Thời gian chạy: ${elapsed} ms")
+                appendLine("Mẫu đầu vào: ${inputSamples.size} mẫu @ ${sampleRate} Hz")
+                appendLine("Dùng ONNX speaker_encoder: ${result.usedOnnxEncoder}")
+                appendLine("Kích thước vector đặc trưng: ${result.embedding.size} chiều")
+                appendLine("Pitch ratio ước lượng: ${String.format(Locale.US, "%.3f", result.estimatedPitchRatio)}")
+                loadedSessionSignatures["speaker_encoder"]?.let { appendLine("Session: $it") }
+                if (!result.errorMessage.isNullOrBlank()) {
+                    appendLine()
+                    appendLine("CHI TIẾT LỖI GỐC (NGUYÊN VĂN):")
+                    appendLine(result.errorMessage)
+                }
+            }
+            AiDiagnosticTestResult(
+                title = "Thử tạo giọng (speaker_encoder.onnx)",
+                success = ok,
+                elapsedMs = elapsed,
+                detailLog = detail.trimEnd()
+            )
+        } catch (e: Throwable) {
+            val elapsed = System.currentTimeMillis() - startMs
+            AiDiagnosticTestResult(
+                title = "Thử tạo giọng (speaker_encoder.onnx)",
+                success = false,
+                elapsedMs = elapsed,
+                detailLog = "NGOẠI LỆ NGUYÊN VĂN:\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
+            )
+        }
+    }
+
+    /**
+     * Interactive test for "Kiểm tra hệ thống AI": synthesizes [OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE]
+     * through the full ONNX TTS + Codec Decoder pipeline and captures verbatim `e.toString()` + `e.cause?.message`.
+     */
+    suspend fun runDiagnosticSentenceReadTest(
+        sentence: String = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
+        speakerEmbedding: FloatArray? = null
+    ): Pair<AiDiagnosticTestResult, SynthesizedSentenceAudio?> = withContext(workerDispatcher) {
+        val startMs = System.currentTimeMillis()
+        try {
+            ensureInitialized()
+            val emb = speakerEmbedding?.takeIf { it.isNotEmpty() }
+                ?: presetVoices.values.firstOrNull()
+                ?: OnnxModelAssetHelper.l2Normalize(FloatArray(192) { i -> ((i % 17) - 8) / 16f })
+
+            val synth = synthesizeSentenceDetailed(
+                sentence = sentence,
+                speakerEmbedding = emb,
+                speed = 1.0f
+            )
+            val elapsed = System.currentTimeMillis() - startMs
+            val audio = synth.audio
+            val ok = audio != null
+            val detail = buildString {
+                appendLine("Câu mẫu: \"$sentence\"")
+                appendLine("Trạng thái: ${if (ok) "THÀNH CÔNG (đang phát âm thanh ONNX)" else "THẤT BẠI"}")
+                appendLine("Thời gian tổng hợp: ${elapsed} ms")
+                appendLine("Embedding đầu vào: ${emb.size} chiều")
+                if (audio != null) {
+                    val durSec = audio.pcmFloat.size.toFloat() / audio.sampleRate.toFloat()
+                    appendLine("Sóng âm đầu ra: ${audio.pcmFloat.size} mẫu @ ${audio.sampleRate} Hz (${String.format(Locale.US, "%.2f", durSec)} giây)")
+                }
+                if (!synth.errorMessage.isNullOrBlank()) {
+                    appendLine()
+                    appendLine("CHI TIẾT LỖI GỐC (NGUYÊN VĂN):")
+                    appendLine(synth.errorMessage)
+                }
+                if (sessionLoadErrors.isNotEmpty()) {
+                    appendLine()
+                    appendLine("LỖI NẠP SESSION TRƯỚC ĐÓ:")
+                    sessionLoadErrors.forEach { (k, v) -> appendLine("[$k] $v") }
+                }
+            }
+            AiDiagnosticTestResult(
+                title = "Thử đọc câu mẫu (ONNX TTS + Codec)",
+                success = ok,
+                elapsedMs = elapsed,
+                detailLog = detail.trimEnd()
+            ) to audio
+        } catch (e: Throwable) {
+            val elapsed = System.currentTimeMillis() - startMs
+            AiDiagnosticTestResult(
+                title = "Thử đọc câu mẫu (ONNX TTS + Codec)",
+                success = false,
+                elapsedMs = elapsed,
+                detailLog = "NGOẠI LỆ NGUYÊN VĂN:\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
+            ) to null
+        }
     }
 
     fun isFullOnnxSynthesisReady(): Boolean {
@@ -279,8 +461,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
                     errorMessage = null
                 )
             } catch (e: Throwable) {
-                val errMsg = "Lỗi chạy ${encoderFile?.name ?: "speaker_encoder.onnx"}: " +
-                    "${e.message ?: e.javaClass.simpleName} | Inputs: ${formatInputSignatures(encoder)}"
+                val fullErr = OnnxModelAssetHelper.formatFullThrowable(e)
+                val errMsg = "Lỗi chạy ${encoderFile?.name ?: "speaker_encoder.onnx"}:\n$fullErr\nInputs: ${formatInputSignatures(encoder)}\nOutputs: ${formatOutputSignatures(encoder)}"
                 Log.e(TAG, errMsg, e)
                 return@withContext SpeakerEmbeddingResult(
                     embedding = FloatArray(0),
@@ -583,8 +765,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
             finalizeWaveformResult(waveform, outputSampleRate)
         } catch (e: Throwable) {
-            val detail = "${e.javaClass.simpleName}: ${e.message ?: "không rõ nguyên nhân"}"
-            Log.e(TAG, "ONNX synthesis failed: $detail", e)
+            val detail = OnnxModelAssetHelper.formatFullThrowable(e)
+            Log.e(TAG, "ONNX synthesis failed:\n$detail", e)
             OnnxSynthesisResult(errorMessage = detail)
         }
     }
@@ -1232,18 +1414,17 @@ class OfflineOnnxVoiceEngine(context: Context) {
         }
     }
 
+    private fun formatOutputSignatures(session: OrtSession): String {
+        return session.outputInfo.entries.joinToString(", ") { (k, v) ->
+            val ti = v.info as? TensorInfo
+            val shapeStr = ti?.shape?.joinToString("x") ?: "?"
+            "$k:${ti?.type ?: "?"}[$shapeStr]"
+        }
+    }
+
     fun close() {
         workerExecutor.execute {
-            runCatching { speakerEncoderSession?.close() }
-            runCatching { prefillSession?.close() }
-            runCatching { decodeStepSession?.close() }
-            runCatching { backboneOrAcousticSession?.close() }
-            runCatching { codecDecoderSession?.close() }
-            speakerEncoderSession = null
-            prefillSession = null
-            decodeStepSession = null
-            backboneOrAcousticSession = null
-            codecDecoderSession = null
+            closeSessionsLocked()
         }
         workerExecutor.shutdown()
     }

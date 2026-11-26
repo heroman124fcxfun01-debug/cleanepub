@@ -34,6 +34,7 @@ import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.ArrowDropUp
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.GraphicEq
@@ -139,7 +140,9 @@ fun StudioScreen(
     onSelectCustomAmbient: (String) -> Unit = {},
     onDeleteCustomAmbient: (String) -> Unit = {},
     onChangeAmbientVolume: (Float) -> Unit,
-    onToggleAutoPlayAmbient: (Boolean) -> Unit
+    onToggleAutoPlayAmbient: (Boolean) -> Unit,
+    lastAiVerbatimError: String? = null,
+    onOpenAiDiagnostics: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val isAiMode = readerPrefs.ttsEngineType == TtsEngineType.AI_TTS
@@ -231,12 +234,53 @@ fun StudioScreen(
                     .padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text(
-                    text = "Chế độ giọng đọc toàn ứng dụng",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = primaryInk
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Chế độ giọng đọc toàn ứng dụng",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = primaryInk,
+                        modifier = Modifier.weight(1f)
+                    )
+                    NeoBrutalistPressBox(
+                        onClick = onOpenAiDiagnostics,
+                        isPill = true,
+                        shadowOffset = 2.dp,
+                        pressDepth = 1.5.dp,
+                        borderWidth = 1.3.dp,
+                        containerColor = trayBg,
+                        borderColor = borderCol,
+                        shadowColor = shadowCol,
+                        modifier = Modifier
+                            .height(28.dp)
+                            .testTag("studio_open_ai_diagnostics_button")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.BugReport,
+                                contentDescription = "Kiểm tra hệ thống AI",
+                                tint = IosBlue,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Text(
+                                text = "Kiểm tra hệ thống AI",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = primaryInk,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -629,6 +673,8 @@ fun StudioScreen(
                 isImportingFile = isImportingVoiceFile,
                 draftClonedVoice = draftClonedVoice,
                 activeServicePreviewTag = audioPlaybackState.activePreviewTag,
+                lastAiVerbatimError = lastAiVerbatimError,
+                onOpenAiDiagnostics = onOpenAiDiagnostics,
                 onImportAudioUri = onImportVoiceAudio,
                 onCreateDraftVoice = onCreateDraftClonedVoice,
                 onClearDraftVoice = onClearDraftClonedVoice,

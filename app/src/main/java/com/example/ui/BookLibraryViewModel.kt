@@ -4,6 +4,8 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.audio.AiDiagnosticTestResult
+import com.example.audio.AiSystemDiagnosticReport
 import com.example.audio.AmbientSoundTrack
 import com.example.audio.AudioFileDecoder
 import com.example.audio.ClonedVoiceProfile
@@ -11,6 +13,8 @@ import com.example.audio.ClonedVoiceRepository
 import com.example.audio.DetectedCharacter
 import com.example.audio.ImportedVoiceSample
 import com.example.audio.OfflineOnnxVoiceEngine
+import com.example.audio.OnnxAudioTrackPlayer
+import com.example.audio.OnnxModelAssetHelper
 import com.example.audio.OnnxVoiceEngineMode
 import com.example.data.BookCollection
 import com.example.data.CustomAmbientTrack
@@ -156,6 +160,21 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
 
     private val _draftClonedVoice = MutableStateFlow<PendingDraftClonedVoice?>(null)
     val draftClonedVoice: StateFlow<PendingDraftClonedVoice?> = _draftClonedVoice.asStateFlow()
+
+    private val _lastAiVerbatimError = MutableStateFlow<String?>(null)
+    val lastAiVerbatimError: StateFlow<String?> = _lastAiVerbatimError.asStateFlow()
+
+    private val _aiDiagnosticReport = MutableStateFlow<AiSystemDiagnosticReport?>(null)
+    val aiDiagnosticReport: StateFlow<AiSystemDiagnosticReport?> = _aiDiagnosticReport.asStateFlow()
+
+    private val _isRunningAiDiagnostics = MutableStateFlow(false)
+    val isRunningAiDiagnostics: StateFlow<Boolean> = _isRunningAiDiagnostics.asStateFlow()
+
+    private val _aiDiagnosticTestResult = MutableStateFlow<AiDiagnosticTestResult?>(null)
+    val aiDiagnosticTestResult: StateFlow<AiDiagnosticTestResult?> = _aiDiagnosticTestResult.asStateFlow()
+
+    private val diagnosticAudioPlayer = OnnxAudioTrackPlayer()
+    private var diagnosticAudioJob: Job? = null
 
     val voiceCloneTargetSampleRate: Int
         get() = onnxVoiceEngine.targetSampleRate
@@ -745,6 +764,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     fun importVoiceAudioFile(uri: Uri, onDecoded: (ImportedVoiceSample) -> Unit) {
         if (_isImportingVoiceFile.value) return
         _isImportingVoiceFile.value = true
+        _lastAiVerbatimError.value = null
         viewModelScope.launch {
             try {
                 val decoded = AudioFileDecoder.decodeAudioUriToMonoFloat(
@@ -757,6 +777,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     onDecoded(sample)
                     _statusMessage.value = "Đã nhập & chuẩn hóa 16kHz Mono: \"${sample.displayName}\""
                 }.onFailure { err ->
+                    val fullErr = OnnxModelAssetHelper.formatFullThrowable(err)
+                    _lastAiVerbatimError.value = "Lỗi MediaCodec / giải mã tệp âm thanh:\n$fullErr"
                     _statusMessage.value = err.message ?: "Không thể đọc tệp âm thanh này."
                 }
             } finally {
@@ -767,7 +789,9 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
 
     /**
      * Bước "Tạo" trong Studio: chạy thực sự qua `speaker_encoder.onnx` (với đầu vào Float32 16kHz Mono),
-     * sau đó nếu đã nạp đủ model TTS + Codec Decoder sẽ tổng hợp sẵn câu nghe thử ra file WAV 16-bit PCM chuẩn.
+     * sau đó nếu đã nạp đủ model TTS + Codec Decoder sẽ tổng hợp sẵn câu mẫu tiếng Việt yêu cầu
+     * ("Nó vẫn hiển thị rất nhiều, vì thế tôi đã bay ra ngoài hà nội để cảm nhận sắc xuân ở đây thật là tươi đẹp.")
+     * ra file WAV 16-bit PCM chuẩn cho nút Nghe thử.
      */
     fun createDraftClonedVoice(
         name: String,
@@ -777,6 +801,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     ) {
         if (_isExtractingVoiceClone.value || samples.isEmpty()) return
         _isExtractingVoiceClone.value = true
+        _lastAiVerbatimError.value = null
         viewModelScope.launch {
             try {
                 val samples16k = if (sampleRate != AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE) {
@@ -797,8 +822,10 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 _voiceCloneEngineMode.value = onnxVoiceEngine.engineMode
 
                 if (extracted.embedding.isEmpty()) {
-                    _statusMessage.value = extracted.errorMessage
+                    val err = extracted.errorMessage
                         ?: "Không trích xuất được vector giọng nói từ speaker_encoder.onnx."
+                    _lastAiVerbatimError.value = err
+                    _statusMessage.value = err.lineSequence().firstOrNull() ?: err
                     return@launch
                 }
 
@@ -809,7 +836,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     .coerceIn(2.0f, 8.5f)
 
                 // Tạo file WAV 16-bit PCM chuẩn (đủ 44-byte header) cho nút Nghe thử bản nháp:
-                // Ưu tiên câu tổng hợp bằng ONNX TTS + Codec Decoder nếu sẵn sàng; ngược lại ghi WAV mẫu 16kHz sạch.
+                // Ưu tiên tổng hợp câu mẫu tiếng Việt qua ONNX TTS + Codec Decoder; nếu chưa đủ model / gặp lỗi thì giữ nguyên log lỗi gốc.
                 var synthPreviewNote: String? = null
                 var usedSynthPreview = false
                 val draftWavPath = withContext(Dispatchers.IO) {
@@ -817,7 +844,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     val outWav = File(dir, "draft_${System.currentTimeMillis()}.wav")
                     if (onnxVoiceEngine.isFullOnnxSynthesisReady()) {
                         val synthRes = onnxVoiceEngine.synthesizeSentenceDetailed(
-                            sentence = "Xin chào, đây là giọng đọc nhân bản AI của bạn.",
+                            sentence = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
                             speakerEmbedding = extracted.embedding,
                             speed = 1.0f
                         )
@@ -829,6 +856,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                         } else {
                             synthPreviewNote = synthRes.errorMessage
                         }
+                    } else {
+                        synthPreviewNote = onnxVoiceEngine.getReadinessDiagnostic()
                     }
                     AudioFileDecoder.writePcm16MonoWav(
                         outWav,
@@ -850,19 +879,27 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     synthesizedPreview = usedSynthPreview
                 )
 
+                val combinedDiagErr = listOfNotNull(
+                    extracted.errorMessage?.takeIf { it.isNotBlank() },
+                    synthPreviewNote?.takeIf { it.isNotBlank() }
+                ).joinToString("\n\n")
+                _lastAiVerbatimError.value = combinedDiagErr.ifBlank { null }
+
                 _statusMessage.value = when {
                     usedSynthPreview && extracted.usedOnnxEncoder ->
-                        "Đã tạo giọng ONNX \"$cleanName\" (${extracted.embedding.size}d) — Bấm Nghe thử rồi bấm Lưu."
+                        "Đã tạo giọng ONNX \"$cleanName\" (${extracted.embedding.size}d) — Bấm Nghe thử câu mẫu rồi bấm Lưu."
                     !synthPreviewNote.isNullOrBlank() ->
-                        "Đã trích xuất vector (${extracted.embedding.size}d), nhưng tổng hợp thử lỗi: $synthPreviewNote"
+                        "Đã tạo bản nháp (${extracted.embedding.size}d), tổng hợp ONNX báo lỗi (xem log chi tiết bên dưới)."
                     !extracted.errorMessage.isNullOrBlank() ->
-                        "Cảnh báo ONNX: ${extracted.errorMessage}"
+                        "Cảnh báo ONNX (xem log chi tiết bên dưới)."
                     else ->
                         "Đã tạo giọng \"$cleanName\" (${extracted.embedding.size}d) — Bấm Nghe thử để kiểm tra rồi bấm Lưu."
                 }
                 onCreated()
-            } catch (e: Exception) {
-                _statusMessage.value = "Không thể tạo giọng nhân bản: ${e.message ?: "lỗi xử lý"}"
+            } catch (e: Throwable) {
+                val fullErr = OnnxModelAssetHelper.formatFullThrowable(e)
+                _lastAiVerbatimError.value = "Lỗi tạo giọng AI ONNX:\n$fullErr"
+                _statusMessage.value = "Không thể tạo giọng nhân bản: ${e.message ?: e.javaClass.simpleName}"
             } finally {
                 _isExtractingVoiceClone.value = false
             }
@@ -871,6 +908,134 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
 
     fun clearDraftClonedVoice() {
         _draftClonedVoice.value = null
+    }
+
+    fun clearLastAiVerbatimError() {
+        _lastAiVerbatimError.value = null
+    }
+
+    // -------------------------------------------------------------------------
+    // AI System Diagnostics ("Kiểm tra hệ thống AI")
+    // -------------------------------------------------------------------------
+
+    fun runAiSystemDiagnostics(forceResync: Boolean = false) {
+        if (_isRunningAiDiagnostics.value) return
+        _isRunningAiDiagnostics.value = true
+        viewModelScope.launch {
+            try {
+                val report = onnxVoiceEngine.runFullSystemDiagnostics(forceResync = forceResync)
+                _aiDiagnosticReport.value = report
+                _voiceCloneEngineMode.value = report.engineMode
+            } catch (e: Throwable) {
+                _aiDiagnosticTestResult.value = AiDiagnosticTestResult(
+                    title = "Quét hệ thống AI",
+                    success = false,
+                    elapsedMs = 0L,
+                    detailLog = "NGOẠI LỆ NGUYÊN VĂN:\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
+                )
+            } finally {
+                _isRunningAiDiagnostics.value = false
+            }
+        }
+    }
+
+    fun runAiDiagnosticMediaCodecTest(uri: Uri) {
+        if (_isRunningAiDiagnostics.value) return
+        _isRunningAiDiagnostics.value = true
+        viewModelScope.launch {
+            val startMs = System.currentTimeMillis()
+            try {
+                val res = AudioFileDecoder.decodeAudioUriToMonoFloat(
+                    context = getApplication(),
+                    uri = uri,
+                    targetSampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
+                )
+                val elapsed = System.currentTimeMillis() - startMs
+                res.onSuccess { sample ->
+                    val wavSize = File(sample.previewWavPath).length()
+                    _aiDiagnosticTestResult.value = AiDiagnosticTestResult(
+                        title = "Thử MediaCodec (${sample.displayName})",
+                        success = true,
+                        elapsedMs = elapsed,
+                        detailLog = buildString {
+                            appendLine("Trạng thái: THÀNH CÔNG")
+                            appendLine("Thời gian giải mã: ${elapsed} ms")
+                            appendLine("Tên file: ${sample.displayName}")
+                            appendLine("Đầu ra chuẩn hóa: ${sample.samples.size} mẫu Float32 Mono @ ${sample.sampleRate} Hz")
+                            appendLine("Thời lượng: ${String.format(java.util.Locale.US, "%.2f", sample.durationSeconds)} giây")
+                            appendLine("File WAV 16-bit PCM: ${sample.previewWavPath} ($wavSize bytes)")
+                        }.trimEnd()
+                    )
+                }.onFailure { err ->
+                    _aiDiagnosticTestResult.value = AiDiagnosticTestResult(
+                        title = "Thử MediaCodec (giải mã âm thanh)",
+                        success = false,
+                        elapsedMs = elapsed,
+                        detailLog = "LỖI MEDIACODEC / EXTRACTOR NGUYÊN VĂN:\n${OnnxModelAssetHelper.formatFullThrowable(err)}"
+                    )
+                }
+            } finally {
+                _isRunningAiDiagnostics.value = false
+            }
+        }
+    }
+
+    fun runAiDiagnosticVoiceCreateTest() {
+        if (_isRunningAiDiagnostics.value) return
+        _isRunningAiDiagnostics.value = true
+        viewModelScope.launch {
+            try {
+                val draftSamples = _draftClonedVoice.value?.samples
+                val res = onnxVoiceEngine.runDiagnosticVoiceCreateTest(
+                    sampleFloat16k = draftSamples,
+                    sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
+                )
+                _aiDiagnosticTestResult.value = res
+                _aiDiagnosticReport.value = onnxVoiceEngine.runFullSystemDiagnostics(forceResync = false)
+            } finally {
+                _isRunningAiDiagnostics.value = false
+            }
+        }
+    }
+
+    fun runAiDiagnosticSentenceReadTest() {
+        if (_isRunningAiDiagnostics.value) return
+        stopAiDiagnosticAudio()
+        _isRunningAiDiagnostics.value = true
+        viewModelScope.launch {
+            try {
+                val selectedEmb = withContext(Dispatchers.IO) {
+                    _draftClonedVoice.value?.embedding
+                        ?: _readerPrefs.value.selectedClonedVoiceId?.let { id ->
+                            clonedVoiceRepository.findById(id)?.let { clonedVoiceRepository.loadEmbedding(it) }
+                        }
+                }
+                val (res, audio) = onnxVoiceEngine.runDiagnosticSentenceReadTest(
+                    sentence = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
+                    speakerEmbedding = selectedEmb
+                )
+                _aiDiagnosticTestResult.value = res
+                _aiDiagnosticReport.value = onnxVoiceEngine.runFullSystemDiagnostics(forceResync = false)
+
+                if (audio != null) {
+                    diagnosticAudioJob = viewModelScope.launch(Dispatchers.IO) {
+                        diagnosticAudioPlayer.playBlocking(
+                            samples = audio.pcmFloat,
+                            sampleRate = audio.sampleRate,
+                            speed = 1.0f
+                        )
+                    }
+                }
+            } finally {
+                _isRunningAiDiagnostics.value = false
+            }
+        }
+    }
+
+    fun stopAiDiagnosticAudio() {
+        diagnosticAudioJob?.cancel()
+        diagnosticAudioJob = null
+        diagnosticAudioPlayer.stopImmediately()
     }
 
     /**
@@ -1236,6 +1401,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
 
     override fun onCleared() {
         super.onCleared()
+        stopAiDiagnosticAudio()
         onnxVoiceEngine.close()
     }
 

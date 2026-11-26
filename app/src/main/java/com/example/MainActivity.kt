@@ -61,6 +61,7 @@ import com.example.service.BookAudioPlaybackService
 import com.example.ui.BookLibraryViewModel
 import com.example.ui.LibraryImportFlowState
 import com.example.ui.MainViewModel
+import com.example.ui.components.AiSystemDiagnosticsDialog
 import com.example.ui.components.AppMainTab
 import com.example.ui.components.EpubMetadataEditorDialog
 import com.example.ui.components.FloatingBackgroundAudioBanner
@@ -212,6 +213,10 @@ private fun EpubCleanNavHost(
     val isExtractingVoiceClone by libraryViewModel.isExtractingVoiceClone.collectAsStateWithLifecycle()
     val isImportingVoiceFile by libraryViewModel.isImportingVoiceFile.collectAsStateWithLifecycle()
     val draftClonedVoice by libraryViewModel.draftClonedVoice.collectAsStateWithLifecycle()
+    val lastAiVerbatimError by libraryViewModel.lastAiVerbatimError.collectAsStateWithLifecycle()
+    val aiDiagnosticReport by libraryViewModel.aiDiagnosticReport.collectAsStateWithLifecycle()
+    val isRunningAiDiagnostics by libraryViewModel.isRunningAiDiagnostics.collectAsStateWithLifecycle()
+    val aiDiagnosticTestResult by libraryViewModel.aiDiagnosticTestResult.collectAsStateWithLifecycle()
     val audioPlaybackState by libraryViewModel.audioPlaybackState.collectAsStateWithLifecycle()
 
     LaunchedEffect(statusToastMessage) {
@@ -247,6 +252,7 @@ private fun EpubCleanNavHost(
     var activeMainTab by rememberSaveable { mutableStateOf(AppMainTab.CLEAN_EPUB) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showLibraryReaderSettingsSheet by remember { mutableStateOf(false) }
+    var showAiDiagnosticsDialog by remember { mutableStateOf(false) }
     var showReviewMetadataDialog by remember { mutableStateOf(false) }
     var coverPickerForReview by remember { mutableStateOf(false) }
 
@@ -702,6 +708,11 @@ private fun EpubCleanNavHost(
                             onChangeAmbientVolume = { vol -> libraryViewModel.setAmbientVolume(vol) },
                             onToggleAutoPlayAmbient = { enabled ->
                                 libraryViewModel.setAutoPlayAmbientWithAudio(enabled)
+                            },
+                            lastAiVerbatimError = lastAiVerbatimError,
+                            onOpenAiDiagnostics = {
+                                showAiDiagnosticsDialog = true
+                                libraryViewModel.runAiSystemDiagnostics(forceResync = false)
                             }
                         )
                     }
@@ -758,7 +769,11 @@ private fun EpubCleanNavHost(
                 onSelectCustomAmbient = { id -> libraryViewModel.selectCustomAmbientTrack(id) },
                 onDeleteCustomAmbient = { id -> libraryViewModel.deleteCustomAmbientTrack(id) },
                 clonedVoices = clonedVoices,
-                onSelectClonedVoice = { id -> libraryViewModel.selectClonedVoice(id) }
+                onSelectClonedVoice = { id -> libraryViewModel.selectClonedVoice(id) },
+                onOpenAiDiagnostics = {
+                    showAiDiagnosticsDialog = true
+                    libraryViewModel.runAiSystemDiagnostics(forceResync = false)
+                }
             )
         }
 
@@ -932,6 +947,24 @@ private fun EpubCleanNavHost(
             importErrorLibLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
         },
         onDismiss = { showSettingsDialog = false }
+    )
+
+    // AI System Diagnostics Dialog ("Kiểm tra hệ thống AI")
+    AiSystemDiagnosticsDialog(
+        visible = showAiDiagnosticsDialog,
+        report = aiDiagnosticReport,
+        isRunning = isRunningAiDiagnostics,
+        testResult = aiDiagnosticTestResult,
+        lastVerbatimError = lastAiVerbatimError,
+        onRefresh = { forceResync -> libraryViewModel.runAiSystemDiagnostics(forceResync = forceResync) },
+        onRunMediaCodecTest = { uri -> libraryViewModel.runAiDiagnosticMediaCodecTest(uri) },
+        onRunVoiceCreateTest = { libraryViewModel.runAiDiagnosticVoiceCreateTest() },
+        onRunSentenceReadTest = { libraryViewModel.runAiDiagnosticSentenceReadTest() },
+        onStopAudio = { libraryViewModel.stopAiDiagnosticAudio() },
+        onDismiss = {
+            libraryViewModel.stopAiDiagnosticAudio()
+            showAiDiagnosticsDialog = false
+        }
     )
 
     // Library General Reading & Audio Settings Sheet (2 side-by-side iOS pills)
