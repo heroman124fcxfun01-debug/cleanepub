@@ -26,6 +26,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ArrowDropDown
+import androidx.compose.material.icons.rounded.ArrowDropUp
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
@@ -37,10 +39,10 @@ import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.RecordVoiceOver
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.WaterDrop
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -60,6 +62,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
@@ -75,6 +78,7 @@ import com.example.audio.DetectedCharacter
 import com.example.data.LibraryManager
 import com.example.data.ReaderPreferences
 import com.example.data.ReaderVoiceProfile
+import com.example.data.TtsEngineType
 import com.example.service.DeviceOfflineVoice
 import com.example.ui.theme.IosBlue
 
@@ -94,6 +98,7 @@ fun ReaderAudioSettingsSheetContent(
     scannedCharacters: List<DetectedCharacter>,
     showCharacterVoicePicker: Boolean,
     savedCharacterAssignments: Map<String, ReaderVoiceProfile>,
+    activePreviewTag: String? = null,
     onSelectNarratorVoice: (ReaderVoiceProfile) -> Unit,
     onSelectSystemVoice: (String?) -> Unit,
     onRefreshDeviceVoices: () -> Unit,
@@ -105,19 +110,22 @@ fun ReaderAudioSettingsSheetContent(
     onPreviewAdvanced: (pitch: Float, rate: Float, pauseMs: Int) -> Unit,
     onResetAdvancedDefaults: () -> Unit,
     onPreviewVoice: (ReaderVoiceProfile, Float) -> Unit,
+    onPreviewClonedVoice: (String?) -> Unit = {},
     onToggleCharacterVoicesEnabled: (Boolean) -> Unit,
     onScanCharactersClick: () -> Unit,
+    onToggleCharacterPickerExpanded: () -> Unit = {},
     onConfirmCharacterAssignments: (Map<String, ReaderVoiceProfile>) -> Unit,
     onSelectAmbientSound: (AmbientSoundTrack) -> Unit,
     onChangeAmbientVolume: (Float) -> Unit,
     clonedVoices: List<ClonedVoiceProfile> = emptyList(),
     onSelectClonedVoice: (String?) -> Unit = {},
-    onOpenVoiceCloneDialog: () -> Unit = {},
     onClose: () -> Unit
 ) {
     var narratorDropdownExpanded by remember { mutableStateOf(false) }
+    val isAiMode = readerPrefs.ttsEngineType == TtsEngineType.AI_TTS
     val activeClonedVoice = remember(readerPrefs.selectedClonedVoiceId, clonedVoices) {
         clonedVoices.firstOrNull { it.id == readerPrefs.selectedClonedVoiceId }
+            ?: clonedVoices.firstOrNull()
     }
 
     // Draft character -> voice map while the scanned character picker is open
@@ -217,12 +225,16 @@ fun ReaderAudioSettingsSheetContent(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             // =================================================================
-            // 1. GIỌNG NGƯỜI DẪN TRUYỆN — Dạng mũi tên xổ xuống (Dropdown)
+            // 1. GIỌNG NGƯỜI DẪN TRUYỆN — Chỉ hiển thị danh sách giọng của chế độ đang bật
             // =================================================================
             AudioSectionBlock(
-                icon = Icons.Rounded.RecordVoiceOver,
-                title = "Giọng người dẫn truyện",
-                subtitle = "Chọn giọng mặc định để đọc lời kể chuyện"
+                icon = if (isAiMode) Icons.Rounded.AutoAwesome else Icons.Rounded.RecordVoiceOver,
+                title = if (isAiMode) "Giọng AI Nhân bản" else "Giọng Hệ thống",
+                subtitle = if (isAiMode) {
+                    "Đang bật AI Nhân bản • Quản lý & tạo thêm giọng trong Studio"
+                } else {
+                    "Đang bật Giọng Hệ thống • Đổi chế độ trong tab Studio"
+                }
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -253,8 +265,12 @@ fun ReaderAudioSettingsSheetContent(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text(
-                                    text = activeClonedVoice?.let { "✦ ${it.name} (Nhân bản AI)" }
-                                        ?: readerPrefs.voiceProfile.displayName,
+                                    text = if (isAiMode) {
+                                        activeClonedVoice?.let { "✦ ${it.name}" }
+                                            ?: "Chưa có giọng AI (tạo ở Studio)"
+                                    } else {
+                                        readerPrefs.voiceProfile.displayName
+                                    },
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = primaryInk,
@@ -271,30 +287,74 @@ fun ReaderAudioSettingsSheetContent(
                             }
                         }
 
-                        DropdownMenu(
+                        Neo3DDropdownMenu(
                             expanded = narratorDropdownExpanded,
                             onDismissRequest = { narratorDropdownExpanded = false },
                             containerColor = itemBg
                         ) {
-                            if (clonedVoices.isNotEmpty()) {
-                                clonedVoices.forEach { cloned ->
-                                    val selected = readerPrefs.selectedClonedVoiceId == cloned.id
+                            if (isAiMode) {
+                                if (clonedVoices.isEmpty()) {
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = "Chưa có giọng nhân bản — Tạo & lưu trong Studio",
+                                                fontSize = 11.5.sp,
+                                                color = secondaryInk
+                                            )
+                                        },
+                                        onClick = { narratorDropdownExpanded = false }
+                                    )
+                                } else {
+                                    clonedVoices.forEach { cloned ->
+                                        val selected = activeClonedVoice?.id == cloned.id
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(7.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.AutoAwesome,
+                                                        contentDescription = null,
+                                                        tint = IosBlue,
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
+                                                    Text(
+                                                        text = cloned.name,
+                                                        fontSize = 12.sp,
+                                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                                                        color = if (selected) IosBlue else primaryInk
+                                                    )
+                                                    if (selected) {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.Check,
+                                                            contentDescription = null,
+                                                            tint = IosBlue,
+                                                            modifier = Modifier.size(14.dp)
+                                                        )
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                onSelectClonedVoice(cloned.id)
+                                                narratorDropdownExpanded = false
+                                            }
+                                        )
+                                    }
+                                }
+                            } else {
+                                ReaderVoiceProfile.entries.forEach { profile ->
+                                    val selected = readerPrefs.voiceProfile == profile
                                     DropdownMenuItem(
                                         text = {
                                             Row(
                                                 verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(7.dp)
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
-                                                Icon(
-                                                    imageVector = Icons.Rounded.AutoAwesome,
-                                                    contentDescription = null,
-                                                    tint = IosBlue,
-                                                    modifier = Modifier.size(14.dp)
-                                                )
                                                 Text(
-                                                    text = "${cloned.name} (AI)",
+                                                    text = profile.displayName,
                                                     fontSize = 12.sp,
-                                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                                                     color = if (selected) IosBlue else primaryInk
                                                 )
                                                 if (selected) {
@@ -308,84 +368,35 @@ fun ReaderAudioSettingsSheetContent(
                                             }
                                         },
                                         onClick = {
-                                            onSelectClonedVoice(cloned.id)
+                                            onSelectNarratorVoice(profile)
                                             narratorDropdownExpanded = false
                                         }
                                     )
                                 }
-                                HorizontalDivider(thickness = 0.8.dp, color = borderCol.copy(alpha = 0.2f))
-                            }
-                            DropdownMenuItem(
-                                text = {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.AutoAwesome,
-                                            contentDescription = null,
-                                            tint = IosBlue,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Text(
-                                            text = "+ Tạo giọng nhân bản mới",
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = IosBlue
-                                        )
-                                    }
-                                },
-                                onClick = {
-                                    narratorDropdownExpanded = false
-                                    onOpenVoiceCloneDialog()
-                                }
-                            )
-                            HorizontalDivider(thickness = 0.8.dp, color = borderCol.copy(alpha = 0.2f))
-                            ReaderVoiceProfile.entries.forEach { profile ->
-                                val selected = activeClonedVoice == null && readerPrefs.voiceProfile == profile
-                                DropdownMenuItem(
-                                    text = {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                        ) {
-                                            Text(
-                                                text = profile.displayName,
-                                                fontSize = 12.sp,
-                                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                                color = if (selected) IosBlue else primaryInk
-                                            )
-                                            if (selected) {
-                                                Icon(
-                                                    imageVector = Icons.Rounded.Check,
-                                                    contentDescription = null,
-                                                    tint = IosBlue,
-                                                    modifier = Modifier.size(14.dp)
-                                                )
-                                            }
-                                        }
-                                    },
-                                    onClick = {
-                                        onSelectNarratorVoice(profile)
-                                        narratorDropdownExpanded = false
-                                    }
-                                )
                             }
                         }
                     }
 
-                    // Nút nghe thử nhanh giọng dẫn truyện hiện tại
+                    // Nút nghe thử dạng công tắc (bấm lần 1 phát, bấm lần 2 tắt ngay)
+                    val narratorPreviewTag = if (isAiMode) "reader_narrator_ai" else "reader_narrator_sys"
+                    val isPreviewingNarrator = activePreviewTag == narratorPreviewTag
+                    val canPreviewNarrator = !isAiMode || activeClonedVoice != null
                     NeoBrutalistPressBox(
                         onClick = {
-                            val pitch = readerPrefs.resolvePlaybackPitch(readerPrefs.voiceProfile)
-                            onPreviewVoice(readerPrefs.voiceProfile, pitch)
+                            if (isAiMode) {
+                                onPreviewClonedVoice(activeClonedVoice?.id)
+                            } else {
+                                val pitch = readerPrefs.resolvePlaybackPitch(readerPrefs.voiceProfile)
+                                onPreviewVoice(readerPrefs.voiceProfile, pitch)
+                            }
                         },
+                        enabled = canPreviewNarrator,
                         isPill = false,
                         cornerRadius = 12.dp,
                         shadowOffset = 3.dp,
                         pressDepth = 2.dp,
                         borderWidth = 1.5.dp,
-                        containerColor = itemBg,
+                        containerColor = if (isPreviewingNarrator) IosBlue else itemBg,
                         borderColor = borderCol,
                         shadowColor = neoHardShadowColor(),
                         modifier = Modifier.testTag("narrator_voice_preview_button")
@@ -396,16 +407,16 @@ fun ReaderAudioSettingsSheetContent(
                             horizontalArrangement = Arrangement.spacedBy(3.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Rounded.PlayArrow,
-                                contentDescription = "Nghe thử giọng dẫn truyện",
-                                tint = IosBlue,
+                                imageVector = if (isPreviewingNarrator) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
+                                contentDescription = if (isPreviewingNarrator) "Dừng nghe thử" else "Nghe thử giọng dẫn truyện",
+                                tint = if (isPreviewingNarrator) Color.White else IosBlue,
                                 modifier = Modifier.size(15.dp)
                             )
                             Text(
-                                text = "Thử",
+                                text = if (isPreviewingNarrator) "Dừng" else "Thử",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = primaryInk
+                                color = if (isPreviewingNarrator) Color.White else primaryInk
                             )
                         }
                     }
@@ -413,66 +424,110 @@ fun ReaderAudioSettingsSheetContent(
             }
 
             // =================================================================
-            // 2. TÙY CHỈNH NÂNG CAO (Gọn 1/2 chiều cao • Bật mới sáng • Nghe thử & OK mới lưu)
+            // 2. TÙY CHỈNH NÂNG CAO (Khóa tối khi đang ở chế độ AI Nhân bản)
             // =================================================================
-            AdvancedCustomVoiceSettingsSection(
-                readerPrefs = readerPrefs,
-                onToggleAdvancedEnabled = onToggleAdvancedCustom,
-                onPitchChanged = onAdvancedPitchChanged,
-                onSpeechRateChanged = onAdvancedRateChanged,
-                onSentencePauseChanged = onSentencePauseChanged,
-                onPreviewAdvanced = onPreviewAdvanced,
-                onResetDefaults = onResetAdvancedDefaults
-            )
+            Box(modifier = Modifier.alpha(if (isAiMode) 0.38f else 1f)) {
+                AdvancedCustomVoiceSettingsSection(
+                    readerPrefs = readerPrefs,
+                    onToggleAdvancedEnabled = onToggleAdvancedCustom,
+                    onPitchChanged = onAdvancedPitchChanged,
+                    onSpeechRateChanged = onAdvancedRateChanged,
+                    onSentencePauseChanged = onSentencePauseChanged,
+                    onPreviewAdvanced = onPreviewAdvanced,
+                    onResetDefaults = onResetAdvancedDefaults,
+                    isPreviewPlaying = activePreviewTag == "reader_advanced_preview",
+                    sectionEnabled = !isAiMode
+                )
+            }
 
             // =================================================================
-            // 4. PHÂN VAI NHÂN VẬT (Nút Quét + Công tắc Bật/Tắt giọng nhân vật bên dưới)
+            // 3. PHÂN VAI NHÂN VẬT (Quét 1 lần lưu sẵn + nút tam giác ▼ xổ bảng ngay)
             // =================================================================
             AudioSectionBlock(
                 icon = Icons.Rounded.DocumentScanner,
                 title = "Phân vai nhân vật",
-                subtitle = if (savedCharacterAssignments.isNotEmpty() && !showCharacterVoicePicker) {
-                    "Đã gán giọng cho ${savedCharacterAssignments.size} nhân vật • Bấm Quét để chỉnh"
-                } else {
-                    "Quét truyện tìm 7 nhân vật xuất hiện nhiều nhất"
+                subtitle = when {
+                    scannedCharacters.isNotEmpty() -> {
+                        "Đã lưu ${scannedCharacters.size} nhân vật (${savedCharacterAssignments.size} đã gán) • Bấm ▼ để mở"
+                    }
+                    else -> "Quét 1 lần cho sách này để lưu bảng nhân vật"
                 },
                 trailingAction = {
-                    NeoBrutalistPressBox(
-                        onClick = onScanCharactersClick,
-                        enabled = !isScanningCharacters,
-                        isPill = true,
-                        shadowOffset = 3.dp,
-                        pressDepth = 2.dp,
-                        borderWidth = 1.5.dp,
-                        containerColor = IosBlue,
-                        borderColor = borderCol,
-                        shadowColor = neoHardShadowColor(),
-                        modifier = Modifier.testTag("audio_scan_characters_button")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        NeoBrutalistPressBox(
+                            onClick = onScanCharactersClick,
+                            enabled = !isScanningCharacters,
+                            isPill = true,
+                            shadowOffset = 3.dp,
+                            pressDepth = 2.dp,
+                            borderWidth = 1.5.dp,
+                            containerColor = IosBlue,
+                            borderColor = borderCol,
+                            shadowColor = neoHardShadowColor(),
+                            modifier = Modifier.testTag("audio_scan_characters_button")
                         ) {
-                            if (isScanningCharacters) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(13.dp),
-                                    strokeWidth = 1.8.dp,
+                            Row(
+                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                if (isScanningCharacters) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(13.dp),
+                                        strokeWidth = 1.8.dp,
+                                        color = Color.White
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Rounded.DocumentScanner,
+                                        contentDescription = "Quét nhân vật truyện",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                                Text(
+                                    text = if (isScanningCharacters) "Đang quét…" else "Quét",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
                                     color = Color.White
                                 )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Rounded.DocumentScanner,
-                                    contentDescription = "Quét nhân vật truyện",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(14.dp)
-                                )
                             }
-                            Text(
-                                text = if (isScanningCharacters) "Đang quét..." else "Quét",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White
+                        }
+
+                        // Nút tam giác bên cạnh nút Quét — ấn là xổ/thu bảng danh sách nhân vật đã lưu
+                        val hasSavedList = scannedCharacters.isNotEmpty()
+                        NeoBrutalistPressBox(
+                            onClick = onToggleCharacterPickerExpanded,
+                            enabled = hasSavedList && !isScanningCharacters,
+                            isPill = false,
+                            cornerRadius = 9.dp,
+                            shadowOffset = 2.5.dp,
+                            pressDepth = 1.8.dp,
+                            borderWidth = 1.5.dp,
+                            containerColor = if (showCharacterVoicePicker && hasSavedList) IosBlue else itemBg,
+                            borderColor = borderCol,
+                            shadowColor = if (hasSavedList) neoHardShadowColor() else Color.Transparent,
+                            modifier = Modifier
+                                .size(31.dp)
+                                .alpha(if (hasSavedList) 1f else 0.38f)
+                                .testTag("audio_characters_expand_toggle")
+                        ) {
+                            Icon(
+                                imageVector = if (showCharacterVoicePicker) {
+                                    Icons.Rounded.ArrowDropUp
+                                } else {
+                                    Icons.Rounded.ArrowDropDown
+                                },
+                                contentDescription = if (showCharacterVoicePicker) {
+                                    "Thu gọn bảng nhân vật đã lưu"
+                                } else {
+                                    "Mở bảng nhân vật đã lưu"
+                                },
+                                tint = if (showCharacterVoicePicker && hasSavedList) Color.White else primaryInk,
+                                modifier = Modifier.size(22.dp)
                             )
                         }
                     }
@@ -645,7 +700,7 @@ fun ReaderAudioSettingsSheetContent(
                                             }
                                         }
 
-                                        DropdownMenu(
+                                        Neo3DDropdownMenu(
                                             expanded = expandedMenu,
                                             onDismissRequest = { expandedMenu = false },
                                             containerColor = itemBg

@@ -821,7 +821,47 @@ class LibraryManager(
         val toc = loadBookToc(bookId)
         if (toc.isEmpty()) return emptyList()
         val chaptersParagraphs = toc.map { chap -> loadChapterContent(bookId, chap).paragraphs }
-        return StoryCharacterScanner.scanTopCharacters(chaptersParagraphs, maxCharacters = maxCharacters)
+        val detected = StoryCharacterScanner.scanTopCharacters(chaptersParagraphs, maxCharacters = maxCharacters)
+        saveScannedCharacters(bookId, detected)
+        return detected
+    }
+
+    fun loadScannedCharacters(bookId: String): List<DetectedCharacter> {
+        val file = File(File(booksRootDir, bookId), SCANNED_CHARACTERS_FILE_NAME)
+        if (!file.exists()) return emptyList()
+        return runCatching {
+            val arr = JSONArray(file.readText(Charsets.UTF_8))
+            val result = ArrayList<DetectedCharacter>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val name = obj.optString("name").trim()
+                val count = obj.optInt("mentionCount", 1).coerceAtLeast(1)
+                if (name.isNotEmpty()) {
+                    result.add(DetectedCharacter(name = name, mentionCount = count))
+                }
+            }
+            result
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveScannedCharacters(bookId: String, characters: List<DetectedCharacter>) {
+        val bookDir = File(booksRootDir, bookId)
+        if (!bookDir.exists()) return
+        val file = File(bookDir, SCANNED_CHARACTERS_FILE_NAME)
+        runCatching {
+            val arr = JSONArray()
+            characters.forEach { c ->
+                if (c.name.isNotBlank()) {
+                    arr.put(
+                        JSONObject().apply {
+                            put("name", c.name)
+                            put("mentionCount", c.mentionCount)
+                        }
+                    )
+                }
+            }
+            file.writeText(arr.toString(), Charsets.UTF_8)
+        }
     }
 
     fun loadCharacterVoiceAssignments(bookId: String): Map<String, ReaderVoiceProfile> {
@@ -1174,6 +1214,7 @@ class LibraryManager(
         private const val TOC_FILE_NAME = "toc.json"
         private const val COVER_FILE_NAME = "cover.jpg"
         private const val CHARACTER_VOICES_FILE_NAME = "character_voices.json"
+        private const val SCANNED_CHARACTERS_FILE_NAME = "scanned_characters.json"
         private const val CUSTOM_FONTS_SUBDIR = "custom_fonts"
         private const val CUSTOM_FONTS_INDEX_FILE = "fonts_index.json"
         private const val COVER_THUMB_MAX_PX = 240

@@ -59,7 +59,6 @@ import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SpaceBar
 import androidx.compose.material.icons.rounded.Spellcheck
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -103,6 +102,7 @@ import com.example.ui.components.Ios3DCircleIconButton
 import com.example.ui.components.Ios3DSurfacePillButton
 import com.example.ui.components.IosFloatingDialog
 import com.example.ui.components.IosPrimaryButton
+import com.example.ui.components.Neo3DDropdownMenu
 import com.example.ui.components.NeoBrutalistPressBox
 import com.example.ui.components.NeoFolderCard
 import com.example.ui.components.NeoPaperStackContainer
@@ -1028,10 +1028,10 @@ private fun HistoryFileCard(
                     )
                 }
 
-                DropdownMenu(
+                Neo3DDropdownMenu(
                     expanded = menuExpanded,
                     onDismissRequest = { menuExpanded = false },
-                    modifier = Modifier.background(MaterialTheme.colorScheme.surface)
+                    containerColor = neoPaperSurfaceColor()
                 ) {
                     DropdownMenuItem(
                         text = {

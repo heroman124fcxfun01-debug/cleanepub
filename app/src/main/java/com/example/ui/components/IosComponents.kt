@@ -33,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.FileCopy
 import androidx.compose.material.icons.rounded.SaveAs
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -52,6 +53,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -134,6 +136,57 @@ fun Modifier.neoHardOffsetShadow(
                 cornerRadius = CornerRadius(cr, cr)
             )
         }
+    }
+}
+
+/**
+ * Swiss Neo-Brutalist 3D Art-Paper Popup Menu (`Neo3DDropdownMenu`):
+ * - Replaces flat plain-white Material 3 DropdownMenu across the entire app
+ * - Warm ivory/slate art-paper card, razor-sharp `1.5.dp` solid ink border,
+ *   and solid `3.5.dp, 3.5.dp` hard offset 3D shadow with zero blurry Android halo.
+ */
+@Composable
+fun Neo3DDropdownMenu(
+    expanded: Boolean,
+    onDismissRequest: () -> Unit,
+    modifier: Modifier = Modifier,
+    containerColor: Color = neoPaperSurfaceColor(),
+    borderColor: Color = neoInkBorderColor(),
+    shadowColor: Color = neoHardShadowColor(),
+    cornerRadius: Dp = 14.dp,
+    shadowOffset: Dp = 3.5.dp,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val cardShape = RoundedCornerShape(cornerRadius)
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismissRequest,
+        containerColor = Color.Transparent,
+        shadowElevation = 0.dp,
+        tonalElevation = 0.dp,
+        shape = RectangleShape,
+        border = null
+    ) {
+        Column(
+            modifier = modifier
+                .padding(
+                    start = 2.dp,
+                    top = 2.dp,
+                    end = shadowOffset + 2.dp,
+                    bottom = shadowOffset + 2.dp
+                )
+                .neoHardOffsetShadow(
+                    cornerRadius = cornerRadius,
+                    offsetX = shadowOffset,
+                    offsetY = shadowOffset,
+                    shadowColor = shadowColor
+                )
+                .clip(cardShape)
+                .background(containerColor)
+                .border(width = 1.5.dp, color = borderColor, shape = cardShape)
+                .padding(vertical = 4.dp),
+            content = content
+        )
     }
 }
 

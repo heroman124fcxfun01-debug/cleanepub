@@ -63,7 +63,6 @@ import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -106,6 +105,7 @@ import com.example.ui.components.IosPrimaryButton
 import com.example.ui.components.LibraryBookCoverThumbnail
 import com.example.ui.components.LibraryImportFlowDialogs
 import com.example.ui.components.LibraryInfoStatsDialog
+import com.example.ui.components.Neo3DDropdownMenu
 import com.example.ui.components.NeoBrutalistPressBox
 import com.example.ui.components.NeoPaperStackContainer
 import com.example.ui.components.PickCollectionForBookDialog
@@ -459,71 +459,111 @@ fun BookLibraryScreen(
                             }
                         }
 
-                        DropdownMenu(
+                        Neo3DDropdownMenu(
                             expanded = showQuickLinkMenu,
                             onDismissRequest = { showQuickLinkMenu = false },
-                            modifier = Modifier.background(surfaceColor)
+                            containerColor = neoPaperSurfaceColor()
                         ) {
+                            val itemDividerColor = neoInkBorderColor().copy(alpha = 0.16f)
+                            val badgeBg = neoSecondaryPaperColor()
+                            val badgeBorder = neoInkBorderColor()
                             DropdownMenuItem(
                                 text = {
                                     Text(
                                         text = "Cài đặt chung đọc & âm thanh",
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Medium,
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
                                 },
                                 leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Settings,
-                                        contentDescription = null,
-                                        tint = accentBlue,
-                                        modifier = Modifier.size(17.dp)
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .size(26.dp)
+                                            .clip(CircleShape)
+                                            .background(badgeBg)
+                                            .border(1.2.dp, badgeBorder, CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Settings,
+                                            contentDescription = null,
+                                            tint = accentBlue,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
                                 },
                                 onClick = {
                                     showQuickLinkMenu = false
                                     onOpenReaderGeneralSettingsClick()
                                 }
                             )
+                            HorizontalDivider(
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                                thickness = 1.dp,
+                                color = itemDividerColor
+                            )
                             DropdownMenuItem(
                                 text = {
                                     Text(
                                         text = "Tạo bộ sưu tập mới",
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Medium,
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
                                 },
                                 leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Rounded.CollectionsBookmark,
-                                        contentDescription = null,
-                                        tint = LibraryCoralRed,
-                                        modifier = Modifier.size(17.dp)
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .size(26.dp)
+                                            .clip(CircleShape)
+                                            .background(badgeBg)
+                                            .border(1.2.dp, badgeBorder, CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.CollectionsBookmark,
+                                            contentDescription = null,
+                                            tint = LibraryCoralRed,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
                                 },
                                 onClick = {
                                     showQuickLinkMenu = false
                                     showCreateCollectionDialog = true
                                 }
                             )
+                            HorizontalDivider(
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                                thickness = 1.dp,
+                                color = itemDividerColor
+                            )
                             DropdownMenuItem(
                                 text = {
                                     Text(
                                         text = "Quét & nhập nhiều sách",
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.ExtraBold,
                                         color = accentBlue
                                     )
                                 },
                                 leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Add,
-                                        contentDescription = null,
-                                        tint = accentBlue,
-                                        modifier = Modifier.size(17.dp)
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .size(26.dp)
+                                            .clip(CircleShape)
+                                            .background(accentBlue.copy(alpha = 0.14f))
+                                            .border(1.2.dp, badgeBorder, CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Add,
+                                            contentDescription = null,
+                                            tint = accentBlue,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                    }
                                 },
                                 onClick = {
                                     showQuickLinkMenu = false
@@ -1521,17 +1561,18 @@ private fun ModernBookRowItem(
                 )
             }
 
-            DropdownMenu(
+            Neo3DDropdownMenu(
                 expanded = menuExpanded,
                 onDismissRequest = { menuExpanded = false },
-                modifier = Modifier.background(MaterialTheme.colorScheme.surface)
+                containerColor = neoPaperSurfaceColor()
             ) {
+                val itemDividerColor = neoInkBorderColor().copy(alpha = 0.16f)
                 DropdownMenuItem(
                     text = {
                         Text(
                             text = "Đọc sách",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                     },
@@ -1548,11 +1589,17 @@ private fun ModernBookRowItem(
                         onClick()
                     }
                 )
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    thickness = 1.dp,
+                    color = itemDividerColor
+                )
                 DropdownMenuItem(
                     text = {
                         Text(
                             text = "Thêm vào bộ sưu tập",
-                            fontSize = 13.sp,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                     },
@@ -1569,11 +1616,17 @@ private fun ModernBookRowItem(
                         onAddToCollectionClick()
                     }
                 )
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    thickness = 1.dp,
+                    color = itemDividerColor
+                )
                 DropdownMenuItem(
                     text = {
                         Text(
                             text = deleteLabel,
-                            fontSize = 13.sp,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Bold,
                             color = IosRed
                         )
                     },
@@ -1852,13 +1905,20 @@ private fun CollectionsTabContent(
                                         modifier = Modifier.size(16.dp)
                                     )
                                 }
-                                DropdownMenu(
+                                Neo3DDropdownMenu(
                                     expanded = colMenuOpen,
                                     onDismissRequest = { colMenuOpen = false },
-                                    modifier = Modifier.background(MaterialTheme.colorScheme.surface)
+                                    containerColor = neoPaperSurfaceColor()
                                 ) {
                                     DropdownMenuItem(
-                                        text = { Text("Xóa bộ sưu tập", fontSize = 12.sp, color = IosRed) },
+                                        text = {
+                                            Text(
+                                                "Xóa bộ sưu tập",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = IosRed
+                                            )
+                                        },
                                         leadingIcon = {
                                             Icon(
                                                 imageVector = Icons.Rounded.DeleteOutline,

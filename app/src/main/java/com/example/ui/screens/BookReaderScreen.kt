@@ -63,7 +63,6 @@ import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -110,7 +109,6 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.audio.AmbientSoundTrack
 import com.example.audio.ClonedVoiceProfile
-import com.example.audio.OnnxVoiceEngineMode
 import com.example.data.CustomImportedFont
 import com.example.data.HorizontalPageEffect
 import com.example.data.LibraryChapterMeta
@@ -119,13 +117,14 @@ import com.example.data.ReaderPaperTheme
 import com.example.data.ReaderPreferences
 import com.example.data.ReaderScrollDirection
 import com.example.data.ReaderVoiceProfile
+import com.example.data.TtsEngineType
 import com.example.service.BookAudioPlaybackService
 import com.example.service.BookAudioPlaybackState
 import com.example.ui.ActiveBookReaderState
 import com.example.ui.components.AnimatedAudioPlayingBars
+import com.example.ui.components.Neo3DDropdownMenu
 import com.example.ui.components.NeoBrutalistPressBox
 import com.example.ui.components.ReaderAudioSettingsSheetContent
-import com.example.ui.components.VoiceCloneDialog
 import com.example.ui.components.neoHardOffsetShadow
 import com.example.ui.components.neoHardShadowColor
 import com.example.ui.components.neoInkBorderColor
@@ -198,17 +197,13 @@ fun BookReaderScreen(
     onResetAdvancedDefaults: () -> Unit,
     onToggleCharacterVoicesEnabled: (Boolean) -> Unit,
     onScanCharacters: () -> Unit,
+    onToggleCharacterPickerExpanded: () -> Unit = {},
     onConfirmCharacterAssignments: (Map<String, ReaderVoiceProfile>) -> Unit,
     onHideCharacterPicker: () -> Unit,
     onSelectAmbientSound: (AmbientSoundTrack) -> Unit,
     onChangeAmbientVolume: (Float) -> Unit,
     clonedVoices: List<ClonedVoiceProfile> = emptyList(),
-    voiceCloneEngineMode: OnnxVoiceEngineMode = OnnxVoiceEngineMode.SAFE_TTS_FALLBACK,
-    voiceCloneTargetSampleRate: Int = 16_000,
-    isExtractingVoiceClone: Boolean = false,
-    onSaveClonedVoice: (name: String, samples: FloatArray, sampleRate: Int, onDone: () -> Unit) -> Unit = { _, _, _, _ -> },
-    onSelectClonedVoice: (String?) -> Unit = {},
-    onDeleteClonedVoice: (String) -> Unit = {}
+    onSelectClonedVoice: (String?) -> Unit = {}
 ) {
     val context = LocalContext.current
     val listState = rememberLazyListState()
@@ -227,7 +222,6 @@ fun BookReaderScreen(
     var showAppearancePopover by remember { mutableStateOf(false) }
     var showAudioBar by remember { mutableStateOf(false) }
     var showAudioSettingsSheet by remember { mutableStateOf(false) }
-    var showVoiceCloneDialog by remember { mutableStateOf(false) }
 
     // Track current visible paragraph cleanly across BOTH Vertical and Horizontal reading modes
     var currentTrackedParagraphIndex by remember(readerState.currentChapterIndex) {
@@ -256,8 +250,10 @@ fun BookReaderScreen(
         ""
     }
     val activeSpeakerName = if (isThisBookActiveInService) audioPlaybackState.activeSpeakerName else null
+    val isAiVoiceMode = readerPrefs.ttsEngineType == TtsEngineType.AI_TTS
     val activeClonedVoice = remember(readerPrefs.selectedClonedVoiceId, clonedVoices) {
         clonedVoices.firstOrNull { it.id == readerPrefs.selectedClonedVoiceId }
+            ?: clonedVoices.firstOrNull()
     }
 
     val latestState by rememberUpdatedState(readerState)
@@ -1004,10 +1000,11 @@ fun BookReaderScreen(
                 isDarkReaderPaper = isDarkReaderPaper,
                 isPlaying = isPlayingAudio,
                 speechRate = readerPrefs.speechRate,
-                voiceLabel = activeClonedVoice?.let { "✦ ${it.name}" }
-                    ?: activeSpeakerName
-                    ?: readerPrefs.voiceProfile.shortLabel,
-                hasClonedVoiceActive = activeClonedVoice != null,
+                voiceLabel = if (isAiVoiceMode) {
+                    activeClonedVoice?.let { "✦ ${it.name}" } ?: "Chưa có AI"
+                } else {
+                    activeSpeakerName ?: readerPrefs.voiceProfile.shortLabel
+                },
                 sleepTimerActive = audioPlaybackState.hasActiveSleepTimer,
                 sleepTimerBadge = when {
                     audioPlaybackState.sleepTimerEndOfChapter -> "Hết ch."
@@ -1045,12 +1042,6 @@ fun BookReaderScreen(
                 },
                 onCycleSpeed = onCycleSpeechRate,
                 onCycleVoice = onCycleVoiceProfile,
-                onOpenVoiceCloneDialog = {
-                    if (isAnyAudioPlaying) {
-                        BookAudioPlaybackService.pause(context)
-                    }
-                    showVoiceCloneDialog = true
-                },
                 onSelectSleepTimerMinutes = { mins ->
                     BookAudioPlaybackService.setSleepTimer(context, mins)
                 },
@@ -1178,6 +1169,7 @@ fun BookReaderScreen(
                     scannedCharacters = readerState.scannedCharacters,
                     showCharacterVoicePicker = readerState.showCharacterVoicePicker,
                     savedCharacterAssignments = readerState.characterVoiceAssignments,
+                    activePreviewTag = audioPlaybackState.activePreviewTag,
                     onSelectNarratorVoice = onSelectNarratorVoice,
                     onSelectSystemVoice = onSelectSystemVoice,
                     onRefreshDeviceVoices = {
@@ -1190,7 +1182,8 @@ fun BookReaderScreen(
                             pitch = readerPrefs.resolvePlaybackPitch(readerPrefs.voiceProfile),
                             rate = readerPrefs.resolvePlaybackRate(readerPrefs.voiceProfile),
                             pauseMs = readerPrefs.sentencePauseMs,
-                            systemVoiceName = voiceName
+                            systemVoiceName = voiceName,
+                            previewTag = "device_voice_${voiceName.orEmpty()}"
                         )
                     },
                     onToggleAdvancedCustom = { enabled ->
@@ -1209,7 +1202,8 @@ fun BookReaderScreen(
                             pitch = pitch,
                             rate = rate,
                             pauseMs = pauseMs,
-                            systemVoiceName = readerPrefs.selectedSystemVoiceName
+                            systemVoiceName = readerPrefs.selectedSystemVoiceName,
+                            previewTag = "reader_advanced_preview"
                         )
                     },
                     onResetAdvancedDefaults = onResetAdvancedDefaults,
@@ -1218,45 +1212,33 @@ fun BookReaderScreen(
                             context = context,
                             profile = profile,
                             pitch = pitch,
-                            pauseMs = readerPrefs.sentencePauseMs
+                            pauseMs = readerPrefs.sentencePauseMs,
+                            previewTag = "reader_narrator_sys"
+                        )
+                    },
+                    onPreviewClonedVoice = { voiceId ->
+                        BookAudioPlaybackService.previewClonedVoice(
+                            context = context,
+                            voiceId = voiceId,
+                            previewTag = "reader_narrator_ai"
                         )
                     },
                     onToggleCharacterVoicesEnabled = onToggleCharacterVoicesEnabled,
                     onScanCharactersClick = onScanCharacters,
+                    onToggleCharacterPickerExpanded = onToggleCharacterPickerExpanded,
                     onConfirmCharacterAssignments = onConfirmCharacterAssignments,
                     onSelectAmbientSound = onSelectAmbientSound,
                     onChangeAmbientVolume = onChangeAmbientVolume,
                     clonedVoices = clonedVoices,
                     onSelectClonedVoice = onSelectClonedVoice,
-                    onOpenVoiceCloneDialog = {
-                        showAudioSettingsSheet = false
-                        if (isAnyAudioPlaying) {
-                            BookAudioPlaybackService.pause(context)
-                        }
-                        showVoiceCloneDialog = true
-                    },
                     onClose = {
+                        BookAudioPlaybackService.stopPreview(context)
                         showAudioSettingsSheet = false
                         onHideCharacterPicker()
                     }
                 )
             }
         }
-    }
-
-    // 7. Hộp thoại Tạo & Quản lý Giọng đọc nhân bản AI (100% Offline ONNX / Dự phòng thiết bị)
-    if (showVoiceCloneDialog) {
-        VoiceCloneDialog(
-            clonedVoices = clonedVoices,
-            activeClonedVoiceId = readerPrefs.selectedClonedVoiceId,
-            engineMode = voiceCloneEngineMode,
-            targetSampleRate = voiceCloneTargetSampleRate,
-            isExtractingEmbedding = isExtractingVoiceClone,
-            onSaveClonedVoice = onSaveClonedVoice,
-            onSelectClonedVoice = onSelectClonedVoice,
-            onDeleteClonedVoice = onDeleteClonedVoice,
-            onDismiss = { showVoiceCloneDialog = false }
-        )
     }
 }
 
@@ -1524,7 +1506,6 @@ private fun IosFloatingAudioPill(
     isPlaying: Boolean,
     speechRate: Float,
     voiceLabel: String,
-    hasClonedVoiceActive: Boolean,
     sleepTimerActive: Boolean,
     sleepTimerBadge: String?,
     onPrevParagraph: () -> Unit,
@@ -1532,7 +1513,6 @@ private fun IosFloatingAudioPill(
     onNextParagraph: () -> Unit,
     onCycleSpeed: () -> Unit,
     onCycleVoice: () -> Unit,
-    onOpenVoiceCloneDialog: () -> Unit,
     onSelectSleepTimerMinutes: (Int) -> Unit,
     onStopAndClose: () -> Unit
 ) {
@@ -1734,10 +1714,12 @@ private fun IosFloatingAudioPill(
                     }
                 }
 
-                DropdownMenu(
+                Neo3DDropdownMenu(
                     expanded = showTimerMenu,
                     onDismissRequest = { showTimerMenu = false },
-                    containerColor = cardBg
+                    containerColor = cardBg,
+                    borderColor = borderColor,
+                    shadowColor = shadowColor
                 ) {
                     val options = listOf(
                         BookAudioPlaybackService.SLEEP_TIMER_OFF to "Tắt hẹn giờ",
@@ -1786,48 +1768,6 @@ private fun IosFloatingAudioPill(
                     tint = inkColor,
                     modifier = Modifier.size(14.dp)
                 )
-            }
-        }
-
-        // Row 2: Nút viên thuốc nhỏ gọn "+ Tạo giọng nhân bản" (100% Offline ONNX)
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            NeoBrutalistPressBox(
-                onClick = onOpenVoiceCloneDialog,
-                isPill = true,
-                shadowOffset = 2.dp,
-                pressDepth = 1.5.dp,
-                borderWidth = 1.5.dp,
-                containerColor = if (hasClonedVoiceActive) IosOrange else keyBg,
-                borderColor = borderColor,
-                shadowColor = shadowColor,
-                modifier = Modifier
-                    .height(27.dp)
-                    .testTag("audio_clone_voice_button")
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.AutoAwesome,
-                        contentDescription = "Tạo giọng nhân bản AI",
-                        tint = if (hasClonedVoiceActive) NeoInkLight else IosBlue,
-                        modifier = Modifier.size(12.dp)
-                    )
-                    Text(
-                        text = "+ Tạo giọng nhân bản",
-                        fontSize = 11.sp,
-                        lineHeight = 13.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = if (hasClonedVoiceActive) NeoInkLight else inkColor,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
             }
         }
     }
@@ -1948,10 +1888,12 @@ private fun IosReaderAppearancePopover(
                         }
                     }
 
-                    DropdownMenu(
+                    Neo3DDropdownMenu(
                         expanded = fontMenuExpanded,
                         onDismissRequest = { fontMenuExpanded = false },
-                        containerColor = cardBg
+                        containerColor = cardBg,
+                        borderColor = inkBorder,
+                        shadowColor = hardShadow
                     ) {
                         allFontOptions.forEach { fontOpt ->
                             val selected = prefs.fontId == fontOpt.id

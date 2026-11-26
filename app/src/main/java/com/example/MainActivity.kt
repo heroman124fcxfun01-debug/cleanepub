@@ -208,6 +208,8 @@ private fun EpubCleanNavHost(
     val clonedVoices by libraryViewModel.clonedVoices.collectAsStateWithLifecycle()
     val voiceCloneEngineMode by libraryViewModel.voiceCloneEngineMode.collectAsStateWithLifecycle()
     val isExtractingVoiceClone by libraryViewModel.isExtractingVoiceClone.collectAsStateWithLifecycle()
+    val isImportingVoiceFile by libraryViewModel.isImportingVoiceFile.collectAsStateWithLifecycle()
+    val draftClonedVoice by libraryViewModel.draftClonedVoice.collectAsStateWithLifecycle()
     val audioPlaybackState by libraryViewModel.audioPlaybackState.collectAsStateWithLifecycle()
 
     LaunchedEffect(statusToastMessage) {
@@ -223,6 +225,14 @@ private fun EpubCleanNavHost(
         if (!msg.isNullOrBlank()) {
             Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
             libraryViewModel.clearStatusMessage()
+        }
+    }
+
+    LaunchedEffect(audioPlaybackState.playbackNotice) {
+        val notice = audioPlaybackState.playbackNotice
+        if (!notice.isNullOrBlank()) {
+            Toast.makeText(context, notice, Toast.LENGTH_LONG).show()
+            com.example.service.AudioPlaybackStateHolder.clearNotice()
         }
     }
 
@@ -642,7 +652,41 @@ private fun EpubCleanNavHost(
                     }
 
                     AppMainTab.STUDIO -> {
-                        StudioScreen()
+                        StudioScreen(
+                            readerPrefs = bookReaderPrefs,
+                            audioPlaybackState = audioPlaybackState,
+                            clonedVoices = clonedVoices,
+                            voiceCloneEngineMode = voiceCloneEngineMode,
+                            voiceCloneTargetSampleRate = libraryViewModel.voiceCloneTargetSampleRate,
+                            isExtractingVoiceClone = isExtractingVoiceClone,
+                            isImportingVoiceFile = isImportingVoiceFile,
+                            draftClonedVoice = draftClonedVoice,
+                            onSelectTtsEngine = { engine -> libraryViewModel.selectTtsEngineType(engine) },
+                            onSelectNarratorVoice = { profile -> libraryViewModel.selectNarratorVoice(profile) },
+                            onSelectSystemVoice = { voiceName -> libraryViewModel.selectSystemDeviceVoice(voiceName) },
+                            onToggleAdvancedCustom = { enabled -> libraryViewModel.setAdvancedVoiceCustomEnabled(enabled) },
+                            onAdvancedPitchChanged = { pitch -> libraryViewModel.setAdvancedCustomPitch(pitch) },
+                            onAdvancedRateChanged = { rate -> libraryViewModel.setAdvancedCustomSpeechRate(rate) },
+                            onSentencePauseChanged = { pauseMs -> libraryViewModel.setSentencePauseMs(pauseMs) },
+                            onResetAdvancedDefaults = { libraryViewModel.resetAdvancedVoiceSettings() },
+                            onImportVoiceAudio = { uri, onDecoded ->
+                                libraryViewModel.importVoiceAudioFile(uri, onDecoded)
+                            },
+                            onCreateDraftClonedVoice = { name, samples, sampleRate ->
+                                libraryViewModel.createDraftClonedVoice(name, samples, sampleRate)
+                            },
+                            onClearDraftClonedVoice = { libraryViewModel.clearDraftClonedVoice() },
+                            onCommitSaveClonedVoices = { onSaved ->
+                                libraryViewModel.commitSaveClonedVoices(onSaved)
+                            },
+                            onSelectClonedVoice = { id -> libraryViewModel.selectClonedVoice(id) },
+                            onDeleteClonedVoice = { id -> libraryViewModel.deleteClonedVoice(id) },
+                            onSelectAmbientSound = { track -> libraryViewModel.selectAmbientSound(track) },
+                            onChangeAmbientVolume = { vol -> libraryViewModel.setAmbientVolume(vol) },
+                            onToggleAutoPlayAmbient = { enabled ->
+                                libraryViewModel.setAutoPlayAmbientWithAudio(enabled)
+                            }
+                        )
                     }
                 }
             }
@@ -685,6 +729,7 @@ private fun EpubCleanNavHost(
                 onResetAdvancedDefaults = { libraryViewModel.resetAdvancedVoiceSettings() },
                 onToggleCharacterVoicesEnabled = { enabled -> libraryViewModel.setCharacterVoicesEnabled(enabled) },
                 onScanCharacters = { libraryViewModel.scanCharactersForCurrentBook() },
+                onToggleCharacterPickerExpanded = { libraryViewModel.toggleCharacterVoicePicker() },
                 onConfirmCharacterAssignments = { map ->
                     libraryViewModel.confirmCharacterVoiceAssignments(map)
                 },
@@ -692,14 +737,7 @@ private fun EpubCleanNavHost(
                 onSelectAmbientSound = { track -> libraryViewModel.selectAmbientSound(track) },
                 onChangeAmbientVolume = { vol -> libraryViewModel.setAmbientVolume(vol) },
                 clonedVoices = clonedVoices,
-                voiceCloneEngineMode = voiceCloneEngineMode,
-                voiceCloneTargetSampleRate = libraryViewModel.voiceCloneTargetSampleRate,
-                isExtractingVoiceClone = isExtractingVoiceClone,
-                onSaveClonedVoice = { name, samples, sampleRate, onDone ->
-                    libraryViewModel.saveClonedVoice(name, samples, sampleRate, onDone)
-                },
-                onSelectClonedVoice = { id -> libraryViewModel.selectClonedVoice(id) },
-                onDeleteClonedVoice = { id -> libraryViewModel.deleteClonedVoice(id) }
+                onSelectClonedVoice = { id -> libraryViewModel.selectClonedVoice(id) }
             )
         }
 
@@ -902,6 +940,8 @@ private fun EpubCleanNavHost(
             onAdjustLineHeight = { delta -> libraryViewModel.adjustLineHeightMultiplier(delta) },
             onSelectTtsEngine = { engine -> libraryViewModel.selectTtsEngineType(engine) },
             onSelectNarratorVoice = { profile -> libraryViewModel.selectNarratorVoice(profile) },
+            clonedVoices = clonedVoices,
+            onSelectClonedVoice = { id -> libraryViewModel.selectClonedVoice(id) },
             onSelectAmbientSound = { track -> libraryViewModel.selectAmbientSound(track) },
             onToggleAutoPlayAmbient = { enabled -> libraryViewModel.setAutoPlayAmbientWithAudio(enabled) },
             onDismiss = { showLibraryReaderSettingsSheet = false }

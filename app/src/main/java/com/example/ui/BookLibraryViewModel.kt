@@ -5,9 +5,11 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.AmbientSoundTrack
+import com.example.audio.AudioFileDecoder
 import com.example.audio.ClonedVoiceProfile
 import com.example.audio.ClonedVoiceRepository
 import com.example.audio.DetectedCharacter
+import com.example.audio.ImportedVoiceSample
 import com.example.audio.OfflineOnnxVoiceEngine
 import com.example.audio.OnnxVoiceEngineMode
 import com.example.data.BookCollection
@@ -59,6 +61,20 @@ data class ActiveBookReaderState(
     val scannedCharacters: List<DetectedCharacter> = emptyList(),
     val showCharacterVoicePicker: Boolean = false,
     val characterVoiceAssignments: Map<String, ReaderVoiceProfile> = emptyMap()
+)
+
+/**
+ * Bản nháp giọng AI nhân bản vừa được bấm "Tạo" trong Studio (chưa lưu vĩnh viễn).
+ * Khi tạo xong -> nút "Nghe thử" bên cạnh sáng lên để kiểm tra; bấm "Lưu" mới ghi xuống bộ nhớ.
+ */
+data class PendingDraftClonedVoice(
+    val name: String,
+    val samples: FloatArray,
+    val sampleRate: Int,
+    val durationSeconds: Float,
+    val embedding: FloatArray,
+    val usedOnnxEncoder: Boolean,
+    val estimatedPitchRatio: Float
 )
 
 sealed interface LibraryImportFlowState {
@@ -125,6 +141,12 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
 
     private val _isExtractingVoiceClone = MutableStateFlow(false)
     val isExtractingVoiceClone: StateFlow<Boolean> = _isExtractingVoiceClone.asStateFlow()
+
+    private val _isImportingVoiceFile = MutableStateFlow(false)
+    val isImportingVoiceFile: StateFlow<Boolean> = _isImportingVoiceFile.asStateFlow()
+
+    private val _draftClonedVoice = MutableStateFlow<PendingDraftClonedVoice?>(null)
+    val draftClonedVoice: StateFlow<PendingDraftClonedVoice?> = _draftClonedVoice.asStateFlow()
 
     val voiceCloneTargetSampleRate: Int
         get() = onnxVoiceEngine.targetSampleRate
@@ -496,7 +518,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 val paras = chapContent?.paragraphs.orEmpty()
                 val paraIdx = book.lastParagraphIndex.coerceIn(0, (paras.size - 1).coerceAtLeast(0))
                 val savedCharVoices = libraryManager.loadCharacterVoiceAssignments(book.id)
-                BookOpenBundle(updated, tocList, chapContent, chapIdx, paraIdx, savedCharVoices)
+                val savedScannedChars = libraryManager.loadScannedCharacters(book.id)
+                BookOpenBundle(updated, tocList, chapContent, chapIdx, paraIdx, savedCharVoices, savedScannedChars)
             }
             _books.value = loaded.updatedBooks
             _readerState.value = ActiveBookReaderState(
@@ -512,7 +535,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 isLoadingChapter = false,
                 autoContinueAudioOnChapterReady = false,
                 isScanningCharacters = false,
-                scannedCharacters = emptyList(),
+                scannedCharacters = loaded.savedScannedCharacters,
                 showCharacterVoicePicker = false,
                 characterVoiceAssignments = loaded.savedCharacterVoices
             )
@@ -675,27 +698,26 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun cycleVoiceProfile() {
-        val currentClonedId = _readerPrefs.value.selectedClonedVoiceId
-        if (currentClonedId != null) {
+        val prefs = _readerPrefs.value
+        if (prefs.ttsEngineType == TtsEngineType.AI_TTS) {
+            // Chế độ AI Nhân bản -> CHỈ chuyển qua lại trong danh sách giọng AI nhân bản
             val clones = _clonedVoices.value
-            val idx = clones.indexOfFirst { it.id == currentClonedId }
-            if (idx in 0 until clones.lastIndex) {
-                selectClonedVoice(clones[idx + 1].id)
-            } else {
-                // Hết danh sách giọng nhân bản -> quay sang giọng hệ thống đầu tiên
-                selectNarratorVoice(ReaderVoiceProfile.FEMALE_1)
+            if (clones.isEmpty()) {
+                _statusMessage.value = "Chưa có giọng AI nhân bản. Hãy tạo và lưu trong Studio."
+                return
             }
+            val idx = clones.indexOfFirst { it.id == prefs.selectedClonedVoiceId }
+            val next = clones[(idx + 1).coerceAtLeast(0) % clones.size]
+            selectClonedVoice(next.id)
             return
         }
-        val nextVoice: ReaderVoiceProfile = _readerPrefs.value.voiceProfile.next()
+        // Chế độ Hệ thống -> CHỈ chuyển qua lại trong danh sách giọng Hệ thống
+        val nextVoice: ReaderVoiceProfile = prefs.voiceProfile.next()
         selectNarratorVoice(nextVoice)
     }
 
     fun selectNarratorVoice(profile: ReaderVoiceProfile) {
-        val updated = _readerPrefs.value.copy(
-            voiceProfile = profile,
-            selectedClonedVoiceId = null
-        )
+        val updated = _readerPrefs.value.copy(voiceProfile = profile)
         _readerPrefs.value = updated
         libraryManager.saveReaderPreferences(updated)
         BookAudioPlaybackService.syncSettings(getApplication())
@@ -703,20 +725,44 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
 
     fun selectClonedVoice(voiceId: String?) {
         val validId = voiceId?.takeIf { id -> _clonedVoices.value.any { it.id == id } }
-        val updated = _readerPrefs.value.copy(
-            selectedClonedVoiceId = validId,
-            ttsEngineType = if (validId != null) TtsEngineType.AI_TTS else _readerPrefs.value.ttsEngineType
-        )
+        val updated = _readerPrefs.value.copy(selectedClonedVoiceId = validId)
         _readerPrefs.value = updated
         libraryManager.saveReaderPreferences(updated)
         BookAudioPlaybackService.syncSettings(getApplication())
     }
 
-    fun saveClonedVoice(
+    fun importVoiceAudioFile(uri: Uri, onDecoded: (ImportedVoiceSample) -> Unit) {
+        if (_isImportingVoiceFile.value) return
+        _isImportingVoiceFile.value = true
+        viewModelScope.launch {
+            try {
+                val decoded = AudioFileDecoder.decodeAudioUriToMonoFloat(
+                    context = getApplication(),
+                    uri = uri,
+                    targetSampleRate = voiceCloneTargetSampleRate
+                )
+                decoded.onSuccess { sample ->
+                    _draftClonedVoice.value = null
+                    onDecoded(sample)
+                    _statusMessage.value = "Đã nhập file giọng \"${sample.displayName}\""
+                }.onFailure { err ->
+                    _statusMessage.value = err.message ?: "Không thể đọc tệp âm thanh này."
+                }
+            } finally {
+                _isImportingVoiceFile.value = false
+            }
+        }
+    }
+
+    /**
+     * Bước "Tạo" trong Studio: trích xuất vector đặc trưng giọng nói trên luồng Worker ngầm
+     * thành bản nháp (chưa lưu xuống bộ nhớ). Sau khi xong, nút "Nghe thử" bên cạnh sáng lên để kiểm tra.
+     */
+    fun createDraftClonedVoice(
         name: String,
         samples: FloatArray,
         sampleRate: Int,
-        onSaved: () -> Unit = {}
+        onCreated: () -> Unit = {}
     ) {
         if (_isExtractingVoiceClone.value || samples.isEmpty()) return
         _isExtractingVoiceClone.value = true
@@ -724,20 +770,69 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
             try {
                 val extracted = onnxVoiceEngine.extractSpeakerEmbedding(samples, sampleRate)
                 _voiceCloneEngineMode.value = onnxVoiceEngine.engineMode
+                val cleanName = name.trim().ifBlank {
+                    "Giọng nhân bản #${_clonedVoices.value.size + 1}"
+                }.take(36)
+                val durationSec = if (sampleRate > 0) {
+                    (samples.size.toFloat() / sampleRate.toFloat()).coerceIn(2.0f, 8.5f)
+                } else 5.0f
+                _draftClonedVoice.value = PendingDraftClonedVoice(
+                    name = cleanName,
+                    samples = samples,
+                    sampleRate = sampleRate,
+                    durationSeconds = durationSec,
+                    embedding = extracted.embedding,
+                    usedOnnxEncoder = extracted.usedOnnxEncoder,
+                    estimatedPitchRatio = extracted.estimatedPitchRatio
+                )
+                _statusMessage.value = "Đã tạo giọng \"$cleanName\" — Bấm Nghe thử để kiểm tra rồi bấm Lưu."
+                onCreated()
+            } catch (e: Exception) {
+                _statusMessage.value = "Không thể tạo giọng nhân bản: ${e.message ?: "lỗi xử lý"}"
+            } finally {
+                _isExtractingVoiceClone.value = false
+            }
+        }
+    }
+
+    fun clearDraftClonedVoice() {
+        _draftClonedVoice.value = null
+    }
+
+    /**
+     * Bước "Lưu" trong Studio: lưu vĩnh viễn giọng nhân bản vừa tạo cùng toàn bộ danh sách giọng đọc.
+     */
+    fun commitSaveClonedVoices(onSaved: () -> Unit = {}) {
+        if (_isExtractingVoiceClone.value) return
+        val draft = _draftClonedVoice.value
+        if (draft == null) {
+            libraryManager.saveReaderPreferences(_readerPrefs.value)
+            BookAudioPlaybackService.syncSettings(getApplication())
+            _statusMessage.value = "Đã lưu cài đặt tất cả giọng đọc (${_clonedVoices.value.size} giọng AI)"
+            onSaved()
+            return
+        }
+        _isExtractingVoiceClone.value = true
+        viewModelScope.launch {
+            try {
                 val savedProfile = withContext(Dispatchers.IO) {
                     clonedVoiceRepository.saveVoice(
-                        rawName = name,
-                        samples = samples,
-                        sampleRate = sampleRate,
-                        embedding = extracted.embedding,
-                        usedOnnxEncoder = extracted.usedOnnxEncoder,
-                        estimatedPitchRatio = extracted.estimatedPitchRatio
+                        rawName = draft.name,
+                        samples = draft.samples,
+                        sampleRate = draft.sampleRate,
+                        embedding = draft.embedding,
+                        usedOnnxEncoder = draft.usedOnnxEncoder,
+                        estimatedPitchRatio = draft.estimatedPitchRatio
                     )
                 }
                 val refreshed = withContext(Dispatchers.IO) { clonedVoiceRepository.loadAll() }
                 _clonedVoices.value = refreshed
-                selectClonedVoice(savedProfile.id)
-                _statusMessage.value = "Đã lưu giọng nhân bản \"${savedProfile.name}\""
+                _draftClonedVoice.value = null
+                val updatedPrefs = _readerPrefs.value.copy(selectedClonedVoiceId = savedProfile.id)
+                _readerPrefs.value = updatedPrefs
+                libraryManager.saveReaderPreferences(updatedPrefs)
+                BookAudioPlaybackService.syncSettings(getApplication())
+                _statusMessage.value = "Đã lưu giọng \"${savedProfile.name}\" và cập nhật tất cả giọng đọc"
                 onSaved()
             } catch (e: Exception) {
                 _statusMessage.value = "Không thể lưu giọng nhân bản: ${e.message ?: "lỗi xử lý"}"
@@ -754,7 +849,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
             }
             _clonedVoices.value = remaining
             if (_readerPrefs.value.selectedClonedVoiceId == voiceId) {
-                val updated = _readerPrefs.value.copy(selectedClonedVoiceId = null)
+                val nextSelected = remaining.firstOrNull()?.id
+                val updated = _readerPrefs.value.copy(selectedClonedVoiceId = nextSelected)
                 _readerPrefs.value = updated
                 libraryManager.saveReaderPreferences(updated)
                 BookAudioPlaybackService.syncSettings(getApplication())
@@ -917,12 +1013,23 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun selectTtsEngineType(engineType: TtsEngineType) {
-        val updated = _readerPrefs.value.copy(ttsEngineType = engineType)
+        BookAudioPlaybackService.stopPreview(getApplication())
+        val current = _readerPrefs.value
+        val resolvedCloneId = if (engineType == TtsEngineType.AI_TTS) {
+            current.selectedClonedVoiceId?.takeIf { id -> _clonedVoices.value.any { it.id == id } }
+                ?: _clonedVoices.value.firstOrNull()?.id
+        } else {
+            current.selectedClonedVoiceId
+        }
+        val updated = current.copy(
+            ttsEngineType = engineType,
+            selectedClonedVoiceId = resolvedCloneId
+        )
         _readerPrefs.value = updated
         libraryManager.saveReaderPreferences(updated)
         BookAudioPlaybackService.syncSettings(getApplication())
         if (engineType == TtsEngineType.AI_TTS && _clonedVoices.value.isEmpty()) {
-            _statusMessage.value = "Hãy bấm \"+ Tạo giọng nhân bản\" khi nghe sách để ghi mẫu giọng 3–8 giây."
+            _statusMessage.value = "Đã chọn AI Nhân bản (tắt giọng hệ thống). Hãy tạo hoặc import giọng mẫu trong Studio."
         }
     }
 
@@ -988,6 +1095,16 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun toggleCharacterVoicePicker() {
+        _readerState.update { state ->
+            if (state.scannedCharacters.isEmpty()) {
+                state
+            } else {
+                state.copy(showCharacterVoicePicker = !state.showCharacterVoicePicker)
+            }
+        }
+    }
+
     fun hideCharacterVoicePicker() {
         _readerState.update { it.copy(showCharacterVoicePicker = false) }
     }
@@ -1003,6 +1120,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
         val content: com.example.data.LibraryChapterContent?,
         val chapterIndex: Int,
         val paragraphIndex: Int,
-        val savedCharacterVoices: Map<String, ReaderVoiceProfile>
+        val savedCharacterVoices: Map<String, ReaderVoiceProfile>,
+        val savedScannedCharacters: List<DetectedCharacter>
     )
 }

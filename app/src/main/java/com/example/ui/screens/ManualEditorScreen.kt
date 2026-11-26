@@ -73,7 +73,6 @@ import androidx.compose.material.icons.rounded.SwapVert
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -133,6 +132,7 @@ import com.example.ui.components.AddManualTocDialog
 import com.example.ui.components.CustomReplaceDialog
 import com.example.ui.components.IosSaveSuccessDialog
 import com.example.ui.components.ManualTocOverlayDialog
+import com.example.ui.components.Neo3DDropdownMenu
 import com.example.ui.components.NeoBrutalistPressBox
 import com.example.ui.components.SaveDialog
 import com.example.ui.components.neoHardOffsetShadow
@@ -1487,13 +1487,14 @@ private fun SepiaTopBar(
                     )
                 }
 
-                DropdownMenu(
+                Neo3DDropdownMenu(
                     expanded = showMoreMenu,
                     onDismissRequest = { onMoreMenuChange(false) },
-                    modifier = Modifier
-                        .background(SepiaCard)
-                        .border(1.5.dp, SepiaInk, RoundedCornerShape(10.dp))
-                        .width(214.dp)
+                    containerColor = SepiaCard,
+                    borderColor = SepiaInk,
+                    shadowColor = SepiaInk,
+                    cornerRadius = 12.dp,
+                    modifier = Modifier.width(214.dp)
                 ) {
                     Column(
                         modifier = Modifier

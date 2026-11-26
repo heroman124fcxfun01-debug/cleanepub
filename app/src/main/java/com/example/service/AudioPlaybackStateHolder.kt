@@ -37,6 +37,9 @@ data class BookAudioPlaybackState(
     val activeClonedVoiceId: String? = null,
     val activeClonedVoiceName: String? = null,
     val isUsingOnnxVoice: Boolean = false,
+    val isPreviewingVoice: Boolean = false,
+    val activePreviewTag: String? = null,
+    val playbackNotice: String? = null,
     val speechRate: Float = 1.0f,
     val voiceProfile: ReaderVoiceProfile = ReaderVoiceProfile.FEMALE_1,
     val availableDeviceVoices: List<DeviceOfflineVoice> = emptyList(),
@@ -58,6 +61,12 @@ object AudioPlaybackStateHolder {
 
     fun update(transform: (BookAudioPlaybackState) -> BookAudioPlaybackState) {
         _state.value = transform(_state.value)
+    }
+
+    fun clearNotice() {
+        if (_state.value.playbackNotice != null) {
+            _state.value = _state.value.copy(playbackNotice = null)
+        }
     }
 
     fun reset() {

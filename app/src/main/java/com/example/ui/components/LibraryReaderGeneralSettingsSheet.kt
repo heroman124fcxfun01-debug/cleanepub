@@ -46,7 +46,6 @@ import androidx.compose.material.icons.rounded.SwapVert
 import androidx.compose.material.icons.rounded.TextFields
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.WaterDrop
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -123,6 +122,8 @@ fun LibraryReaderGeneralSettingsSheet(
     onAdjustLineHeight: (Float) -> Unit,
     onSelectTtsEngine: (TtsEngineType) -> Unit,
     onSelectNarratorVoice: (ReaderVoiceProfile) -> Unit,
+    clonedVoices: List<com.example.audio.ClonedVoiceProfile> = emptyList(),
+    onSelectClonedVoice: (String?) -> Unit = {},
     onSelectAmbientSound: (AmbientSoundTrack) -> Unit,
     onToggleAutoPlayAmbient: (Boolean) -> Unit,
     onDismiss: () -> Unit
@@ -282,6 +283,7 @@ fun LibraryReaderGeneralSettingsSheet(
                     } else {
                         AudioListeningDefaultsTab(
                             readerPrefs = readerPrefs,
+                            clonedVoices = clonedVoices,
                             cardBg = cardBg,
                             itemBg = itemBg,
                             borderCol = borderCol,
@@ -290,6 +292,7 @@ fun LibraryReaderGeneralSettingsSheet(
                             accentBlue = accentBlue,
                             onSelectTtsEngine = onSelectTtsEngine,
                             onSelectNarratorVoice = onSelectNarratorVoice,
+                            onSelectClonedVoice = onSelectClonedVoice,
                             onSelectAmbientSound = onSelectAmbientSound,
                             onToggleAutoPlayAmbient = onToggleAutoPlayAmbient
                         )
@@ -840,6 +843,7 @@ private fun ReadingModeDefaultsTab(
 @Composable
 private fun AudioListeningDefaultsTab(
     readerPrefs: ReaderPreferences,
+    clonedVoices: List<com.example.audio.ClonedVoiceProfile>,
     cardBg: Color,
     itemBg: Color,
     borderCol: Color,
@@ -848,10 +852,16 @@ private fun AudioListeningDefaultsTab(
     accentBlue: Color,
     onSelectTtsEngine: (TtsEngineType) -> Unit,
     onSelectNarratorVoice: (ReaderVoiceProfile) -> Unit,
+    onSelectClonedVoice: (String?) -> Unit,
     onSelectAmbientSound: (AmbientSoundTrack) -> Unit,
     onToggleAutoPlayAmbient: (Boolean) -> Unit
 ) {
     var narratorExpanded by remember { mutableStateOf(false) }
+    val isAiMode = readerPrefs.ttsEngineType == TtsEngineType.AI_TTS
+    val activeCloned = remember(readerPrefs.selectedClonedVoiceId, clonedVoices) {
+        clonedVoices.firstOrNull { it.id == readerPrefs.selectedClonedVoiceId }
+            ?: clonedVoices.firstOrNull()
+    }
 
     // 1. Chọn bộ máy giọng đọc: TTS Hệ thống (hiện tại) hoặc TTS AI (sắp tích hợp)
     Column(
@@ -955,10 +965,10 @@ private fun AudioListeningDefaultsTab(
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text(
-            text = if (readerPrefs.ttsEngineType == TtsEngineType.AI_TTS) {
-                "Giọng dẫn truyện mặc định (TTS AI — Dự phòng Hệ thống)"
+            text = if (isAiMode) {
+                "Giọng dẫn truyện mặc định (Chỉ hiển thị giọng AI Nhân bản)"
             } else {
-                "Giọng dẫn truyện mặc định (TTS Hệ thống)"
+                "Giọng dẫn truyện mặc định (Chỉ hiển thị giọng Hệ thống)"
             },
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
@@ -989,7 +999,11 @@ private fun AudioListeningDefaultsTab(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = readerPrefs.voiceProfile.displayName,
+                        text = if (isAiMode) {
+                            activeCloned?.let { "✦ ${it.name}" } ?: "Chưa có giọng AI (tạo ở Studio)"
+                        } else {
+                            readerPrefs.voiceProfile.displayName
+                        },
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = primaryInk
@@ -1003,40 +1017,86 @@ private fun AudioListeningDefaultsTab(
                 }
             }
 
-            DropdownMenu(
+            Neo3DDropdownMenu(
                 expanded = narratorExpanded,
                 onDismissRequest = { narratorExpanded = false },
                 containerColor = cardBg
             ) {
-                ReaderVoiceProfile.entries.forEach { profile ->
-                    val selected = readerPrefs.voiceProfile == profile
-                    DropdownMenuItem(
-                        text = {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
+                if (isAiMode) {
+                    if (clonedVoices.isEmpty()) {
+                        DropdownMenuItem(
+                            text = {
                                 Text(
-                                    text = profile.displayName,
-                                    fontSize = 12.sp,
-                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (selected) accentBlue else primaryInk
+                                    text = "Chưa có giọng AI — Vào tab Studio để tạo & lưu",
+                                    fontSize = 11.5.sp,
+                                    color = secondaryInk
                                 )
-                                if (selected) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Check,
-                                        contentDescription = null,
-                                        tint = accentBlue,
-                                        modifier = Modifier.size(14.dp)
-                                    )
+                            },
+                            onClick = { narratorExpanded = false }
+                        )
+                    } else {
+                        clonedVoices.forEach { cloned ->
+                            val selected = activeCloned?.id == cloned.id
+                            DropdownMenuItem(
+                                text = {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "✦ ${cloned.name}",
+                                            fontSize = 12.sp,
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (selected) accentBlue else primaryInk
+                                        )
+                                        if (selected) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Check,
+                                                contentDescription = null,
+                                                tint = accentBlue,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    onSelectClonedVoice(cloned.id)
+                                    narratorExpanded = false
                                 }
-                            }
-                        },
-                        onClick = {
-                            onSelectNarratorVoice(profile)
-                            narratorExpanded = false
+                            )
                         }
-                    )
+                    }
+                } else {
+                    ReaderVoiceProfile.entries.forEach { profile ->
+                        val selected = readerPrefs.voiceProfile == profile
+                        DropdownMenuItem(
+                            text = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = profile.displayName,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (selected) accentBlue else primaryInk
+                                    )
+                                    if (selected) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Check,
+                                            contentDescription = null,
+                                            tint = accentBlue,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                }
+                            },
+                            onClick = {
+                                onSelectNarratorVoice(profile)
+                                narratorExpanded = false
+                            }
+                        )
+                    }
                 }
             }
         }

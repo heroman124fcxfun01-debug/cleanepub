@@ -28,6 +28,7 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.SpeakerPhone
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -81,7 +82,9 @@ fun DeviceOfflineVoicesSection(
     selectedSystemVoiceName: String?,
     onSelectSystemVoice: (String?) -> Unit,
     onRefreshDeviceVoices: () -> Unit,
-    onPreviewSystemVoice: (String?) -> Unit
+    onPreviewSystemVoice: (String?) -> Unit,
+    activePreviewTag: String? = null,
+    sectionEnabled: Boolean = true
 ) {
     val context = LocalContext.current
     val cardBg = neoPaperSurfaceColor()
@@ -155,7 +158,7 @@ fun DeviceOfflineVoicesSection(
             }
 
             Ios3DCircleIconButton(
-                onClick = onRefreshDeviceVoices,
+                onClick = { if (sectionEnabled) onRefreshDeviceVoices() },
                 size = 30.dp,
                 modifier = Modifier.testTag("refresh_device_voices_button")
             ) {
@@ -181,7 +184,7 @@ fun DeviceOfflineVoicesSection(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { onSelectSystemVoice(null) }
+                    .clickable(enabled = sectionEnabled) { onSelectSystemVoice(null) }
                     .padding(horizontal = 12.dp, vertical = 9.dp)
                     .testTag("device_voice_auto"),
                 verticalAlignment = Alignment.CenterVertically,
@@ -232,7 +235,7 @@ fun DeviceOfflineVoicesSection(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onSelectSystemVoice(voice.voiceName) }
+                        .clickable(enabled = sectionEnabled) { onSelectSystemVoice(voice.voiceName) }
                         .padding(horizontal = 12.dp, vertical = 8.dp)
                         .testTag("device_voice_item_$idx"),
                     verticalAlignment = Alignment.CenterVertically,
@@ -283,13 +286,15 @@ fun DeviceOfflineVoicesSection(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        val isThisVoicePreviewing = activePreviewTag == "device_voice_${voice.voiceName}"
                         NeoBrutalistPressBox(
                             onClick = { onPreviewSystemVoice(voice.voiceName) },
+                            enabled = sectionEnabled,
                             isCircle = true,
                             shadowOffset = 2.dp,
                             pressDepth = 1.5.dp,
                             borderWidth = 1.2.dp,
-                            containerColor = cardBg,
+                            containerColor = if (isThisVoicePreviewing) IosBlue else cardBg,
                             borderColor = borderCol,
                             shadowColor = neoHardShadowColor(),
                             modifier = Modifier
@@ -297,9 +302,9 @@ fun DeviceOfflineVoicesSection(
                                 .testTag("device_voice_preview_$idx")
                         ) {
                             Icon(
-                                imageVector = Icons.Rounded.PlayArrow,
-                                contentDescription = "Nghe thử ${voice.displayLabel}",
-                                tint = primaryInk,
+                                imageVector = if (isThisVoicePreviewing) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
+                                contentDescription = if (isThisVoicePreviewing) "Dừng nghe thử" else "Nghe thử ${voice.displayLabel}",
+                                tint = if (isThisVoicePreviewing) Color.White else primaryInk,
                                 modifier = Modifier.size(14.dp)
                             )
                         }
@@ -340,6 +345,7 @@ fun DeviceOfflineVoicesSection(
                     }
                 }
             },
+            enabled = sectionEnabled,
             isPill = true,
             shadowOffset = 3.dp,
             pressDepth = 2.dp,
@@ -389,7 +395,9 @@ fun AdvancedCustomVoiceSettingsSection(
     onSpeechRateChanged: (Float) -> Unit,
     onSentencePauseChanged: (Int) -> Unit,
     onPreviewAdvanced: (pitch: Float, rate: Float, pauseMs: Int) -> Unit,
-    onResetDefaults: () -> Unit
+    onResetDefaults: () -> Unit,
+    isPreviewPlaying: Boolean = false,
+    sectionEnabled: Boolean = true
 ) {
     val context = LocalContext.current
     val cardBg = neoPaperSurfaceColor()
@@ -399,7 +407,7 @@ fun AdvancedCustomVoiceSettingsSection(
     val primaryInk = MaterialTheme.colorScheme.onSurface
     val secondaryInk = MaterialTheme.colorScheme.onSurfaceVariant
 
-    val isEnabled = readerPrefs.advancedCustomEnabled
+    val isEnabled = sectionEnabled && readerPrefs.advancedCustomEnabled
     val controlsAlpha by animateFloatAsState(
         targetValue = if (isEnabled) 1f else 0.40f,
         label = "advanced_tts_enabled_alpha"
@@ -463,7 +471,8 @@ fun AdvancedCustomVoiceSettingsSection(
             }
 
             Switch(
-                checked = isEnabled,
+                checked = readerPrefs.advancedCustomEnabled,
+                enabled = sectionEnabled,
                 onCheckedChange = onToggleAdvancedEnabled,
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White,
@@ -658,7 +667,7 @@ fun AdvancedCustomVoiceSettingsSection(
                     shadowOffset = 2.dp,
                     pressDepth = 1.5.dp,
                     borderWidth = 1.5.dp,
-                    containerColor = cardBg,
+                    containerColor = if (isPreviewPlaying) IosBlue else cardBg,
                     borderColor = borderCol,
                     shadowColor = if (isEnabled) hardShadow else Color.Transparent,
                     modifier = Modifier
@@ -672,17 +681,17 @@ fun AdvancedCustomVoiceSettingsSection(
                         horizontalArrangement = Arrangement.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Rounded.PlayArrow,
-                            contentDescription = null,
-                            tint = IosBlue,
+                            imageVector = if (isPreviewPlaying) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
+                            contentDescription = if (isPreviewPlaying) "Dừng nghe thử" else "Nghe thử",
+                            tint = if (isPreviewPlaying) Color.White else IosBlue,
                             modifier = Modifier.size(14.dp)
                         )
                         Spacer(modifier = Modifier.size(3.dp))
                         Text(
-                            text = "Nghe thử",
+                            text = if (isPreviewPlaying) "Dừng thử" else "Nghe thử",
                             fontSize = 10.5.sp,
                             fontWeight = FontWeight.Bold,
-                            color = primaryInk,
+                            color = if (isPreviewPlaying) Color.White else primaryInk,
                             maxLines = 1,
                             softWrap = false
                         )

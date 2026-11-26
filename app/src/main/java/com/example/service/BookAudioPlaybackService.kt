@@ -34,6 +34,7 @@ import com.example.data.LibraryChapterMeta
 import com.example.data.LibraryManager
 import com.example.data.ReaderPreferences
 import com.example.data.ReaderVoiceProfile
+import com.example.data.TtsEngineType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -108,6 +109,13 @@ class BookAudioPlaybackService : Service() {
     private var isForegroundActive = false
     private var isPreviewingAmbient = false
 
+    // Trạng thái nghe thử dạng công tắc (bấm 1 lần nghe, bấm lần 2 tắt ngay)
+    private var isPreviewingVoice = false
+    private var activePreviewTag: String? = null
+    private var previewFinalUtteranceId = ""
+    private var previewAudioJob: Job? = null
+    private var lastPlaybackNotice: String? = null
+
     // Yêu cầu phát chờ TTS khởi tạo xong
     private var pendingStartRequest: PendingStartRequest? = null
     private var pendingPreviewRequest: PendingPreviewRequest? = null
@@ -147,7 +155,8 @@ class BookAudioPlaybackService : Service() {
         val pitchOverride: Float?,
         val rateOverride: Float?,
         val pauseMsOverride: Int?,
-        val systemVoiceOverride: String?
+        val systemVoiceOverride: String?,
+        val previewTag: String?
     )
 
     override fun onCreate() {
@@ -220,6 +229,12 @@ class BookAudioPlaybackService : Service() {
             }
 
             ACTION_PREVIEW_VOICE -> {
+                val previewTag = intent.getStringExtra(EXTRA_PREVIEW_TAG)
+                // Bấm lại đúng nút đang nghe thử -> dừng ngay lập tức
+                if (isPreviewingVoice && (previewTag == null || activePreviewTag == previewTag)) {
+                    stopVoicePreviewInternal(publish = true)
+                    return START_NOT_STICKY
+                }
                 val profileKey = intent.getStringExtra(EXTRA_VOICE_KEY)
                 val profile = ReaderVoiceProfile.fromKey(profileKey)
                 val pitchOverride = if (intent.hasExtra(EXTRA_VOICE_PITCH)) {
@@ -237,8 +252,23 @@ class BookAudioPlaybackService : Service() {
                     pitchOverride = pitchOverride,
                     rateOverride = rateOverride,
                     pauseMsOverride = pauseOverride,
-                    systemVoiceOverride = systemVoiceOverride
+                    systemVoiceOverride = systemVoiceOverride,
+                    previewTag = previewTag
                 )
+            }
+
+            ACTION_PREVIEW_CLONED_VOICE -> {
+                val previewTag = intent.getStringExtra(EXTRA_PREVIEW_TAG)
+                val voiceId = intent.getStringExtra(EXTRA_CLONED_VOICE_ID)
+                if (isPreviewingVoice && (previewTag == null || activePreviewTag == previewTag)) {
+                    stopVoicePreviewInternal(publish = true)
+                    return START_NOT_STICKY
+                }
+                previewClonedVoiceSample(voiceId = voiceId, previewTag = previewTag)
+            }
+
+            ACTION_STOP_PREVIEW -> {
+                stopVoicePreviewInternal(publish = true)
             }
 
             ACTION_PREVIEW_AMBIENT -> {
@@ -307,8 +337,20 @@ class BookAudioPlaybackService : Service() {
                     }
 
                     override fun onDone(utteranceId: String?) {
+                        if (utteranceId == null) return
+                        if (utteranceId == previewFinalUtteranceId) {
+                            mainHandler.post {
+                                if (previewFinalUtteranceId == utteranceId) {
+                                    previewFinalUtteranceId = ""
+                                    isPreviewingVoice = false
+                                    activePreviewTag = null
+                                    publishState()
+                                }
+                            }
+                            return
+                        }
                         // Chỉ chuyển đoạn khi câu CUỐI CÙNG của đoạn hiện tại vừa hoàn tất
-                        if (utteranceId == null || utteranceId != paragraphFinalUtteranceId) return
+                        if (utteranceId != paragraphFinalUtteranceId) return
                         val capturedGen = activeParagraphGeneration
                         val interParagraphPause = (activePrefs.sentencePauseMs + 140)
                             .coerceIn(220, 950)
@@ -350,7 +392,8 @@ class BookAudioPlaybackService : Service() {
                                 pitchOverride = pendingPreview.pitchOverride,
                                 rateOverride = pendingPreview.rateOverride,
                                 pauseMsOverride = pendingPreview.pauseMsOverride,
-                                systemVoiceOverride = pendingPreview.systemVoiceOverride
+                                systemVoiceOverride = pendingPreview.systemVoiceOverride,
+                                previewTag = pendingPreview.previewTag
                             )
                         }
                     }
@@ -413,6 +456,13 @@ class BookAudioPlaybackService : Service() {
     private fun handleUtteranceError(utteranceId: String?) {
         val capturedGen = activeParagraphGeneration
         mainHandler.post {
+            if (utteranceId != null && utteranceId == previewFinalUtteranceId) {
+                previewFinalUtteranceId = ""
+                isPreviewingVoice = false
+                activePreviewTag = null
+                publishState()
+                return@post
+            }
             if (!isPlaying || capturedGen != activeParagraphGeneration) return@post
             if (utteranceId == paragraphFinalUtteranceId) {
                 advanceToNextParagraphOrChapter()
@@ -468,7 +518,7 @@ class BookAudioPlaybackService : Service() {
     // -------------------------------------------------------------------------
 
     private fun startOrJumpPlayback(bookId: String, chapterIndex: Int, paragraphIndex: Int) {
-        if (!isTtsReady) {
+        if (activePrefs.ttsEngineType != TtsEngineType.AI_TTS && !isTtsReady) {
             pendingStartRequest = PendingStartRequest(bookId, chapterIndex, paragraphIndex)
             return
         }
@@ -512,12 +562,15 @@ class BookAudioPlaybackService : Service() {
     }
 
     private fun speakParagraphAt(startIndex: Int, startSentenceIndex: Int = 0) {
-        val engine = ttsEngine ?: return
-        if (!isTtsReady || activeParagraphs.isEmpty()) return
+        if (activeParagraphs.isEmpty()) return
+        val isAiMode = activePrefs.ttsEngineType == TtsEngineType.AI_TTS
+        if (!isAiMode && (!isTtsReady || ttsEngine == null)) return
 
         mainHandler.removeCallbacksAndMessages(null)
+        stopVoicePreviewInternal(publish = false)
         cancelOnnxStreamPlayback()
         utteranceSentenceMap.clear()
+        lastPlaybackNotice = null
 
         // Tìm đoạn kế tiếp có nội dung đọc được sau khi chuẩn hóa tiếng Việt
         var targetIdx = startIndex.coerceIn(0, activeParagraphs.lastIndex)
@@ -541,40 +594,51 @@ class BookAudioPlaybackService : Service() {
         val safeSentenceStart = startSentenceIndex.coerceIn(0, sentences.lastIndex)
         val remainingSentences = sentences.subList(safeSentenceStart, sentences.size)
 
-        // Kiểm tra giọng nhân bản AI đang được chọn
-        val selectedClone = clonedVoiceRepo.findById(activePrefs.selectedClonedVoiceId)
-        activeClonedVoice = selectedClone
+        // =====================================================================
+        // CHẾ ĐỘ AI NHÂN BẢN (TUYỆT ĐỐI TẮT HOÀN TOÀN GIỌNG HỆ THỐNG!)
+        // =====================================================================
+        if (isAiMode) {
+            runCatching { ttsEngine?.stop() }
+            val selectedClone = clonedVoiceRepo.findById(activePrefs.selectedClonedVoiceId)
+                ?: clonedVoiceRepo.loadAll().firstOrNull()
+            activeClonedVoice = selectedClone
 
-        val (targetProfile, speakerName) = resolveVoiceForParagraph(activeParagraphs, targetIdx)
-        val isCharacterOverride = speakerName != null
-        val useClonedVoice = selectedClone != null && !isCharacterOverride
+            if (selectedClone == null) {
+                activeUsingOnnxVoice = false
+                isPlaying = false
+                lastPlaybackNotice = "Chế độ AI Nhân bản đang bật (giọng hệ thống đã tắt). Hãy tạo & lưu giọng AI trong Studio."
+                publishState()
+                syncAmbientPlayback()
+                return
+            }
 
-        activeParagraphGeneration += 1L
-        val generation = activeParagraphGeneration
-        speakingParagraphIndex = targetIdx
-        currentParagraphSentences = sentences
-        speakingSentenceIndex = safeSentenceStart
-        speakingSentenceText = sentences[safeSentenceStart]
-        activeSpeakerName = if (useClonedVoice) selectedClone!!.name else speakerName
-        isPlaying = true
+            val clonedEmbedding = clonedVoiceRepo.loadEmbedding(selectedClone)
+            if (!onnxEngine.isFullOnnxSynthesisReady() || clonedEmbedding == null) {
+                activeUsingOnnxVoice = false
+                isPlaying = false
+                lastPlaybackNotice = "Chế độ AI Nhân bản không dùng giọng hệ thống. Cần nạp đủ model ONNX tổng hợp để đọc bằng giọng \"${selectedClone.name}\"."
+                publishState()
+                syncAmbientPlayback()
+                return
+            }
 
-        // Thử phát bằng ONNX Worker (nếu model ONNX tổng hợp đã có sẵn trong máy)
-        val clonedEmbedding = if (useClonedVoice && onnxEngine.isFullOnnxSynthesisReady()) {
-            clonedVoiceRepo.loadEmbedding(selectedClone!!)
-        } else {
-            null
-        }
-
-        if (useClonedVoice && clonedEmbedding != null) {
+            activeParagraphGeneration += 1L
+            val generation = activeParagraphGeneration
+            speakingParagraphIndex = targetIdx
+            currentParagraphSentences = sentences
+            speakingSentenceIndex = safeSentenceStart
+            speakingSentenceText = sentences[safeSentenceStart]
+            activeSpeakerName = selectedClone.name
             activeUsingOnnxVoice = true
-            runCatching { engine.stop() }
+            isPlaying = true
+
             publishState()
             syncAmbientPlayback()
             persistProgressAsync(activeBookId, activeChapterIndex, targetIdx)
 
             ensureForegroundNotification(
                 title = activeBookTitle.ifBlank { "Đang đọc sách" },
-                subtitle = "${activeChapterTitle.ifBlank { "Chương ${activeChapterIndex + 1}" }} • ${selectedClone!!.name}",
+                subtitle = "${activeChapterTitle.ifBlank { "Chương ${activeChapterIndex + 1}" }} • ${selectedClone.name}",
                 playing = true
             )
 
@@ -582,24 +646,35 @@ class BookAudioPlaybackService : Service() {
                 sentences = sentences,
                 startSentenceIndex = safeSentenceStart,
                 embedding = clonedEmbedding,
-                generation = generation,
-                fallbackProfile = targetProfile
+                generation = generation
             )
             return
         }
 
-        // Chế độ TTS Hệ thống / Dự phòng an toàn cho giọng nhân bản khi chưa có file model ONNX
+        // =====================================================================
+        // CHẾ ĐỘ GIỌNG HỆ THỐNG (CHỈ DÙNG ANDROID TTS, KHÔNG DÙNG GIỌNG NHÂN BẢN)
+        // =====================================================================
+        val engine = ttsEngine ?: return
+        activeClonedVoice = null
         activeUsingOnnxVoice = false
-        val clonePitchOverride = if (useClonedVoice && !activePrefs.advancedCustomEnabled) {
-            selectedClone!!.estimatedPitchRatio
-        } else {
-            null
-        }
+
+        val (targetProfile, speakerName) = resolveVoiceForParagraph(activeParagraphs, targetIdx)
+        val isCharacterOverride = speakerName != null
+
+        activeParagraphGeneration += 1L
+        val generation = activeParagraphGeneration
+        speakingParagraphIndex = targetIdx
+        currentParagraphSentences = sentences
+        speakingSentenceIndex = safeSentenceStart
+        speakingSentenceText = sentences[safeSentenceStart]
+        activeSpeakerName = speakerName
+        isPlaying = true
+
         applyVoiceConfiguration(
             engine = engine,
             profile = targetProfile,
             isCharacterOverride = isCharacterOverride,
-            pitchOverride = clonePitchOverride
+            pitchOverride = null
         )
 
         publishState()
@@ -631,16 +706,14 @@ class BookAudioPlaybackService : Service() {
     }
 
     /**
-     * Tổng hợp giọng nói cuốn chiếu từng câu qua luồng ONNX Worker và phát qua [OnnxAudioTrackPlayer]:
-     * trong lúc đang phát câu `i`, tự động tổng hợp trước câu `i + 1` để đọc nối tiếp mượt mà,
-     * tự động tô sáng câu đang đọc và tự chuyển sang câu/đoạn tiếp theo.
+     * Tổng hợp giọng nói cuốn chiếu từng câu qua luồng ONNX Worker và phát qua [OnnxAudioTrackPlayer].
+     * Ở chế độ AI Nhân bản tuyệt đối KHÔNG bao giờ rơi về giọng đọc hệ thống.
      */
     private fun launchPipelinedOnnxSentences(
         sentences: List<String>,
         startSentenceIndex: Int,
         embedding: FloatArray,
-        generation: Long,
-        fallbackProfile: ReaderVoiceProfile
+        generation: Long
     ) {
         onnxStreamJob = serviceScope.launch {
             val speed = (if (activePrefs.advancedCustomEnabled) {
@@ -671,28 +744,12 @@ class BookAudioPlaybackService : Service() {
                 }
 
                 if (currentAudio == null) {
-                    // Dự phòng an toàn sang Android TTS nếu model trả về rỗng
+                    // Tuyệt đối KHÔNG phát giọng hệ thống khi đang ở chế độ AI Nhân bản -> dừng gọn và báo nhẹ
                     withContext(Dispatchers.Main) {
                         if (isPlaying && generation == activeParagraphGeneration) {
                             activeUsingOnnxVoice = false
-                            val remaining = sentences.subList(idx, sentences.size)
-                            val engine = ttsEngine ?: return@withContext
-                            applyVoiceConfiguration(
-                                engine = engine,
-                                profile = fallbackProfile,
-                                isCharacterOverride = false,
-                                pitchOverride = activeClonedVoice?.estimatedPitchRatio,
-                                force = true
-                            )
-                            enqueueSentencesWithNaturalPauses(
-                                engine = engine,
-                                sentences = remaining,
-                                sentenceIndexOffset = idx,
-                                pauseMs = pauseMs,
-                                idPrefix = "para_fb_${generation}_${activeChapterIndex}_$speakingParagraphIndex",
-                                fallbackProfile = fallbackProfile,
-                                isCharacterOverride = false
-                            )
+                            lastPlaybackNotice = "Không thể tổng hợp âm thanh AI ONNX cho câu này (tiếng đọc hệ thống đang tắt)."
+                            pausePlayback()
                         }
                     }
                     return@launch
@@ -837,7 +894,16 @@ class BookAudioPlaybackService : Service() {
 
     private fun reloadSettingsAndRefreshActiveAudio() {
         activePrefs = libraryManager.getReaderPreferences()
-        activeClonedVoice = clonedVoiceRepo.findById(activePrefs.selectedClonedVoiceId)
+        val isAiMode = activePrefs.ttsEngineType == TtsEngineType.AI_TTS
+        activeClonedVoice = if (isAiMode) {
+            clonedVoiceRepo.findById(activePrefs.selectedClonedVoiceId)
+        } else {
+            null
+        }
+        // Khi đổi sang AI Nhân bản -> tắt ngay mọi âm thanh từ Android TTS hệ thống
+        if (isAiMode) {
+            runCatching { ttsEngine?.stop() }
+        }
         val bookId = activeBookId
         if (bookId != null) {
             serviceScope.launch {
@@ -846,46 +912,75 @@ class BookAudioPlaybackService : Service() {
                     activeCharacterVoices = loadedChars
                     syncAmbientPlayback()
                     publishState()
-                    val engine = ttsEngine
-                    if (engine != null && isTtsReady) {
-                        applyVoiceConfiguration(
-                            engine = engine,
-                            profile = activePrefs.voiceProfile,
-                            isCharacterOverride = false,
-                            force = true
-                        )
-                        if (isPlaying && speakingParagraphIndex >= 0) {
-                            speakParagraphAt(speakingParagraphIndex)
+                    if (!isAiMode) {
+                        val engine = ttsEngine
+                        if (engine != null && isTtsReady) {
+                            applyVoiceConfiguration(
+                                engine = engine,
+                                profile = activePrefs.voiceProfile,
+                                isCharacterOverride = false,
+                                force = true
+                            )
                         }
+                    }
+                    if (isPlaying && speakingParagraphIndex >= 0) {
+                        speakParagraphAt(speakingParagraphIndex)
                     }
                 }
             }
         } else {
-            val engine = ttsEngine
-            if (engine != null && isTtsReady) {
-                applyVoiceConfiguration(
-                    engine = engine,
-                    profile = activePrefs.voiceProfile,
-                    isCharacterOverride = false,
-                    force = true
-                )
+            if (!isAiMode) {
+                val engine = ttsEngine
+                if (engine != null && isTtsReady) {
+                    applyVoiceConfiguration(
+                        engine = engine,
+                        profile = activePrefs.voiceProfile,
+                        isCharacterOverride = false,
+                        force = true
+                    )
+                }
             }
             syncAmbientPlayback()
             publishState()
         }
     }
 
+    private fun stopVoicePreviewInternal(publish: Boolean) {
+        previewAudioJob?.cancel()
+        previewAudioJob = null
+        previewFinalUtteranceId = ""
+        if (isPreviewingVoice) {
+            isPreviewingVoice = false
+            activePreviewTag = null
+            onnxPlayer.stopImmediately()
+            if (!isPlaying) {
+                runCatching { ttsEngine?.stop() }
+            }
+            if (publish) publishState()
+        }
+    }
+
     /**
-     * Đọc mẫu 2 câu tiếng Việt (đã qua bộ chuẩn hóa + `playSilentUtterance`) để người dùng
-     * nghe rõ ngay lập tức hiệu ứng của Độ cao (Pitch), Tốc độ (Rate) và Thời gian ngắt nghỉ (Pause).
+     * Đọc mẫu giọng Hệ thống (chỉ hoạt động khi đang ở chế độ Giọng Hệ thống).
+     * Bấm lần 1 -> phát, bấm lần 2 -> tắt ngay.
      */
     private fun previewVoiceSample(
         profile: ReaderVoiceProfile,
         pitchOverride: Float? = null,
         rateOverride: Float? = null,
         pauseMsOverride: Int? = null,
-        systemVoiceOverride: String? = null
+        systemVoiceOverride: String? = null,
+        previewTag: String? = null
     ) {
+        // Khi đang bật chế độ AI Nhân bản -> tuyệt đối không phát tiếng hệ thống!
+        if (activePrefs.ttsEngineType == TtsEngineType.AI_TTS) {
+            stopVoicePreviewInternal(publish = false)
+            runCatching { ttsEngine?.stop() }
+            lastPlaybackNotice = "Đang ở chế độ AI Nhân bản — giọng đọc hệ thống đã tắt hoàn toàn."
+            publishState()
+            return
+        }
+
         val engine = ttsEngine
         if (engine == null || !isTtsReady) {
             pendingPreviewRequest = PendingPreviewRequest(
@@ -893,16 +988,19 @@ class BookAudioPlaybackService : Service() {
                 pitchOverride = pitchOverride,
                 rateOverride = rateOverride,
                 pauseMsOverride = pauseMsOverride,
-                systemVoiceOverride = systemVoiceOverride
+                systemVoiceOverride = systemVoiceOverride,
+                previewTag = previewTag
             )
             return
         }
         if (isPlaying) {
             pausePlayback()
         }
+        stopVoicePreviewInternal(publish = false)
 
         activeParagraphGeneration += 1L
         paragraphFinalUtteranceId = ""
+        lastPlaybackNotice = null
 
         applyVoiceConfiguration(
             engine = engine,
@@ -927,8 +1025,84 @@ class BookAudioPlaybackService : Service() {
             fallbackProfile = profile,
             isCharacterOverride = false
         )
-        // Không gắn paragraphFinalUtteranceId để preview kết thúc tự nhiên không tự nhảy đoạn sách
+        // Chuyển final utterance sang previewFinalUtteranceId để tự tắt trạng thái nút nghe thử khi đọc xong
+        previewFinalUtteranceId = paragraphFinalUtteranceId
         paragraphFinalUtteranceId = ""
+        isPreviewingVoice = true
+        activePreviewTag = previewTag ?: "system_preview"
+        publishState()
+    }
+
+    /**
+     * Nghe thử giọng AI Nhân bản (dùng ONNX hoặc phát trực tiếp mẫu âm thanh gốc của giọng nhân bản qua AudioTrack).
+     * Tuyệt đối KHÔNG gọi giọng hệ thống Android TTS!
+     */
+    private fun previewClonedVoiceSample(voiceId: String?, previewTag: String?) {
+        if (isPlaying) {
+            pausePlayback()
+        }
+        stopVoicePreviewInternal(publish = false)
+        runCatching { ttsEngine?.stop() }
+        lastPlaybackNotice = null
+
+        val targetVoice = clonedVoiceRepo.findById(voiceId)
+            ?: clonedVoiceRepo.findById(activePrefs.selectedClonedVoiceId)
+            ?: clonedVoiceRepo.loadAll().firstOrNull()
+
+        if (targetVoice == null) {
+            lastPlaybackNotice = "Chưa có giọng AI nhân bản nào để nghe thử."
+            publishState()
+            return
+        }
+
+        val tag = previewTag ?: "cloned_${targetVoice.id}"
+        isPreviewingVoice = true
+        activePreviewTag = tag
+        publishState()
+
+        previewAudioJob = serviceScope.launch {
+            try {
+                val embedding = clonedVoiceRepo.loadEmbedding(targetVoice)
+                val synthesized = if (embedding != null && onnxEngine.isFullOnnxSynthesisReady()) {
+                    onnxEngine.synthesizeSentence(
+                        sentence = "Xin chào, đây là giọng đọc nhân bản AI ngoại tuyến.",
+                        speakerEmbedding = embedding,
+                        speed = activePrefs.speechRate.coerceIn(0.8f, 1.5f)
+                    )
+                } else {
+                    null
+                }
+
+                if (synthesized != null) {
+                    onnxPlayer.playBlocking(
+                        samples = synthesized.pcmFloat,
+                        sampleRate = synthesized.sampleRate,
+                        speed = 1.0f
+                    )
+                } else {
+                    val refAudio = clonedVoiceRepo.loadReferenceAudio(targetVoice)
+                    if (refAudio != null && refAudio.isNotEmpty()) {
+                        onnxPlayer.playBlocking(
+                            samples = refAudio,
+                            sampleRate = targetVoice.sampleRate,
+                            speed = 1.0f
+                        )
+                    } else {
+                        withContext(Dispatchers.Main) {
+                            lastPlaybackNotice = "Không tìm thấy dữ liệu mẫu giọng của \"${targetVoice.name}\"."
+                        }
+                    }
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    if (activePreviewTag == tag) {
+                        isPreviewingVoice = false
+                        activePreviewTag = null
+                        publishState()
+                    }
+                }
+            }
+        }
     }
 
     private fun syncAmbientPlayback() {
@@ -1097,6 +1271,9 @@ class BookAudioPlaybackService : Service() {
                 isPlaying = isPlaying,
                 isPaused = !isPlaying && activeBookId != null,
                 isTtsReady = isTtsReady,
+                isPreviewingVoice = isPreviewingVoice,
+                activePreviewTag = activePreviewTag,
+                playbackNotice = lastPlaybackNotice,
                 activeSpeakerName = activeSpeakerName,
                 activeClonedVoiceId = activeClonedVoice?.id,
                 activeClonedVoiceName = activeClonedVoice?.name,
@@ -1122,6 +1299,7 @@ class BookAudioPlaybackService : Service() {
 
     private fun stopPlaybackAndService() {
         mainHandler.removeCallbacksAndMessages(null)
+        stopVoicePreviewInternal(publish = false)
         cancelOnnxStreamPlayback()
         clearSleepTimerInternal(publish = false)
         activeParagraphGeneration += 1L
@@ -1262,6 +1440,8 @@ class BookAudioPlaybackService : Service() {
         private const val ACTION_SYNC_SETTINGS = "com.example.service.AUDIO_SYNC_SETTINGS"
         private const val ACTION_REFRESH_VOICES = "com.example.service.AUDIO_REFRESH_VOICES"
         private const val ACTION_PREVIEW_VOICE = "com.example.service.AUDIO_PREVIEW_VOICE"
+        private const val ACTION_PREVIEW_CLONED_VOICE = "com.example.service.AUDIO_PREVIEW_CLONED_VOICE"
+        private const val ACTION_STOP_PREVIEW = "com.example.service.AUDIO_STOP_PREVIEW"
         private const val ACTION_PREVIEW_AMBIENT = "com.example.service.AUDIO_PREVIEW_AMBIENT"
         private const val ACTION_SET_SLEEP_TIMER = "com.example.service.AUDIO_SET_SLEEP_TIMER"
         private const val ACTION_STOP = "com.example.service.AUDIO_STOP"
@@ -1274,6 +1454,8 @@ class BookAudioPlaybackService : Service() {
         private const val EXTRA_VOICE_RATE = "extra_voice_rate"
         private const val EXTRA_SENTENCE_PAUSE_MS = "extra_sentence_pause_ms"
         private const val EXTRA_SYSTEM_VOICE_NAME = "extra_system_voice_name"
+        private const val EXTRA_PREVIEW_TAG = "extra_preview_tag"
+        private const val EXTRA_CLONED_VOICE_ID = "extra_cloned_voice_id"
         private const val EXTRA_AMBIENT_PREVIEW_ACTIVE = "extra_ambient_preview_active"
         private const val EXTRA_SLEEP_TIMER_MINUTES = "extra_sleep_timer_minutes"
 
@@ -1328,17 +1510,17 @@ class BookAudioPlaybackService : Service() {
         }
 
         fun syncSettings(context: Context) {
-            if (!AudioPlaybackStateHolder.state.value.hasActiveSession) return
+            if (!AudioPlaybackStateHolder.state.value.hasActiveSession &&
+                !AudioPlaybackStateHolder.state.value.isPreviewingVoice
+            ) {
+                return
+            }
             val intent = Intent(context.applicationContext, BookAudioPlaybackService::class.java).apply {
                 action = ACTION_SYNC_SETTINGS
             }
             runCatching { context.applicationContext.startService(intent) }
         }
 
-        /**
-         * Khởi tạo/quét lại danh sách giọng tiếng Việt Offline trên máy (gọi khi mở bảng Cài đặt nghe
-         * hoặc sau khi người dùng vừa tải thêm gói giọng từ cài đặt Android).
-         */
         fun refreshDeviceVoices(context: Context) {
             val intent = Intent(context.applicationContext, BookAudioPlaybackService::class.java).apply {
                 action = ACTION_REFRESH_VOICES
@@ -1352,7 +1534,8 @@ class BookAudioPlaybackService : Service() {
             pitch: Float,
             rate: Float? = null,
             pauseMs: Int? = null,
-            systemVoiceName: String? = null
+            systemVoiceName: String? = null,
+            previewTag: String? = null
         ) {
             val intent = Intent(context.applicationContext, BookAudioPlaybackService::class.java).apply {
                 action = ACTION_PREVIEW_VOICE
@@ -1361,6 +1544,27 @@ class BookAudioPlaybackService : Service() {
                 if (rate != null) putExtra(EXTRA_VOICE_RATE, rate)
                 if (pauseMs != null) putExtra(EXTRA_SENTENCE_PAUSE_MS, pauseMs)
                 if (systemVoiceName != null) putExtra(EXTRA_SYSTEM_VOICE_NAME, systemVoiceName)
+                if (previewTag != null) putExtra(EXTRA_PREVIEW_TAG, previewTag)
+            }
+            runCatching { context.applicationContext.startService(intent) }
+        }
+
+        fun previewClonedVoice(
+            context: Context,
+            voiceId: String?,
+            previewTag: String? = null
+        ) {
+            val intent = Intent(context.applicationContext, BookAudioPlaybackService::class.java).apply {
+                action = ACTION_PREVIEW_CLONED_VOICE
+                if (voiceId != null) putExtra(EXTRA_CLONED_VOICE_ID, voiceId)
+                if (previewTag != null) putExtra(EXTRA_PREVIEW_TAG, previewTag)
+            }
+            runCatching { context.applicationContext.startService(intent) }
+        }
+
+        fun stopPreview(context: Context) {
+            val intent = Intent(context.applicationContext, BookAudioPlaybackService::class.java).apply {
+                action = ACTION_STOP_PREVIEW
             }
             runCatching { context.applicationContext.startService(intent) }
         }
@@ -1373,12 +1577,6 @@ class BookAudioPlaybackService : Service() {
             runCatching { context.applicationContext.startService(intent) }
         }
 
-        /**
-         * Đặt hẹn giờ tự tắt nghe sách:
-         * - [minutes] == 0 (`SLEEP_TIMER_OFF`): Tắt hẹn giờ
-         * - [minutes] > 0: Tự dừng đọc sau N phút (15, 30, 45, 60...)
-         * - [minutes] == -1 (`SLEEP_TIMER_END_OF_CHAPTER`): Tự dừng khi đọc hết chương hiện tại
-         */
         fun setSleepTimer(context: Context, minutes: Int) {
             val intent = Intent(context.applicationContext, BookAudioPlaybackService::class.java).apply {
                 action = ACTION_SET_SLEEP_TIMER
