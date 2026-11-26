@@ -1,0 +1,117 @@
+name: Build Full Offline APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lấy mã nguồn
+        uses: actions/checkout@v4
+
+      - name: Cài đặt Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cài đặt thư viện và chép file WASM offline
+        run: |
+          npm install
+          mkdir -p public/ort
+          cp -f node_modules/onnxruntime-web/dist/*.wasm public/ort/ 2>/dev/null || true
+          cp -f node_modules/onnxruntime-web/dist/*.mjs public/ort/ 2>/dev/null || true
+
+      - name: Tự động tải trọn bộ model nhân bản VieNeu (~380MB)
+        run: |
+          mkdir -p public/models
+          node -e '
+            const fs = require("fs");
+            const BASE = "https://huggingface.co/duyquangnvx/vieneu-web-models/resolve/main/";
+            (async () => {
+              const res = await fetch(BASE + "manifest.json");
+              if (!res.ok) throw new Error("Khong tai duoc manifest.json");
+              const text = await res.text();
+              fs.writeFileSync("public/models/manifest.json", text);
+              const matched = text.match(/[a-zA-Z0-9_./-]+\.(onnx|bin|json)/g) || [];
+              const files = [...new Set([...matched, "sea_g2p.bin"])];
+              for (const f of files) {
+                if (f === "manifest.json") continue;
+                const fileName = f.split("/").pop();
+                console.log("Dang tai:", fileName);
+                const r = await fetch(BASE + f);
+                if (r.ok) {
+                  fs.writeFileSync("public/models/" + fileName, Buffer.from(await r.arrayBuffer()));
+                }
+              }
+            })();
+          '
+
+      - name: Build giao diện Web
+        run: npm run build
+
+      - name: Đóng gói sang Android (Capacitor)
+        run: |
+          if [ -d "dist" ]; then WEB_DIR="dist"; else WEB_DIR="build"; fi
+          rm -rf android capacitor.config.json capacitor.config.ts
+          npm install @capacitor/core @capacitor/cli @capacitor/android
+          npx cap init "DocSachAI" "com.docsach.ai" --web-dir=$WEB_DIR
+          npx cap add android
+
+      - name: Cấp quyền Micro và giữ nguyên file model lớn
+        run: |
+          sed -i 's|<application|<uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <application|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|android {|android {\n    aaptOptions { noCompress += ["onnx", "bin", "wasm"] }|' android/app/build.gradle
+          mkdir -p android/app/src/main/java/com/docsach/ai
+          rm -f android/app/src/main/java/com/docsach/ai/MainActivity.*
+          cat << 'EOF' > android/app/src/main/java/com/docsach/ai/MainActivity.java
+          package com.docsach.ai;
+
+          import android.Manifest;
+          import android.content.pm.PackageManager;
+          import android.os.Bundle;
+          import android.webkit.PermissionRequest;
+          import androidx.core.app.ActivityCompat;
+          import androidx.core.content.ContextCompat;
+          import com.getcapacitor.BridgeActivity;
+          import com.getcapacitor.BridgeWebChromeClient;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                      ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, 101);
+                  }
+                  this.bridge.getWebView().setWebChromeClient(new BridgeWebChromeClient(this.bridge) {
+                      @Override
+                      public void onPermissionRequest(final PermissionRequest request) {
+                          runOnUiThread(() -> request.grant(request.getResources()));
+                      }
+                  });
+              }
+          }
+          EOF
+
+      - name: Cài đặt Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Biên dịch file APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Xuất thẳng file APK ra mục Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Ban-full-offline-${{ github.run_number }}
+          files: android/app/build/outputs/apk/debug/app-debug.apk
