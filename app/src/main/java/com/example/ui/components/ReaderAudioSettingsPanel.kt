@@ -28,9 +28,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.ArrowDropUp
+import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DocumentScanner
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Headphones
@@ -40,6 +42,7 @@ import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.WaterDrop
 import androidx.compose.material3.CircularProgressIndicator
@@ -75,12 +78,14 @@ import androidx.compose.ui.unit.sp
 import com.example.audio.AmbientSoundTrack
 import com.example.audio.ClonedVoiceProfile
 import com.example.audio.DetectedCharacter
+import com.example.data.CustomAmbientTrack
 import com.example.data.LibraryManager
 import com.example.data.ReaderPreferences
 import com.example.data.ReaderVoiceProfile
 import com.example.data.TtsEngineType
 import com.example.service.DeviceOfflineVoice
 import com.example.ui.theme.IosBlue
+import com.example.ui.theme.IosRed
 
 /**
  * Bảng Cài đặt nghe sách phong cách iOS tối giản trong trình đọc sách:
@@ -117,6 +122,10 @@ fun ReaderAudioSettingsSheetContent(
     onConfirmCharacterAssignments: (Map<String, ReaderVoiceProfile>) -> Unit,
     onSelectAmbientSound: (AmbientSoundTrack) -> Unit,
     onChangeAmbientVolume: (Float) -> Unit,
+    customAmbientTracks: List<CustomAmbientTrack> = emptyList(),
+    onImportCustomAmbientClick: () -> Unit = {},
+    onSelectCustomAmbient: (String) -> Unit = {},
+    onDeleteCustomAmbient: (String) -> Unit = {},
     clonedVoices: List<ClonedVoiceProfile> = emptyList(),
     onSelectClonedVoice: (String?) -> Unit = {},
     onClose: () -> Unit
@@ -809,7 +818,8 @@ fun ReaderAudioSettingsSheetContent(
                     val tracks = AmbientSoundTrack.entries
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         tracks.forEach { track ->
-                            val selected = readerPrefs.ambientSound == track
+                            val selected = readerPrefs.selectedCustomAmbientId.isNullOrBlank() &&
+                                readerPrefs.ambientSound == track
                             val trackIcon = when (track) {
                                 AmbientSoundTrack.NONE -> Icons.Rounded.VolumeOff
                                 AmbientSoundTrack.SOFT_RAIN -> Icons.Rounded.WaterDrop
@@ -876,9 +886,131 @@ fun ReaderAudioSettingsSheetContent(
                                 }
                             }
                         }
+
+                        customAmbientTracks.forEach { customTrack ->
+                            val selected = readerPrefs.selectedCustomAmbientId == customTrack.id
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(11.dp))
+                                    .background(if (selected) IosBlue.copy(alpha = 0.12f) else cardBg)
+                                    .border(
+                                        width = if (selected) 1.5.dp else 1.dp,
+                                        color = if (selected) IosBlue else borderCol,
+                                        shape = RoundedCornerShape(11.dp)
+                                    )
+                                    .clickable { onSelectCustomAmbient(customTrack.id) }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                                    .testTag("ambient_custom_track_${customTrack.id}"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(26.dp)
+                                            .clip(CircleShape)
+                                            .background(if (selected) IosBlue else itemBg)
+                                            .border(1.dp, borderCol, CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.AudioFile,
+                                            contentDescription = null,
+                                            tint = if (selected) Color.White else IosBlue,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = customTrack.displayName,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (selected) IosBlue else primaryInk,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "Nhạc nền đã import (lặp liên tục)",
+                                            fontSize = 10.sp,
+                                            color = secondaryInk,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    if (selected) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Check,
+                                            contentDescription = "Đang chọn",
+                                            tint = IosBlue,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .size(26.dp)
+                                            .clip(CircleShape)
+                                            .clickable { onDeleteCustomAmbient(customTrack.id) }
+                                            .testTag("ambient_custom_delete_${customTrack.id}"),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.DeleteOutline,
+                                            contentDescription = "Xóa nhạc nền ${customTrack.displayName}",
+                                            tint = IosRed,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        NeoBrutalistPressBox(
+                            onClick = onImportCustomAmbientClick,
+                            isPill = true,
+                            shadowOffset = 2.5.dp,
+                            pressDepth = 1.8.dp,
+                            borderWidth = 1.5.dp,
+                            containerColor = cardBg,
+                            borderColor = borderCol,
+                            shadowColor = neoHardShadowColor(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(36.dp)
+                                .testTag("reader_import_ambient_button")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.UploadFile,
+                                    contentDescription = null,
+                                    tint = IosBlue,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = "+ Import nhạc nền (.mp3 / .m4a / .wav)",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = primaryInk,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
                     }
 
-                    AnimatedVisibility(visible = readerPrefs.ambientSound != AmbientSoundTrack.NONE) {
+                    AnimatedVisibility(visible = readerPrefs.isAnyAmbientActive) {
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()

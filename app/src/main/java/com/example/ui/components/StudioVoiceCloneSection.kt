@@ -107,7 +107,7 @@ fun StudioVoiceCloneSection(
     onDeleteClonedVoice: (String) -> Unit
 ) {
     val context = LocalContext.current
-    val recorder = remember { VoiceSampleRecorder() }
+    val recorder = remember(context) { VoiceSampleRecorder(context) }
     val recState by recorder.uiState.collectAsStateWithLifecycle()
 
     var voiceName by remember { mutableStateOf("") }
@@ -184,6 +184,7 @@ fun StudioVoiceCloneSection(
     // Xác định mẫu âm thanh đầu vào hiện có (ưu tiên file vừa import hoặc bản vừa ghi âm)
     val currentImported = importedSample
     val activeInputSamples: FloatArray? = currentImported?.samples ?: recState.recordedSamples
+    val activeInputWavPath: String? = currentImported?.previewWavPath ?: recState.previewWavPath
     val activeInputRate: Int = currentImported?.sampleRate ?: recState.sampleRate
     val activeInputLabel: String? = when {
         currentImported != null -> "Import: ${currentImported.displayName} • ${
@@ -200,7 +201,7 @@ fun StudioVoiceCloneSection(
     val isPreviewingDraftVoice = recState.isPlayingPreview && localPreviewTarget == "draft_voice"
     val hasCreatedDraft = draftClonedVoice != null
 
-    fun toggleLocalPreview(tag: String, samples: FloatArray, sampleRate: Int) {
+    fun toggleLocalPreview(tag: String, samples: FloatArray, sampleRate: Int, wavPath: String? = null) {
         BookAudioPlaybackService.stopPreview(context)
         if (recState.isPlayingPreview && localPreviewTarget == tag) {
             recorder.stopPreview()
@@ -210,7 +211,8 @@ fun StudioVoiceCloneSection(
             localPreviewTarget = tag
             recorder.togglePreviewRecordedSample(
                 samplesOverride = samples,
-                sampleRateOverride = sampleRate
+                sampleRateOverride = sampleRate,
+                wavPathOverride = wavPath
             )
         }
     }
@@ -563,7 +565,12 @@ fun StudioVoiceCloneSection(
 
                     NeoBrutalistPressBox(
                         onClick = {
-                            toggleLocalPreview("raw_sample", activeInputSamples, activeInputRate)
+                            toggleLocalPreview(
+                                tag = "raw_sample",
+                                samples = activeInputSamples,
+                                sampleRate = activeInputRate,
+                                wavPath = activeInputWavPath
+                            )
                         },
                         enabled = sectionEnabled && !isExtractingEmbedding,
                         isPill = true,
@@ -667,7 +674,12 @@ fun StudioVoiceCloneSection(
                 NeoBrutalistPressBox(
                     onClick = {
                         val draft = draftClonedVoice ?: return@NeoBrutalistPressBox
-                        toggleLocalPreview("draft_voice", draft.samples, draft.sampleRate)
+                        toggleLocalPreview(
+                            tag = "draft_voice",
+                            samples = draft.samples,
+                            sampleRate = draft.sampleRate,
+                            wavPath = draft.previewWavPath
+                        )
                     },
                     enabled = draftCanPreview,
                     isPill = true,
@@ -769,8 +781,13 @@ fun StudioVoiceCloneSection(
             // Thông báo trạng thái bản nháp vừa tạo (chờ bấm Lưu)
             AnimatedVisibility(visible = draftClonedVoice != null) {
                 draftClonedVoice?.let { draft ->
+                    val modeBadge = when {
+                        draft.usedOnnxEncoder && draft.synthesizedPreview -> "ONNX Encoder + TTS"
+                        draft.usedOnnxEncoder -> "ONNX Encoder"
+                        else -> "Vector dự phòng"
+                    }
                     Text(
-                        text = "✓ Đã tạo \"${draft.name}\" (${draft.embedding.size}d) — Bấm Nghe thử để kiểm tra, rồi bấm Lưu.",
+                        text = "✓ Đã tạo \"${draft.name}\" (${draft.embedding.size}d • $modeBadge) — Bấm Nghe thử để kiểm tra, rồi bấm Lưu.",
                         fontSize = 10.5.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = IosGreen

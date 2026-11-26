@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.expandVertically
@@ -30,16 +32,20 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.ArrowDropUp
+import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.WaterDrop
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -49,6 +55,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -70,6 +77,7 @@ import com.example.audio.AmbientSoundTrack
 import com.example.audio.ClonedVoiceProfile
 import com.example.audio.ImportedVoiceSample
 import com.example.audio.OnnxVoiceEngineMode
+import com.example.data.CustomAmbientTrack
 import com.example.data.LibraryManager
 import com.example.data.ReaderPreferences
 import com.example.data.ReaderVoiceProfile
@@ -88,6 +96,7 @@ import com.example.ui.components.neoInkBorderColor
 import com.example.ui.components.neoPaperSurfaceColor
 import com.example.ui.components.neoSecondaryPaperColor
 import com.example.ui.theme.IosBlue
+import com.example.ui.theme.IosRed
 import kotlin.math.roundToInt
 
 /**
@@ -124,12 +133,32 @@ fun StudioScreen(
     onSelectClonedVoice: (String?) -> Unit,
     onDeleteClonedVoice: (String) -> Unit,
     onSelectAmbientSound: (AmbientSoundTrack) -> Unit,
+    customAmbientTracks: List<CustomAmbientTrack> = emptyList(),
+    isImportingAmbient: Boolean = false,
+    onImportCustomAmbient: (Uri) -> Unit = {},
+    onSelectCustomAmbient: (String) -> Unit = {},
+    onDeleteCustomAmbient: (String) -> Unit = {},
     onChangeAmbientVolume: (Float) -> Unit,
     onToggleAutoPlayAmbient: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
     val isAiMode = readerPrefs.ttsEngineType == TtsEngineType.AI_TTS
     val isSystemMode = !isAiMode
+    var isPreviewingStudioAmbient by remember { mutableStateOf(false) }
+
+    val studioAmbientImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            onImportCustomAmbient(uri)
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            BookAudioPlaybackService.setAmbientPreview(context, false)
+        }
+    }
 
     // Tự động nạp danh sách giọng Offline trên máy khi mở Studio
     LaunchedEffect(Unit) {
@@ -689,7 +718,8 @@ fun StudioScreen(
 
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     AmbientSoundTrack.entries.forEach { track ->
-                        val selected = readerPrefs.ambientSound == track
+                        val selected = readerPrefs.selectedCustomAmbientId.isNullOrBlank() &&
+                            readerPrefs.ambientSound == track
                         val trackIcon = when (track) {
                             AmbientSoundTrack.NONE -> Icons.Rounded.VolumeOff
                             AmbientSoundTrack.SOFT_RAIN -> Icons.Rounded.WaterDrop
@@ -706,7 +736,13 @@ fun StudioScreen(
                                     color = if (selected) IosBlue else borderCol,
                                     shape = RoundedCornerShape(11.dp)
                                 )
-                                .clickable { onSelectAmbientSound(track) }
+                                .clickable {
+                                    onSelectAmbientSound(track)
+                                    if (track == AmbientSoundTrack.NONE && isPreviewingStudioAmbient) {
+                                        isPreviewingStudioAmbient = false
+                                        BookAudioPlaybackService.setAmbientPreview(context, false)
+                                    }
+                                }
                                 .padding(horizontal = 10.dp, vertical = 8.dp)
                                 .testTag("studio_ambient_track_${track.storageKey}"),
                             verticalAlignment = Alignment.CenterVertically,
@@ -756,9 +792,177 @@ fun StudioScreen(
                             }
                         }
                     }
+
+                    // Danh sách nhạc nền do người dùng tự import (.mp3 / .m4a / .wav / .ogg)
+                    customAmbientTracks.forEach { customTrack ->
+                        val selected = readerPrefs.selectedCustomAmbientId == customTrack.id
+                        val isThisPreviewing = selected && isPreviewingStudioAmbient
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(11.dp))
+                                .background(if (selected) IosBlue.copy(alpha = 0.12f) else trayBg)
+                                .border(
+                                    width = if (selected) 1.5.dp else 1.dp,
+                                    color = if (selected) IosBlue else borderCol,
+                                    shape = RoundedCornerShape(11.dp)
+                                )
+                                .clickable { onSelectCustomAmbient(customTrack.id) }
+                                .padding(horizontal = 10.dp, vertical = 8.dp)
+                                .testTag("studio_custom_ambient_${customTrack.id}"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .clip(CircleShape)
+                                        .background(if (selected) IosBlue else paperBg)
+                                        .border(1.dp, borderCol, CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.AudioFile,
+                                        contentDescription = null,
+                                        tint = if (selected) Color.White else IosBlue,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = customTrack.displayName,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (selected) IosBlue else primaryInk,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "Nhạc nền đã import • Lặp liên tục offline",
+                                        fontSize = 10.sp,
+                                        color = secondaryInk,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                NeoBrutalistPressBox(
+                                    onClick = {
+                                        if (isThisPreviewing) {
+                                            isPreviewingStudioAmbient = false
+                                            BookAudioPlaybackService.setAmbientPreview(context, false)
+                                        } else {
+                                            onSelectCustomAmbient(customTrack.id)
+                                            isPreviewingStudioAmbient = true
+                                            BookAudioPlaybackService.setAmbientPreview(context, true)
+                                        }
+                                    },
+                                    isCircle = true,
+                                    shadowOffset = 2.dp,
+                                    pressDepth = 1.5.dp,
+                                    borderWidth = 1.2.dp,
+                                    containerColor = if (isThisPreviewing) IosBlue else paperBg,
+                                    borderColor = borderCol,
+                                    shadowColor = shadowCol,
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .testTag("studio_custom_ambient_preview_${customTrack.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = if (isThisPreviewing) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
+                                        contentDescription = if (isThisPreviewing) "Dừng nghe thử nhạc nền" else "Nghe thử nhạc nền",
+                                        tint = if (isThisPreviewing) Color.White else primaryInk,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .size(26.dp)
+                                        .clip(CircleShape)
+                                        .clickable {
+                                            if (isThisPreviewing) {
+                                                isPreviewingStudioAmbient = false
+                                                BookAudioPlaybackService.setAmbientPreview(context, false)
+                                            }
+                                            onDeleteCustomAmbient(customTrack.id)
+                                        }
+                                        .testTag("studio_custom_ambient_delete_${customTrack.id}"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.DeleteOutline,
+                                        contentDescription = "Xóa nhạc nền ${customTrack.displayName}",
+                                        tint = IosRed,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Nút Import nhạc nền từ máy (3D Neo-Brutalist)
+                    NeoBrutalistPressBox(
+                        onClick = {
+                            if (!isImportingAmbient) {
+                                studioAmbientImportLauncher.launch(arrayOf("audio/*"))
+                            }
+                        },
+                        enabled = !isImportingAmbient,
+                        isPill = true,
+                        shadowOffset = 2.5.dp,
+                        pressDepth = 1.8.dp,
+                        borderWidth = 1.5.dp,
+                        containerColor = trayBg,
+                        borderColor = borderCol,
+                        shadowColor = shadowCol,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(38.dp)
+                            .testTag("studio_import_ambient_button")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.padding(horizontal = 12.dp)
+                        ) {
+                            if (isImportingAmbient) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 1.8.dp,
+                                    color = IosBlue
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.UploadFile,
+                                    contentDescription = null,
+                                    tint = IosBlue,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            Text(
+                                text = if (isImportingAmbient) "Đang import nhạc nền…" else "+ Import nhạc nền từ máy (.mp3 / .m4a / .wav)",
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = primaryInk,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                 }
 
-                if (readerPrefs.ambientSound != AmbientSoundTrack.NONE) {
+                if (readerPrefs.isAnyAmbientActive) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()

@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.AutoStories
 import androidx.compose.material.icons.rounded.Check
@@ -78,6 +79,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.audio.AmbientSoundTrack
+import com.example.data.CustomAmbientTrack
 import com.example.data.CustomImportedFont
 import com.example.data.HorizontalPageEffect
 import com.example.data.LibraryManager
@@ -124,6 +126,10 @@ fun LibraryReaderGeneralSettingsSheet(
     onSelectNarratorVoice: (ReaderVoiceProfile) -> Unit,
     clonedVoices: List<com.example.audio.ClonedVoiceProfile> = emptyList(),
     onSelectClonedVoice: (String?) -> Unit = {},
+    customAmbientTracks: List<CustomAmbientTrack> = emptyList(),
+    onImportCustomAmbientClick: () -> Unit = {},
+    onSelectCustomAmbient: (String) -> Unit = {},
+    onDeleteCustomAmbient: (String) -> Unit = {},
     onSelectAmbientSound: (AmbientSoundTrack) -> Unit,
     onToggleAutoPlayAmbient: (Boolean) -> Unit,
     onDismiss: () -> Unit
@@ -293,6 +299,10 @@ fun LibraryReaderGeneralSettingsSheet(
                             onSelectTtsEngine = onSelectTtsEngine,
                             onSelectNarratorVoice = onSelectNarratorVoice,
                             onSelectClonedVoice = onSelectClonedVoice,
+                            customAmbientTracks = customAmbientTracks,
+                            onImportCustomAmbientClick = onImportCustomAmbientClick,
+                            onSelectCustomAmbient = onSelectCustomAmbient,
+                            onDeleteCustomAmbient = onDeleteCustomAmbient,
                             onSelectAmbientSound = onSelectAmbientSound,
                             onToggleAutoPlayAmbient = onToggleAutoPlayAmbient
                         )
@@ -853,6 +863,10 @@ private fun AudioListeningDefaultsTab(
     onSelectTtsEngine: (TtsEngineType) -> Unit,
     onSelectNarratorVoice: (ReaderVoiceProfile) -> Unit,
     onSelectClonedVoice: (String?) -> Unit,
+    customAmbientTracks: List<CustomAmbientTrack>,
+    onImportCustomAmbientClick: () -> Unit,
+    onSelectCustomAmbient: (String) -> Unit,
+    onDeleteCustomAmbient: (String) -> Unit,
     onSelectAmbientSound: (AmbientSoundTrack) -> Unit,
     onToggleAutoPlayAmbient: (Boolean) -> Unit
 ) {
@@ -1155,12 +1169,52 @@ private fun AudioListeningDefaultsTab(
 
         HorizontalDivider(thickness = 0.8.dp, color = MaterialTheme.colorScheme.outline)
 
-        Text(
-            text = "Âm thanh nền mặc định",
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = secondaryInk
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "Âm thanh nền mặc định",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = secondaryInk
+            )
+            NeoBrutalistPressBox(
+                onClick = onImportCustomAmbientClick,
+                isPill = true,
+                shadowOffset = 2.dp,
+                pressDepth = 1.5.dp,
+                borderWidth = 1.2.dp,
+                containerColor = itemBg,
+                borderColor = borderCol,
+                shadowColor = neoHardShadowColor(),
+                modifier = Modifier
+                    .height(28.dp)
+                    .testTag("general_import_ambient_button")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.FileUpload,
+                        contentDescription = null,
+                        tint = accentBlue,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Text(
+                        text = "+ Import nhạc nền",
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = primaryInk,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+        }
 
         Column(
             modifier = Modifier
@@ -1170,7 +1224,8 @@ private fun AudioListeningDefaultsTab(
                 .border(1.5.dp, borderCol, RoundedCornerShape(12.dp))
         ) {
             AmbientSoundTrack.entries.forEachIndexed { idx, track ->
-                val selected = readerPrefs.ambientSound == track
+                val selected = readerPrefs.selectedCustomAmbientId.isNullOrBlank() &&
+                    readerPrefs.ambientSound == track
                 val trackIcon = when (track) {
                     AmbientSoundTrack.NONE -> Icons.Rounded.VolumeOff
                     AmbientSoundTrack.SOFT_RAIN -> Icons.Rounded.WaterDrop
@@ -1220,7 +1275,83 @@ private fun AudioListeningDefaultsTab(
                         )
                     }
                 }
-                if (idx < AmbientSoundTrack.entries.lastIndex) {
+                if (idx < AmbientSoundTrack.entries.lastIndex || customAmbientTracks.isNotEmpty()) {
+                    HorizontalDivider(
+                        thickness = 0.5.dp,
+                        color = borderCol,
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+                }
+            }
+
+            customAmbientTracks.forEachIndexed { idx, customTrack ->
+                val selected = readerPrefs.selectedCustomAmbientId == customTrack.id
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelectCustomAmbient(customTrack.id) }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("general_custom_ambient_${customTrack.id}"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.AudioFile,
+                            contentDescription = null,
+                            tint = if (selected) accentBlue else secondaryInk,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = customTrack.displayName,
+                                fontSize = 12.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                color = if (selected) accentBlue else primaryInk,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "Nhạc nền đã import",
+                                fontSize = 10.sp,
+                                color = secondaryInk
+                            )
+                        }
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (selected) {
+                            Icon(
+                                imageVector = Icons.Rounded.Check,
+                                contentDescription = "Đang chọn",
+                                tint = accentBlue,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .clickable { onDeleteCustomAmbient(customTrack.id) }
+                                .testTag("general_custom_ambient_delete_${customTrack.id}"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.DeleteOutline,
+                                contentDescription = "Xóa nhạc nền ${customTrack.displayName}",
+                                tint = IosRed,
+                                modifier = Modifier.size(15.dp)
+                            )
+                        }
+                    }
+                }
+                if (idx < customAmbientTracks.lastIndex) {
                     HorizontalDivider(
                         thickness = 0.5.dp,
                         color = borderCol,

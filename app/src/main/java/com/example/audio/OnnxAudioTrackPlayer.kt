@@ -3,15 +3,18 @@ package com.example.audio
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.media.MediaPlayer
 import android.media.PlaybackParams
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import java.io.File
 import kotlin.math.min
 
 /**
- * Lightweight native Android [AudioTrack] player for ONNX-synthesized Float32 sentence waveforms.
- * Supports smooth playback speed (`0.8x–1.5x`) and instant interruption on pause/skip/stop.
+ * Native Android [AudioTrack] / [MediaPlayer] player for ONNX-synthesized waveforms (24kHz/48kHz Mono)
+ * and standard 44-byte 16-bit PCM WAV previews.
+ * Properly drains all buffered frames via [AudioTrack.getPlaybackHeadPosition] so sentences never clip.
  */
 class OnnxAudioTrackPlayer {
 
@@ -19,10 +22,13 @@ class OnnxAudioTrackPlayer {
     private var activeTrack: AudioTrack? = null
 
     @Volatile
+    private var activeMediaPlayer: MediaPlayer? = null
+
+    @Volatile
     private var stopped = false
 
     /**
-     * Plays a synthesized Mono Float32 sentence synchronously inside a coroutine on [kotlinx.coroutines.Dispatchers.IO].
+     * Plays a synthesized Mono Float32 waveform synchronously inside a coroutine on [kotlinx.coroutines.Dispatchers.IO].
      * Returns `true` if playback completed naturally, or `false` if interrupted/stopped.
      */
     suspend fun playBlocking(
@@ -39,6 +45,7 @@ class OnnxAudioTrackPlayer {
             AudioFormat.ENCODING_PCM_16BIT
         ).coerceAtLeast(2048)
 
+        val streamBufBytes = maxOf(minBuf * 2, 8192)
         val track = runCatching {
             AudioTrack.Builder()
                 .setAudioAttributes(
@@ -54,7 +61,7 @@ class OnnxAudioTrackPlayer {
                         .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                         .build()
                 )
-                .setBufferSizeInBytes(maxOf(minBuf * 2, 8192))
+                .setBufferSizeInBytes(streamBufBytes)
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
         }.getOrNull() ?: return false
@@ -65,8 +72,10 @@ class OnnxAudioTrackPlayer {
         }
 
         val clampedSpeed = speed.coerceIn(0.8f, 1.5f)
-        runCatching {
-            track.playbackParams = PlaybackParams().setSpeed(clampedSpeed)
+        if (clampedSpeed != 1.0f) {
+            runCatching {
+                track.playbackParams = PlaybackParams().setSpeed(clampedSpeed)
+            }
         }
 
         activeTrack = track
@@ -76,14 +85,22 @@ class OnnxAudioTrackPlayer {
             val chunkSize = 1024
             while (currentCoroutineContext().isActive && !stopped && offset < pcm16.size) {
                 val toWrite = min(chunkSize, pcm16.size - offset)
-                val written = track.write(pcm16, offset, toWrite)
+                val written = track.write(pcm16, offset, toWrite, AudioTrack.WRITE_BLOCKING)
                 if (written <= 0) break
                 offset += written
             }
             if (!stopped && currentCoroutineContext().isActive) {
-                val drainMs = ((chunkSize * 1000L) / (sampleRate * clampedSpeed)).toLong().coerceIn(30L, 140L)
-                delay(drainMs)
-                true
+                val totalFrames = pcm16.size
+                val expectedRemainingMs = ((streamBufBytes / 2L) * 1000L / (sampleRate * clampedSpeed)).toLong()
+                    .coerceIn(150L, 1200L)
+                val deadline = System.currentTimeMillis() + expectedRemainingMs + 450L
+                while (currentCoroutineContext().isActive && !stopped &&
+                    track.playbackHeadPosition < totalFrames &&
+                    System.currentTimeMillis() < deadline
+                ) {
+                    delay(20L)
+                }
+                !stopped && currentCoroutineContext().isActive
             } else {
                 false
             }
@@ -98,8 +115,57 @@ class OnnxAudioTrackPlayer {
         }
     }
 
+    /**
+     * Plays a standard 44-byte 16-bit PCM WAV file cleanly via [MediaPlayer].
+     */
+    suspend fun playWavFileBlocking(wavFile: File): Boolean {
+        if (!wavFile.exists() || wavFile.length() <= 44L) return false
+        stopped = false
+        val player = MediaPlayer()
+        activeMediaPlayer = player
+        return try {
+            player.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            player.setDataSource(wavFile.absolutePath)
+            player.prepare()
+            var finished = false
+            player.setOnCompletionListener { finished = true }
+            player.setOnErrorListener { _, _, _ ->
+                finished = true
+                true
+            }
+            val durationMs = player.duration.coerceIn(500, 60_000).toLong()
+            val deadline = System.currentTimeMillis() + durationMs + 1_200L
+            player.start()
+            while (currentCoroutineContext().isActive && !stopped && !finished && System.currentTimeMillis() < deadline) {
+                delay(35L)
+            }
+            !stopped && currentCoroutineContext().isActive
+        } catch (_: Exception) {
+            false
+        } finally {
+            runCatching { if (player.isPlaying) player.stop() }
+            runCatching { player.reset() }
+            runCatching { player.release() }
+            if (activeMediaPlayer === player) {
+                activeMediaPlayer = null
+            }
+        }
+    }
+
     fun stopImmediately() {
         stopped = true
+        val mp = activeMediaPlayer
+        activeMediaPlayer = null
+        if (mp != null) {
+            runCatching { if (mp.isPlaying) mp.stop() }
+            runCatching { mp.reset() }
+            runCatching { mp.release() }
+        }
         val track = activeTrack
         activeTrack = null
         if (track != null) {

@@ -613,10 +613,10 @@ class BookAudioPlaybackService : Service() {
             }
 
             val clonedEmbedding = clonedVoiceRepo.loadEmbedding(selectedClone)
-            if (!onnxEngine.isFullOnnxSynthesisReady() || clonedEmbedding == null) {
+            if (clonedEmbedding == null || clonedEmbedding.isEmpty()) {
                 activeUsingOnnxVoice = false
                 isPlaying = false
-                lastPlaybackNotice = "Chế độ AI Nhân bản không dùng giọng hệ thống. Cần nạp đủ model ONNX tổng hợp để đọc bằng giọng \"${selectedClone.name}\"."
+                lastPlaybackNotice = "Không tìm thấy vector đặc trưng (.emb) của giọng \"${selectedClone.name}\". Hãy tạo lại trong Studio."
                 publishState()
                 syncAmbientPlayback()
                 return
@@ -716,6 +716,20 @@ class BookAudioPlaybackService : Service() {
         generation: Long
     ) {
         onnxStreamJob = serviceScope.launch {
+            // Đảm bảo quá trình sao chép assets/models/ -> filesDir/models/ và nạp OrtSession đã hoàn tất
+            onnxEngine.ensureInitialized()
+            if (!onnxEngine.isFullOnnxSynthesisReady()) {
+                val diag = onnxEngine.getReadinessDiagnostic()
+                withContext(Dispatchers.Main) {
+                    if (isPlaying && generation == activeParagraphGeneration) {
+                        activeUsingOnnxVoice = false
+                        lastPlaybackNotice = "Không thể tổng hợp âm AI ONNX: $diag"
+                        pausePlayback()
+                    }
+                }
+                return@launch
+            }
+
             val speed = (if (activePrefs.advancedCustomEnabled) {
                 activePrefs.customSpeechRate
             } else {
@@ -727,32 +741,33 @@ class BookAudioPlaybackService : Service() {
             ).toLong()
 
             var nextDeferred = async {
-                onnxEngine.synthesizeSentence(sentences[startSentenceIndex], embedding, speed)
+                onnxEngine.synthesizeSentenceDetailed(sentences[startSentenceIndex], embedding, speed)
             }
 
             for (idx in startSentenceIndex until sentences.size) {
                 if (!isActive || generation != activeParagraphGeneration) return@launch
 
-                val currentAudio = nextDeferred.await()
+                val currentResult = nextDeferred.await()
                 if (!isActive || generation != activeParagraphGeneration) return@launch
 
-                if (idx + 1 < sentences.size) {
-                    val lookaheadSentence = sentences[idx + 1]
-                    nextDeferred = async {
-                        onnxEngine.synthesizeSentence(lookaheadSentence, embedding, speed)
-                    }
-                }
-
+                val currentAudio = currentResult.audio
                 if (currentAudio == null) {
-                    // Tuyệt đối KHÔNG phát giọng hệ thống khi đang ở chế độ AI Nhân bản -> dừng gọn và báo nhẹ
+                    val reason = currentResult.errorMessage ?: "lỗi không xác định"
                     withContext(Dispatchers.Main) {
                         if (isPlaying && generation == activeParagraphGeneration) {
                             activeUsingOnnxVoice = false
-                            lastPlaybackNotice = "Không thể tổng hợp âm thanh AI ONNX cho câu này (tiếng đọc hệ thống đang tắt)."
+                            lastPlaybackNotice = "Không thể tổng hợp âm AI ONNX cho đoạn văn này: $reason"
                             pausePlayback()
                         }
                     }
                     return@launch
+                }
+
+                if (idx + 1 < sentences.size) {
+                    val lookaheadSentence = sentences[idx + 1]
+                    nextDeferred = async {
+                        onnxEngine.synthesizeSentenceDetailed(lookaheadSentence, embedding, speed)
+                    }
                 }
 
                 withContext(Dispatchers.Main) {
@@ -1062,9 +1077,10 @@ class BookAudioPlaybackService : Service() {
 
         previewAudioJob = serviceScope.launch {
             try {
+                onnxEngine.ensureInitialized()
                 val embedding = clonedVoiceRepo.loadEmbedding(targetVoice)
-                val synthesized = if (embedding != null && onnxEngine.isFullOnnxSynthesisReady()) {
-                    onnxEngine.synthesizeSentence(
+                val synthResult = if (embedding != null && onnxEngine.isFullOnnxSynthesisReady()) {
+                    onnxEngine.synthesizeSentenceDetailed(
                         sentence = "Xin chào, đây là giọng đọc nhân bản AI ngoại tuyến.",
                         speakerEmbedding = embedding,
                         speed = activePrefs.speechRate.coerceIn(0.8f, 1.5f)
@@ -1073,6 +1089,7 @@ class BookAudioPlaybackService : Service() {
                     null
                 }
 
+                val synthesized = synthResult?.audio
                 if (synthesized != null) {
                     onnxPlayer.playBlocking(
                         samples = synthesized.pcmFloat,
@@ -1080,16 +1097,29 @@ class BookAudioPlaybackService : Service() {
                         speed = 1.0f
                     )
                 } else {
-                    val refAudio = clonedVoiceRepo.loadReferenceAudio(targetVoice)
-                    if (refAudio != null && refAudio.isNotEmpty()) {
-                        onnxPlayer.playBlocking(
-                            samples = refAudio,
-                            sampleRate = targetVoice.sampleRate,
-                            speed = 1.0f
-                        )
-                    } else {
+                    // Nếu tổng hợp ONNX báo lỗi chi tiết, hiển thị rõ lý do đồng thời phát bản WAV gốc chuẩn 44-byte
+                    val errDetail = synthResult?.errorMessage
+                    if (!errDetail.isNullOrBlank()) {
                         withContext(Dispatchers.Main) {
-                            lastPlaybackNotice = "Không tìm thấy dữ liệu mẫu giọng của \"${targetVoice.name}\"."
+                            lastPlaybackNotice = "Lỗi tổng hợp ONNX nghe thử: $errDetail"
+                            publishState()
+                        }
+                    }
+                    val wavFile = clonedVoiceRepo.ensureReferenceWavFile(targetVoice)
+                    if (wavFile != null && onnxPlayer.playWavFileBlocking(wavFile)) {
+                        // Played crisp 16-bit PCM WAV via MediaPlayer
+                    } else {
+                        val refAudio = clonedVoiceRepo.loadReferenceAudio(targetVoice)
+                        if (refAudio != null && refAudio.isNotEmpty()) {
+                            onnxPlayer.playBlocking(
+                                samples = refAudio,
+                                sampleRate = targetVoice.sampleRate,
+                                speed = 1.0f
+                            )
+                        } else {
+                            withContext(Dispatchers.Main) {
+                                lastPlaybackNotice = "Không tìm thấy dữ liệu mẫu giọng của \"${targetVoice.name}\"."
+                            }
                         }
                     }
                 }
@@ -1106,12 +1136,27 @@ class BookAudioPlaybackService : Service() {
     }
 
     private fun syncAmbientPlayback() {
+        val customId = activePrefs.selectedCustomAmbientId
+        val customPath = if (!customId.isNullOrBlank()) {
+            libraryManager.findCustomAmbientFilePath(customId)
+        } else {
+            null
+        }
         val track = activePrefs.ambientSound
         val volume = activePrefs.ambientVolume
         val shouldPlayForBook = isPlaying && activePrefs.autoPlayAmbientWithAudio
-        if (track != AmbientSoundTrack.NONE && (shouldPlayForBook || isPreviewingAmbient)) {
-            ambientEngine.start(track, volume)
-            ambientEngine.updateVolume(volume)
+        if (shouldPlayForBook || isPreviewingAmbient) {
+            when {
+                !customPath.isNullOrBlank() -> {
+                    ambientEngine.startCustomFile(customPath, volume)
+                    ambientEngine.updateVolume(volume)
+                }
+                track != AmbientSoundTrack.NONE -> {
+                    ambientEngine.start(track, volume)
+                    ambientEngine.updateVolume(volume)
+                }
+                else -> ambientEngine.stop()
+            }
         } else {
             ambientEngine.stop()
         }

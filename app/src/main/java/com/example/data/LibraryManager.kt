@@ -8,6 +8,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.pdf.PdfRenderer
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
@@ -220,6 +221,15 @@ data class CustomImportedFont(
     val filePath: String
 )
 
+/**
+ * Nhạc nền âm thanh (`.mp3`, `.m4a`, `.wav`, `.ogg`, `.aac`, `.flac`) do người dùng tự import (lưu offline).
+ */
+data class CustomAmbientTrack(
+    val id: String,
+    val displayName: String,
+    val filePath: String
+)
+
 data class ReaderPreferences(
     val fontSizeSp: Float = 17f,
     val fontId: String = "literata",
@@ -235,6 +245,7 @@ data class ReaderPreferences(
     val characterVoicesEnabled: Boolean = true,
     val ttsEngineType: TtsEngineType = TtsEngineType.SYSTEM_TTS,
     val ambientSound: AmbientSoundTrack = AmbientSoundTrack.NONE,
+    val selectedCustomAmbientId: String? = null,
     val ambientVolume: Float = 0.20f,
     val autoPlayAmbientWithAudio: Boolean = true,
     // Nâng cấp TTS Offline: giọng gốc trên máy + chế độ Tùy chỉnh nâng cao (Pitch, Rate, Pause)
@@ -246,6 +257,8 @@ data class ReaderPreferences(
     // Bản nâng cấp 2.0: Giọng nhân bản AI (100% Offline ONNX / Dự phòng TTS thiết bị)
     val selectedClonedVoiceId: String? = null
 ) {
+    val isAnyAmbientActive: Boolean
+        get() = ambientSound != AmbientSoundTrack.NONE || !selectedCustomAmbientId.isNullOrBlank()
     fun effectivePitchFor(profile: ReaderVoiceProfile): Float {
         return (customVoicePitches[profile.storageKey] ?: profile.pitch)
             .coerceIn(LibraryManager.MIN_VOICE_PITCH, LibraryManager.MAX_VOICE_PITCH)
@@ -936,6 +949,7 @@ class LibraryManager(
             characterVoicesEnabled = p.getBoolean(KEY_CHARACTER_VOICES_ENABLED, true),
             ttsEngineType = TtsEngineType.fromKey(p.getString(KEY_TTS_ENGINE_TYPE, null)),
             ambientSound = AmbientSoundTrack.fromKey(p.getString(KEY_AMBIENT_SOUND, null)),
+            selectedCustomAmbientId = p.getString(KEY_SELECTED_CUSTOM_AMBIENT_ID, null)?.takeIf { it.isNotBlank() },
             ambientVolume = p.getFloat(KEY_AMBIENT_VOLUME, DEFAULT_AMBIENT_VOLUME)
                 .coerceIn(MIN_AMBIENT_VOLUME, MAX_AMBIENT_VOLUME),
             autoPlayAmbientWithAudio = p.getBoolean(KEY_AUTO_PLAY_AMBIENT, true),
@@ -983,6 +997,7 @@ class LibraryManager(
             ?.putBoolean(KEY_CHARACTER_VOICES_ENABLED, readerPrefs.characterVoicesEnabled)
             ?.putString(KEY_TTS_ENGINE_TYPE, readerPrefs.ttsEngineType.storageKey)
             ?.putString(KEY_AMBIENT_SOUND, readerPrefs.ambientSound.storageKey)
+            ?.putString(KEY_SELECTED_CUSTOM_AMBIENT_ID, readerPrefs.selectedCustomAmbientId ?: "")
             ?.putFloat(
                 KEY_AMBIENT_VOLUME,
                 readerPrefs.ambientVolume.coerceIn(MIN_AMBIENT_VOLUME, MAX_AMBIENT_VOLUME)
@@ -1113,6 +1128,139 @@ class LibraryManager(
         return remaining
     }
 
+    // -------------------------------------------------------------------------
+    // Custom Imported Ambient Music (stored locally in `book_library/custom_ambient/`)
+    // -------------------------------------------------------------------------
+
+    private val customAmbientDir: File
+        get() = File(libraryRootDir, CUSTOM_AMBIENT_SUBDIR)
+
+    private val customAmbientIndexFile: File
+        get() = File(customAmbientDir, CUSTOM_AMBIENT_INDEX_FILE)
+
+    @Synchronized
+    fun loadCustomAmbientTracks(): List<CustomAmbientTrack> {
+        if (!customAmbientIndexFile.exists()) return emptyList()
+        return runCatching {
+            val arr = JSONArray(customAmbientIndexFile.readText(Charsets.UTF_8))
+            val result = ArrayList<CustomAmbientTrack>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val id = obj.optString("id").trim()
+                val name = obj.optString("displayName").trim()
+                val path = obj.optString("filePath").trim()
+                if (id.isNotEmpty() && name.isNotEmpty() && path.isNotEmpty() && File(path).exists()) {
+                    result.add(CustomAmbientTrack(id = id, displayName = name, filePath = path))
+                }
+            }
+            result
+        }.getOrDefault(emptyList())
+    }
+
+    @Synchronized
+    fun findCustomAmbientFilePath(trackId: String?): String? {
+        if (trackId.isNullOrBlank()) return null
+        return loadCustomAmbientTracks()
+            .firstOrNull { it.id == trackId }
+            ?.filePath
+            ?.takeIf { File(it).exists() }
+    }
+
+    @Synchronized
+    private fun saveCustomAmbientTracks(tracks: List<CustomAmbientTrack>) {
+        customAmbientDir.mkdirs()
+        val arr = JSONArray()
+        tracks.forEach { track ->
+            arr.put(
+                JSONObject().apply {
+                    put("id", track.id)
+                    put("displayName", track.displayName)
+                    put("filePath", track.filePath)
+                }
+            )
+        }
+        customAmbientIndexFile.writeText(arr.toString(), Charsets.UTF_8)
+    }
+
+    suspend fun importCustomAmbientFromUri(context: Context, uri: Uri): Result<CustomAmbientTrack> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val rawName = queryDisplayName(context, uri) ?: "NhacNen.mp3"
+                val lower = rawName.lowercase()
+                val ext = when {
+                    lower.endsWith(".mp3") -> ".mp3"
+                    lower.endsWith(".m4a") -> ".m4a"
+                    lower.endsWith(".wav") -> ".wav"
+                    lower.endsWith(".ogg") -> ".ogg"
+                    lower.endsWith(".aac") -> ".aac"
+                    lower.endsWith(".flac") -> ".flac"
+                    else -> ".mp3"
+                }
+                val cleanDisplayName = rawName
+                    .substringBeforeLast('.')
+                    .replace('_', ' ')
+                    .replace('-', ' ')
+                    .trim()
+                    .ifBlank { "Nhạc nền đã nhập" }
+                    .take(44)
+
+                customAmbientDir.mkdirs()
+                val trackId = "ambient_${UUID.randomUUID().toString().take(8)}"
+                val destFile = File(customAmbientDir, "$trackId$ext")
+
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(destFile).use { output ->
+                        input.copyTo(output, bufferSize = 32 * 1024)
+                    }
+                } ?: error("Không thể đọc tệp nhạc nền đã chọn.")
+
+                if (destFile.length() < 1024L) {
+                    destFile.delete()
+                    error("Tệp âm thanh quá nhỏ hoặc không hợp lệ.")
+                }
+
+                // Xác thực tệp âm thanh hợp lệ bằng MediaMetadataRetriever
+                val isValidAudio = runCatching {
+                    val retriever = MediaMetadataRetriever()
+                    try {
+                        retriever.setDataSource(destFile.absolutePath)
+                        val hasAudio = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+                        val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                            ?.toLongOrNull() ?: 0L
+                        hasAudio == "yes" || durationMs > 0L
+                    } finally {
+                        runCatching { retriever.release() }
+                    }
+                }.getOrDefault(false)
+
+                if (!isValidAudio) {
+                    destFile.delete()
+                    error("Tệp đã chọn không phải file âm thanh hợp lệ (.mp3, .m4a, .wav, .ogg).")
+                }
+
+                val imported = CustomAmbientTrack(
+                    id = trackId,
+                    displayName = cleanDisplayName,
+                    filePath = destFile.absolutePath
+                )
+                val updated = listOf(imported) + loadCustomAmbientTracks()
+                saveCustomAmbientTracks(updated)
+                imported
+            }
+        }
+
+    @Synchronized
+    fun deleteCustomAmbientTrack(trackId: String): List<CustomAmbientTrack> {
+        val existing = loadCustomAmbientTracks()
+        val target = existing.firstOrNull { it.id == trackId }
+        if (target != null) {
+            runCatching { File(target.filePath).delete() }
+        }
+        val remaining = existing.filterNot { it.id == trackId }
+        saveCustomAmbientTracks(remaining)
+        return remaining
+    }
+
     private fun queryDisplayName(context: Context, uri: Uri): String? {
         return runCatching {
             context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
@@ -1217,6 +1365,8 @@ class LibraryManager(
         private const val SCANNED_CHARACTERS_FILE_NAME = "scanned_characters.json"
         private const val CUSTOM_FONTS_SUBDIR = "custom_fonts"
         private const val CUSTOM_FONTS_INDEX_FILE = "fonts_index.json"
+        private const val CUSTOM_AMBIENT_SUBDIR = "custom_ambient"
+        private const val CUSTOM_AMBIENT_INDEX_FILE = "ambient_index.json"
         private const val COVER_THUMB_MAX_PX = 240
 
         private const val PREFS_NAME = "epub_clean_book_reader_prefs"
@@ -1234,6 +1384,7 @@ class LibraryManager(
         private const val KEY_CHARACTER_VOICES_ENABLED = "reader_character_voices_enabled"
         private const val KEY_TTS_ENGINE_TYPE = "reader_tts_engine_type"
         private const val KEY_AMBIENT_SOUND = "reader_ambient_sound"
+        private const val KEY_SELECTED_CUSTOM_AMBIENT_ID = "reader_selected_custom_ambient_id"
         private const val KEY_AMBIENT_VOLUME = "reader_ambient_volume"
         private const val KEY_AUTO_PLAY_AMBIENT = "reader_auto_play_ambient_with_audio"
         private const val KEY_SELECTED_SYSTEM_VOICE = "reader_selected_system_voice"

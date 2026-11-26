@@ -21,12 +21,16 @@ data class ClonedVoiceProfile(
     val embeddingDim: Int,
     val embeddingPath: String,
     val referenceAudioPath: String,
+    val referenceWavPath: String = "",
     val usedOnnxEncoder: Boolean,
     val estimatedPitchRatio: Float
 )
 
 /**
- * 100% Offline Persistent Storage for Cloned Voices (speaker embedding Float32 vectors + reference audio).
+ * 100% Offline Persistent Storage for Cloned Voices:
+ * - Speaker embedding Float32 vectors (`.emb`)
+ * - Normalized 16kHz Mono Float32 audio (`.f32`)
+ * - Standard 16-bit PCM Mono WAV with 44-byte header (`.wav`) for crystal-clear preview playback.
  */
 class ClonedVoiceRepository(private val rootDir: File) {
 
@@ -57,9 +61,10 @@ class ClonedVoiceRepository(private val rootDir: File) {
                         createdAtMillis = obj.optLong("createdAtMillis", 0L),
                         sampleRate = obj.optInt("sampleRate", VoiceSampleRecorder.DEFAULT_TARGET_SAMPLE_RATE),
                         durationSeconds = obj.optDouble("durationSeconds", 5.0).toFloat(),
-                        embeddingDim = obj.optInt("embeddingDim", 256),
+                        embeddingDim = obj.optInt("embeddingDim", 192),
                         embeddingPath = embPath,
                         referenceAudioPath = obj.optString("referenceAudioPath").trim(),
+                        referenceWavPath = obj.optString("referenceWavPath").trim(),
                         usedOnnxEncoder = obj.optBoolean("usedOnnxEncoder", false),
                         estimatedPitchRatio = obj.optDouble("estimatedPitchRatio", 1.0)
                             .toFloat()
@@ -91,12 +96,14 @@ class ClonedVoiceRepository(private val rootDir: File) {
         val cleanName = rawName.trim().ifBlank { "Giọng nhân bản" }.take(36)
         val embFile = File(rootDir, "$id.emb")
         val refAudioFile = File(rootDir, "$id.f32")
+        val refWavFile = File(rootDir, "$id.wav")
 
         writeFloatArrayBinary(embFile, embedding)
         writeFloatArrayBinary(refAudioFile, samples)
+        AudioFileDecoder.writePcm16MonoWav(refWavFile, samples, sampleRate.coerceAtLeast(8_000))
 
         val durationSec = if (sampleRate > 0) {
-            (samples.size.toFloat() / sampleRate.toFloat()).coerceIn(3.0f, 8.5f)
+            (samples.size.toFloat() / sampleRate.toFloat()).coerceIn(2.0f, 8.5f)
         } else {
             5.0f
         }
@@ -110,6 +117,7 @@ class ClonedVoiceRepository(private val rootDir: File) {
             embeddingDim = embedding.size,
             embeddingPath = embFile.absolutePath,
             referenceAudioPath = refAudioFile.absolutePath,
+            referenceWavPath = refWavFile.absolutePath,
             usedOnnxEncoder = usedOnnxEncoder,
             estimatedPitchRatio = estimatedPitchRatio.coerceIn(0.75f, 1.28f)
         )
@@ -128,6 +136,10 @@ class ClonedVoiceRepository(private val rootDir: File) {
             if (target.referenceAudioPath.isNotBlank()) {
                 runCatching { File(target.referenceAudioPath).delete() }
             }
+            if (target.referenceWavPath.isNotBlank()) {
+                runCatching { File(target.referenceWavPath).delete() }
+            }
+            runCatching { File(rootDir, "${target.id}.wav").delete() }
         }
         val remaining = current.filterNot { it.id == voiceId }
         saveIndex(remaining)
@@ -147,6 +159,24 @@ class ClonedVoiceRepository(private val rootDir: File) {
         return readFloatArrayBinary(file)
     }
 
+    /**
+     * Returns the valid 44-byte 16-bit PCM WAV file for [profile], regenerating it cleanly from `.f32`
+     * if this profile was saved before WAV persistence was added.
+     */
+    fun ensureReferenceWavFile(profile: ClonedVoiceProfile): File? {
+        val existing = profile.referenceWavPath.takeIf { it.isNotBlank() }?.let { File(it) }
+            ?: File(rootDir, "${profile.id}.wav")
+        if (existing.exists() && existing.length() > 44L) {
+            return existing
+        }
+        val refSamples = loadReferenceAudio(profile) ?: return null
+        if (refSamples.isEmpty()) return null
+        return runCatching {
+            rootDir.mkdirs()
+            AudioFileDecoder.writePcm16MonoWav(existing, refSamples, profile.sampleRate.coerceAtLeast(8_000))
+        }.getOrNull()
+    }
+
     @Synchronized
     private fun saveIndex(profiles: List<ClonedVoiceProfile>) {
         rootDir.mkdirs()
@@ -162,6 +192,7 @@ class ClonedVoiceRepository(private val rootDir: File) {
                     put("embeddingDim", p.embeddingDim)
                     put("embeddingPath", p.embeddingPath)
                     put("referenceAudioPath", p.referenceAudioPath)
+                    put("referenceWavPath", p.referenceWavPath)
                     put("usedOnnxEncoder", p.usedOnnxEncoder)
                     put("estimatedPitchRatio", p.estimatedPitchRatio.toDouble())
                 }

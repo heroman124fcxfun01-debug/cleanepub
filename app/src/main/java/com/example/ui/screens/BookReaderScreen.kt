@@ -109,6 +109,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.audio.AmbientSoundTrack
 import com.example.audio.ClonedVoiceProfile
+import com.example.data.CustomAmbientTrack
 import com.example.data.CustomImportedFont
 import com.example.data.HorizontalPageEffect
 import com.example.data.LibraryChapterMeta
@@ -202,6 +203,10 @@ fun BookReaderScreen(
     onHideCharacterPicker: () -> Unit,
     onSelectAmbientSound: (AmbientSoundTrack) -> Unit,
     onChangeAmbientVolume: (Float) -> Unit,
+    customAmbientTracks: List<CustomAmbientTrack> = emptyList(),
+    onImportCustomAmbientClick: () -> Unit = {},
+    onSelectCustomAmbient: (String) -> Unit = {},
+    onDeleteCustomAmbient: (String) -> Unit = {},
     clonedVoices: List<ClonedVoiceProfile> = emptyList(),
     onSelectClonedVoice: (String?) -> Unit = {}
 ) {
@@ -962,7 +967,7 @@ fun BookReaderScreen(
 
                     // ⚙️ Audio Settings 3D Keycap
                     val settingsActive = showAudioSettingsSheet ||
-                        readerPrefs.ambientSound != AmbientSoundTrack.NONE ||
+                        readerPrefs.isAnyAmbientActive ||
                         readerState.characterVoiceAssignments.isNotEmpty()
                     Reader3DKeycapButton(
                         onClick = {
@@ -1229,6 +1234,10 @@ fun BookReaderScreen(
                     onConfirmCharacterAssignments = onConfirmCharacterAssignments,
                     onSelectAmbientSound = onSelectAmbientSound,
                     onChangeAmbientVolume = onChangeAmbientVolume,
+                    customAmbientTracks = customAmbientTracks,
+                    onImportCustomAmbientClick = onImportCustomAmbientClick,
+                    onSelectCustomAmbient = onSelectCustomAmbient,
+                    onDeleteCustomAmbient = onDeleteCustomAmbient,
                     clonedVoices = clonedVoices,
                     onSelectClonedVoice = onSelectClonedVoice,
                     onClose = {

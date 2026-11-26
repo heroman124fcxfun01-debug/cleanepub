@@ -205,6 +205,8 @@ private fun EpubCleanNavHost(
     val bookReaderState by libraryViewModel.readerState.collectAsStateWithLifecycle()
     val bookReaderPrefs by libraryViewModel.readerPrefs.collectAsStateWithLifecycle()
     val customFonts by libraryViewModel.customFonts.collectAsStateWithLifecycle()
+    val customAmbientTracks by libraryViewModel.customAmbientTracks.collectAsStateWithLifecycle()
+    val isImportingAmbient by libraryViewModel.isImportingAmbient.collectAsStateWithLifecycle()
     val clonedVoices by libraryViewModel.clonedVoices.collectAsStateWithLifecycle()
     val voiceCloneEngineMode by libraryViewModel.voiceCloneEngineMode.collectAsStateWithLifecycle()
     val isExtractingVoiceClone by libraryViewModel.isExtractingVoiceClone.collectAsStateWithLifecycle()
@@ -366,6 +368,16 @@ private fun EpubCleanNavHost(
         onResult = { uri ->
             if (uri != null) {
                 libraryViewModel.importCustomFont(uri)
+            }
+        }
+    )
+
+    // Offline background music importer (.mp3 / .m4a / .wav / .ogg)
+    val ambientImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri ->
+            if (uri != null) {
+                libraryViewModel.importCustomAmbientTrack(uri)
             }
         }
     )
@@ -682,6 +694,11 @@ private fun EpubCleanNavHost(
                             onSelectClonedVoice = { id -> libraryViewModel.selectClonedVoice(id) },
                             onDeleteClonedVoice = { id -> libraryViewModel.deleteClonedVoice(id) },
                             onSelectAmbientSound = { track -> libraryViewModel.selectAmbientSound(track) },
+                            customAmbientTracks = customAmbientTracks,
+                            isImportingAmbient = isImportingAmbient,
+                            onImportCustomAmbient = { uri -> libraryViewModel.importCustomAmbientTrack(uri) },
+                            onSelectCustomAmbient = { id -> libraryViewModel.selectCustomAmbientTrack(id) },
+                            onDeleteCustomAmbient = { id -> libraryViewModel.deleteCustomAmbientTrack(id) },
                             onChangeAmbientVolume = { vol -> libraryViewModel.setAmbientVolume(vol) },
                             onToggleAutoPlayAmbient = { enabled ->
                                 libraryViewModel.setAutoPlayAmbientWithAudio(enabled)
@@ -736,6 +753,10 @@ private fun EpubCleanNavHost(
                 onHideCharacterPicker = { libraryViewModel.hideCharacterVoicePicker() },
                 onSelectAmbientSound = { track -> libraryViewModel.selectAmbientSound(track) },
                 onChangeAmbientVolume = { vol -> libraryViewModel.setAmbientVolume(vol) },
+                customAmbientTracks = customAmbientTracks,
+                onImportCustomAmbientClick = { ambientImportLauncher.launch(arrayOf("audio/*")) },
+                onSelectCustomAmbient = { id -> libraryViewModel.selectCustomAmbientTrack(id) },
+                onDeleteCustomAmbient = { id -> libraryViewModel.deleteCustomAmbientTrack(id) },
                 clonedVoices = clonedVoices,
                 onSelectClonedVoice = { id -> libraryViewModel.selectClonedVoice(id) }
             )
@@ -942,6 +963,10 @@ private fun EpubCleanNavHost(
             onSelectNarratorVoice = { profile -> libraryViewModel.selectNarratorVoice(profile) },
             clonedVoices = clonedVoices,
             onSelectClonedVoice = { id -> libraryViewModel.selectClonedVoice(id) },
+            customAmbientTracks = customAmbientTracks,
+            onImportCustomAmbientClick = { ambientImportLauncher.launch(arrayOf("audio/*")) },
+            onSelectCustomAmbient = { id -> libraryViewModel.selectCustomAmbientTrack(id) },
+            onDeleteCustomAmbient = { id -> libraryViewModel.deleteCustomAmbientTrack(id) },
             onSelectAmbientSound = { track -> libraryViewModel.selectAmbientSound(track) },
             onToggleAutoPlayAmbient = { enabled -> libraryViewModel.setAutoPlayAmbientWithAudio(enabled) },
             onDismiss = { showLibraryReaderSettingsSheet = false }

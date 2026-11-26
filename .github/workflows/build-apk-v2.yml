@@ -72,13 +72,14 @@ jobs:
 
               const downloadedNames = [];
               for (const f of files) {
-                const flatName = f.split("/").pop();
-                console.log("Đang tải:", f, "->", flatName);
+                const destPath = path.join(MODELS_DIR, f);
+                fs.mkdirSync(path.dirname(destPath), { recursive: true });
+                console.log("Đang tải:", f, "->", destPath);
                 const r = await fetchWithRetry(BASE + f);
                 const buf = Buffer.from(await r.arrayBuffer());
-                fs.writeFileSync(path.join(MODELS_DIR, flatName), buf);
-                downloadedNames.push(flatName);
-                console.log("  Đã lưu:", flatName, `(${(buf.length / 1024 / 1024).toFixed(2)} MB)`);
+                fs.writeFileSync(destPath, buf);
+                downloadedNames.push(f);
+                console.log("  Đã lưu:", f, `(${(buf.length / 1024 / 1024).toFixed(2)} MB)`);
               }
 
               const manifestPath = path.join(MODELS_DIR, "manifest.json");
@@ -91,10 +92,16 @@ jobs:
                 fs.writeFileSync(manifestPath, JSON.stringify(fallbackManifest, null, 2));
               }
 
-              const totalBytes = fs.readdirSync(MODELS_DIR).reduce((s, f) => {
-                const st = fs.statSync(path.join(MODELS_DIR, f));
-                return st.isFile() ? s + st.size : s;
-              }, 0);
+              function walkSize(dir) {
+                let sum = 0;
+                for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                  const full = path.join(dir, entry.name);
+                  if (entry.isDirectory()) sum += walkSize(full);
+                  else if (entry.isFile()) sum += fs.statSync(full).size;
+                }
+                return sum;
+              }
+              const totalBytes = walkSize(MODELS_DIR);
               console.log("TỔNG DUNG LƯỢNG MODEL:", (totalBytes / 1024 / 1024).toFixed(1), "MB");
               if (totalBytes < 100 * 1024 * 1024) {
                 throw new Error("Dung lượng model tải về quá nhỏ, có thể bị gián đoạn!");

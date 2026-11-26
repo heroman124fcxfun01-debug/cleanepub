@@ -10,7 +10,7 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Thông tin một font chữ có thể dùng trong trình đọc sách (gồm font tích hợp sẵn và font người dùng nhập).
+ * Thông tin một font chữ có thể dùng trong trình đọc sách (gồm 5 font chuyên sách tích hợp sẵn và font người dùng nhập).
  */
 data class ReaderFontOption(
     val id: String,
@@ -22,7 +22,8 @@ data class ReaderFontOption(
 
 /**
  * Quản lý toàn bộ font chữ Offline cho BookReaderScreen:
- * - Font tích hợp sẵn hỗ trợ đầy đủ dấu tiếng Việt (`Literata`, `Lora`, `Merriweather`, `Be Vietnam Pro`, ...)
+ * - 5 font chữ chuyên đọc sách có chân cao cấp hỗ trợ đầy đủ dấu tiếng Việt:
+ *   `Literata`, `Lora`, `Merriweather`, `EB Garamond`, `Spectral`
  * - Font `.ttf` / `.otf` do người dùng tự nhập (lưu cục bộ trong `filesDir/book_library/custom_fonts/`)
  */
 object ReaderFontRegistry {
@@ -43,45 +44,39 @@ object ReaderFontRegistry {
         FontFamily(Font(R.font.merriweather, FontWeight.Normal))
     }
 
-    private val beVietnamProFamily: FontFamily by lazy {
-        FontFamily(Font(R.font.be_vietnam_pro, FontWeight.Normal))
+    private val ebGaramondFamily: FontFamily by lazy {
+        FontFamily(Font(R.font.eb_garamond, FontWeight.Normal))
+    }
+
+    private val spectralFamily: FontFamily by lazy {
+        FontFamily(Font(R.font.spectral, FontWeight.Normal))
     }
 
     val builtInFonts: List<ReaderFontOption> = listOf(
         ReaderFontOption(
             id = "literata",
             displayName = "Literata",
-            subtitle = "Chữ sách điện tử chuyên dụng"
+            subtitle = "Chữ sách điện tử chuyên dụng, sắc nét"
         ),
         ReaderFontOption(
             id = "lora",
             displayName = "Lora",
-            subtitle = "Chữ tiểu thuyết mềm mại"
+            subtitle = "Chữ tiểu thuyết văn học mềm mại"
         ),
         ReaderFontOption(
             id = "merriweather",
             displayName = "Merriweather",
-            subtitle = "Chữ sách in rõ nét"
+            subtitle = "Chữ sách in rõ ràng, dễ đọc lâu"
         ),
         ReaderFontOption(
-            id = "be_vietnam_pro",
-            displayName = "Be Vietnam Pro",
-            subtitle = "Không chân hiện đại cho tiếng Việt"
+            id = "eb_garamond",
+            displayName = "EB Garamond",
+            subtitle = "Chữ tiểu thuyết cổ điển thanh lịch"
         ),
         ReaderFontOption(
-            id = "system_default",
-            displayName = "Mặc định hệ thống",
-            subtitle = "Font chuẩn của máy Android"
-        ),
-        ReaderFontOption(
-            id = "serif_classic",
-            displayName = "Serif Cổ điển",
-            subtitle = "Chữ có chân truyền thống"
-        ),
-        ReaderFontOption(
-            id = "sans_clean",
-            displayName = "Sans-Serif Thanh thoát",
-            subtitle = "Chữ không chân nhẹ mắt"
+            id = "spectral",
+            displayName = "Spectral",
+            subtitle = "Chữ sách hiện đại êm mắt trên màn hình"
         )
     )
 
@@ -108,14 +103,12 @@ object ReaderFontRegistry {
             "literata" -> literataFamily
             "lora" -> loraFamily
             "merriweather" -> merriweatherFamily
-            "be_vietnam_pro" -> beVietnamProFamily
-            "system_default" -> FontFamily.Default
-            "serif_classic" -> FontFamily.Serif
-            "sans_clean" -> FontFamily.SansSerif
+            "eb_garamond" -> ebGaramondFamily
+            "spectral" -> spectralFamily
             else -> {
                 val custom = customFonts.firstOrNull { it.id == fontId }
                 if (custom != null) {
-                    loadCustomFontFamily(custom.filePath) ?: FontFamily.Default
+                    loadCustomFontFamily(custom.filePath) ?: literataFamily
                 } else {
                     literataFamily
                 }

@@ -13,6 +13,7 @@ import com.example.audio.ImportedVoiceSample
 import com.example.audio.OfflineOnnxVoiceEngine
 import com.example.audio.OnnxVoiceEngineMode
 import com.example.data.BookCollection
+import com.example.data.CustomAmbientTrack
 import com.example.data.CustomImportedFont
 import com.example.data.HorizontalPageEffect
 import com.example.data.LibraryBook
@@ -74,7 +75,9 @@ data class PendingDraftClonedVoice(
     val durationSeconds: Float,
     val embedding: FloatArray,
     val usedOnnxEncoder: Boolean,
-    val estimatedPitchRatio: Float
+    val estimatedPitchRatio: Float,
+    val previewWavPath: String? = null,
+    val synthesizedPreview: Boolean = false
 )
 
 sealed interface LibraryImportFlowState {
@@ -133,6 +136,12 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     private val _customFonts = MutableStateFlow<List<CustomImportedFont>>(emptyList())
     val customFonts: StateFlow<List<CustomImportedFont>> = _customFonts.asStateFlow()
 
+    private val _customAmbientTracks = MutableStateFlow<List<CustomAmbientTrack>>(emptyList())
+    val customAmbientTracks: StateFlow<List<CustomAmbientTrack>> = _customAmbientTracks.asStateFlow()
+
+    private val _isImportingAmbient = MutableStateFlow(false)
+    val isImportingAmbient: StateFlow<Boolean> = _isImportingAmbient.asStateFlow()
+
     private val _clonedVoices = MutableStateFlow<List<ClonedVoiceProfile>>(emptyList())
     val clonedVoices: StateFlow<List<ClonedVoiceProfile>> = _clonedVoices.asStateFlow()
 
@@ -171,10 +180,12 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
             libraryManager.ensureSampleBookSeeded()
             val (loadedBooks, loadedCollections) = libraryManager.loadLibraryIndex()
             val loadedFonts = libraryManager.loadCustomImportedFonts()
+            val loadedCustomAmbient = libraryManager.loadCustomAmbientTracks()
             val loadedClones = clonedVoiceRepository.loadAll()
             _books.value = loadedBooks
             _collections.value = loadedCollections
             _customFonts.value = loadedFonts
+            _customAmbientTracks.value = loadedCustomAmbient
             _clonedVoices.value = loadedClones
         }
     }
@@ -739,12 +750,12 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 val decoded = AudioFileDecoder.decodeAudioUriToMonoFloat(
                     context = getApplication(),
                     uri = uri,
-                    targetSampleRate = voiceCloneTargetSampleRate
+                    targetSampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
                 )
                 decoded.onSuccess { sample ->
                     _draftClonedVoice.value = null
                     onDecoded(sample)
-                    _statusMessage.value = "Đã nhập file giọng \"${sample.displayName}\""
+                    _statusMessage.value = "Đã nhập & chuẩn hóa 16kHz Mono: \"${sample.displayName}\""
                 }.onFailure { err ->
                     _statusMessage.value = err.message ?: "Không thể đọc tệp âm thanh này."
                 }
@@ -755,8 +766,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     /**
-     * Bước "Tạo" trong Studio: trích xuất vector đặc trưng giọng nói trên luồng Worker ngầm
-     * thành bản nháp (chưa lưu xuống bộ nhớ). Sau khi xong, nút "Nghe thử" bên cạnh sáng lên để kiểm tra.
+     * Bước "Tạo" trong Studio: chạy thực sự qua `speaker_encoder.onnx` (với đầu vào Float32 16kHz Mono),
+     * sau đó nếu đã nạp đủ model TTS + Codec Decoder sẽ tổng hợp sẵn câu nghe thử ra file WAV 16-bit PCM chuẩn.
      */
     fun createDraftClonedVoice(
         name: String,
@@ -768,24 +779,87 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
         _isExtractingVoiceClone.value = true
         viewModelScope.launch {
             try {
-                val extracted = onnxVoiceEngine.extractSpeakerEmbedding(samples, sampleRate)
+                val samples16k = if (sampleRate != AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE) {
+                    withContext(Dispatchers.IO) {
+                        AudioFileDecoder.normalizeAndResampleMonoFloat(
+                            monoFloat = samples,
+                            sourceRate = sampleRate,
+                            targetRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
+                        )
+                    }
+                } else {
+                    samples
+                }
+                val extracted = onnxVoiceEngine.extractSpeakerEmbedding(
+                    samples = samples16k,
+                    sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
+                )
                 _voiceCloneEngineMode.value = onnxVoiceEngine.engineMode
+
+                if (extracted.embedding.isEmpty()) {
+                    _statusMessage.value = extracted.errorMessage
+                        ?: "Không trích xuất được vector giọng nói từ speaker_encoder.onnx."
+                    return@launch
+                }
+
                 val cleanName = name.trim().ifBlank {
                     "Giọng nhân bản #${_clonedVoices.value.size + 1}"
                 }.take(36)
-                val durationSec = if (sampleRate > 0) {
-                    (samples.size.toFloat() / sampleRate.toFloat()).coerceIn(2.0f, 8.5f)
-                } else 5.0f
+                val durationSec = (samples16k.size.toFloat() / AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE.toFloat())
+                    .coerceIn(2.0f, 8.5f)
+
+                // Tạo file WAV 16-bit PCM chuẩn (đủ 44-byte header) cho nút Nghe thử bản nháp:
+                // Ưu tiên câu tổng hợp bằng ONNX TTS + Codec Decoder nếu sẵn sàng; ngược lại ghi WAV mẫu 16kHz sạch.
+                var synthPreviewNote: String? = null
+                var usedSynthPreview = false
+                val draftWavPath = withContext(Dispatchers.IO) {
+                    val dir = File(getApplication<Application>().cacheDir, "voice_previews").apply { mkdirs() }
+                    val outWav = File(dir, "draft_${System.currentTimeMillis()}.wav")
+                    if (onnxVoiceEngine.isFullOnnxSynthesisReady()) {
+                        val synthRes = onnxVoiceEngine.synthesizeSentenceDetailed(
+                            sentence = "Xin chào, đây là giọng đọc nhân bản AI của bạn.",
+                            speakerEmbedding = extracted.embedding,
+                            speed = 1.0f
+                        )
+                        val synthAudio = synthRes.audio
+                        if (synthAudio != null) {
+                            AudioFileDecoder.writePcm16MonoWav(outWav, synthAudio.pcmFloat, synthAudio.sampleRate)
+                            usedSynthPreview = true
+                            return@withContext outWav.absolutePath
+                        } else {
+                            synthPreviewNote = synthRes.errorMessage
+                        }
+                    }
+                    AudioFileDecoder.writePcm16MonoWav(
+                        outWav,
+                        samples16k,
+                        AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
+                    )
+                    outWav.absolutePath
+                }
+
                 _draftClonedVoice.value = PendingDraftClonedVoice(
                     name = cleanName,
-                    samples = samples,
-                    sampleRate = sampleRate,
+                    samples = samples16k,
+                    sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE,
                     durationSeconds = durationSec,
                     embedding = extracted.embedding,
                     usedOnnxEncoder = extracted.usedOnnxEncoder,
-                    estimatedPitchRatio = extracted.estimatedPitchRatio
+                    estimatedPitchRatio = extracted.estimatedPitchRatio,
+                    previewWavPath = draftWavPath,
+                    synthesizedPreview = usedSynthPreview
                 )
-                _statusMessage.value = "Đã tạo giọng \"$cleanName\" — Bấm Nghe thử để kiểm tra rồi bấm Lưu."
+
+                _statusMessage.value = when {
+                    usedSynthPreview && extracted.usedOnnxEncoder ->
+                        "Đã tạo giọng ONNX \"$cleanName\" (${extracted.embedding.size}d) — Bấm Nghe thử rồi bấm Lưu."
+                    !synthPreviewNote.isNullOrBlank() ->
+                        "Đã trích xuất vector (${extracted.embedding.size}d), nhưng tổng hợp thử lỗi: $synthPreviewNote"
+                    !extracted.errorMessage.isNullOrBlank() ->
+                        "Cảnh báo ONNX: ${extracted.errorMessage}"
+                    else ->
+                        "Đã tạo giọng \"$cleanName\" (${extracted.embedding.size}d) — Bấm Nghe thử để kiểm tra rồi bấm Lưu."
+                }
                 onCreated()
             } catch (e: Exception) {
                 _statusMessage.value = "Không thể tạo giọng nhân bản: ${e.message ?: "lỗi xử lý"}"
@@ -1041,10 +1115,61 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun selectAmbientSound(track: AmbientSoundTrack) {
-        val updated = _readerPrefs.value.copy(ambientSound = track)
+        val updated = _readerPrefs.value.copy(
+            ambientSound = track,
+            selectedCustomAmbientId = null
+        )
         _readerPrefs.value = updated
         libraryManager.saveReaderPreferences(updated)
         BookAudioPlaybackService.syncSettings(getApplication())
+    }
+
+    fun selectCustomAmbientTrack(trackId: String) {
+        val updated = _readerPrefs.value.copy(
+            ambientSound = AmbientSoundTrack.NONE,
+            selectedCustomAmbientId = trackId
+        )
+        _readerPrefs.value = updated
+        libraryManager.saveReaderPreferences(updated)
+        BookAudioPlaybackService.syncSettings(getApplication())
+    }
+
+    fun importCustomAmbientTrack(uri: Uri) {
+        if (_isImportingAmbient.value) return
+        _isImportingAmbient.value = true
+        viewModelScope.launch {
+            try {
+                val result = libraryManager.importCustomAmbientFromUri(getApplication(), uri)
+                result.onSuccess { imported ->
+                    val refreshed = withContext(Dispatchers.IO) {
+                        libraryManager.loadCustomAmbientTracks()
+                    }
+                    _customAmbientTracks.value = refreshed
+                    selectCustomAmbientTrack(imported.id)
+                    _statusMessage.value = "Đã import nhạc nền \"${imported.displayName}\""
+                }.onFailure { err ->
+                    _statusMessage.value = err.message ?: "Không thể import tệp nhạc nền này."
+                }
+            } finally {
+                _isImportingAmbient.value = false
+            }
+        }
+    }
+
+    fun deleteCustomAmbientTrack(trackId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val remaining = libraryManager.deleteCustomAmbientTrack(trackId)
+            _customAmbientTracks.value = remaining
+            if (_readerPrefs.value.selectedCustomAmbientId == trackId) {
+                val updated = _readerPrefs.value.copy(
+                    selectedCustomAmbientId = null,
+                    ambientSound = AmbientSoundTrack.NONE
+                )
+                _readerPrefs.value = updated
+                libraryManager.saveReaderPreferences(updated)
+                BookAudioPlaybackService.syncSettings(getApplication())
+            }
+        }
     }
 
     fun setAmbientVolume(volume: Float) {

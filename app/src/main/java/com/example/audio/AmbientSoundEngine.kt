@@ -3,20 +3,22 @@ package com.example.audio
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.media.MediaPlayer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
 import kotlin.math.PI
 import kotlin.math.exp
 import kotlin.math.sin
 import kotlin.random.Random
 
 /**
- * 100% Offline gentle background ambient tracks synthesized in real time on-device.
- * No bundled large MP3 files, zero network access, ultra-low RAM footprint (< 100 KB).
+ * 100% Offline gentle background ambient tracks synthesized in real time on-device,
+ * plus support for custom user-imported looping audio files.
  */
 enum class AmbientSoundTrack(
     val storageKey: String,
@@ -52,7 +54,8 @@ enum class AmbientSoundTrack(
 }
 
 /**
- * Real-time procedural 16-bit PCM ambient audio player using Android [AudioTrack].
+ * Real-time procedural 16-bit PCM ambient audio player using Android [AudioTrack],
+ * plus looping [MediaPlayer] support for user-imported background music files.
  * Designed to sit softly beneath TTS narration without drowning out speech.
  */
 class AmbientSoundEngine {
@@ -64,7 +67,56 @@ class AmbientSoundEngine {
     private var activeTrack: AmbientSoundTrack = AmbientSoundTrack.NONE
 
     @Volatile
+    private var activeCustomFilePath: String? = null
+
+    @Volatile
     private var targetVolume: Float = 0.20f
+
+    private val mediaPlayerLock = Any()
+    private var customMediaPlayer: MediaPlayer? = null
+
+    fun startCustomFile(filePath: String, volume: Float = 0.20f) {
+        val clampedVol = volume.coerceIn(0.05f, 0.45f)
+        targetVolume = clampedVol
+        val file = File(filePath)
+        if (!file.exists() || !file.isFile) {
+            stop()
+            return
+        }
+        synchronized(mediaPlayerLock) {
+            val currentPlayer = customMediaPlayer
+            if (activeCustomFilePath == filePath && currentPlayer != null) {
+                runCatching {
+                    currentPlayer.setVolume(clampedVol, clampedVol)
+                    if (!currentPlayer.isPlaying) currentPlayer.start()
+                }
+                return
+            }
+        }
+        stop()
+        activeCustomFilePath = filePath
+        synchronized(mediaPlayerLock) {
+            runCatching {
+                val player = MediaPlayer().apply {
+                    setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build()
+                    )
+                    setDataSource(filePath)
+                    isLooping = true
+                    prepare()
+                    setVolume(clampedVol, clampedVol)
+                    start()
+                }
+                customMediaPlayer = player
+            }.onFailure {
+                activeCustomFilePath = null
+                stopCustomMediaPlayerLocked()
+            }
+        }
+    }
 
     fun start(track: AmbientSoundTrack, volume: Float = 0.20f) {
         targetVolume = volume.coerceIn(0.05f, 0.45f)
@@ -72,7 +124,7 @@ class AmbientSoundEngine {
             stop()
             return
         }
-        if (activeTrack == track && playJob?.isActive == true) {
+        if (activeTrack == track && activeCustomFilePath == null && playJob?.isActive == true) {
             return
         }
         stop()
@@ -218,12 +270,31 @@ class AmbientSoundEngine {
     }
 
     fun updateVolume(volume: Float) {
-        targetVolume = volume.coerceIn(0.05f, 0.45f)
+        val clamped = volume.coerceIn(0.05f, 0.45f)
+        targetVolume = clamped
+        synchronized(mediaPlayerLock) {
+            runCatching { customMediaPlayer?.setVolume(clamped, clamped) }
+        }
     }
 
     fun stop() {
         activeTrack = AmbientSoundTrack.NONE
+        activeCustomFilePath = null
         playJob?.cancel()
         playJob = null
+        synchronized(mediaPlayerLock) {
+            stopCustomMediaPlayerLocked()
+        }
+    }
+
+    private fun stopCustomMediaPlayerLocked() {
+        val player = customMediaPlayer
+        customMediaPlayer = null
+        if (player != null) {
+            runCatching {
+                if (player.isPlaying) player.stop()
+            }
+            runCatching { player.release() }
+        }
     }
 }
