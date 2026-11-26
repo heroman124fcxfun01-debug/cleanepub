@@ -14,8 +14,8 @@ android {
     applicationId = "com.aistudio.epubcleanai.vnqtxm"
     minSdk = 24
     targetSdk = 36
-    versionCode = 10
-    versionName = "1.9"
+    versionCode = 11
+    versionName = "2.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -124,6 +124,7 @@ dependencies {
   // implementation(libs.moshi.kotlin)
   // implementation(libs.okhttp)
   implementation(libs.pdfbox.android)
+  implementation(libs.onnxruntime.android)
   // implementation(libs.play.services.location)
   // implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)

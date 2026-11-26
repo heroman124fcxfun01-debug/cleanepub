@@ -205,6 +205,9 @@ private fun EpubCleanNavHost(
     val bookReaderState by libraryViewModel.readerState.collectAsStateWithLifecycle()
     val bookReaderPrefs by libraryViewModel.readerPrefs.collectAsStateWithLifecycle()
     val customFonts by libraryViewModel.customFonts.collectAsStateWithLifecycle()
+    val clonedVoices by libraryViewModel.clonedVoices.collectAsStateWithLifecycle()
+    val voiceCloneEngineMode by libraryViewModel.voiceCloneEngineMode.collectAsStateWithLifecycle()
+    val isExtractingVoiceClone by libraryViewModel.isExtractingVoiceClone.collectAsStateWithLifecycle()
     val audioPlaybackState by libraryViewModel.audioPlaybackState.collectAsStateWithLifecycle()
 
     LaunchedEffect(statusToastMessage) {
@@ -687,7 +690,16 @@ private fun EpubCleanNavHost(
                 },
                 onHideCharacterPicker = { libraryViewModel.hideCharacterVoicePicker() },
                 onSelectAmbientSound = { track -> libraryViewModel.selectAmbientSound(track) },
-                onChangeAmbientVolume = { vol -> libraryViewModel.setAmbientVolume(vol) }
+                onChangeAmbientVolume = { vol -> libraryViewModel.setAmbientVolume(vol) },
+                clonedVoices = clonedVoices,
+                voiceCloneEngineMode = voiceCloneEngineMode,
+                voiceCloneTargetSampleRate = libraryViewModel.voiceCloneTargetSampleRate,
+                isExtractingVoiceClone = isExtractingVoiceClone,
+                onSaveClonedVoice = { name, samples, sampleRate, onDone ->
+                    libraryViewModel.saveClonedVoice(name, samples, sampleRate, onDone)
+                },
+                onSelectClonedVoice = { id -> libraryViewModel.selectClonedVoice(id) },
+                onDeleteClonedVoice = { id -> libraryViewModel.deleteClonedVoice(id) }
             )
         }
 

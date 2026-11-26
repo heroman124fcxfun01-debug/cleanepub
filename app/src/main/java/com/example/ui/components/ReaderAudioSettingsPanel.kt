@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DocumentScanner
@@ -69,6 +70,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.audio.AmbientSoundTrack
+import com.example.audio.ClonedVoiceProfile
 import com.example.audio.DetectedCharacter
 import com.example.data.LibraryManager
 import com.example.data.ReaderPreferences
@@ -108,9 +110,15 @@ fun ReaderAudioSettingsSheetContent(
     onConfirmCharacterAssignments: (Map<String, ReaderVoiceProfile>) -> Unit,
     onSelectAmbientSound: (AmbientSoundTrack) -> Unit,
     onChangeAmbientVolume: (Float) -> Unit,
+    clonedVoices: List<ClonedVoiceProfile> = emptyList(),
+    onSelectClonedVoice: (String?) -> Unit = {},
+    onOpenVoiceCloneDialog: () -> Unit = {},
     onClose: () -> Unit
 ) {
     var narratorDropdownExpanded by remember { mutableStateOf(false) }
+    val activeClonedVoice = remember(readerPrefs.selectedClonedVoiceId, clonedVoices) {
+        clonedVoices.firstOrNull { it.id == readerPrefs.selectedClonedVoiceId }
+    }
 
     // Draft character -> voice map while the scanned character picker is open
     val draftCharVoices = remember { mutableStateMapOf<String, ReaderVoiceProfile?>() }
@@ -245,7 +253,8 @@ fun ReaderAudioSettingsSheetContent(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text(
-                                    text = readerPrefs.voiceProfile.displayName,
+                                    text = activeClonedVoice?.let { "✦ ${it.name} (Nhân bản AI)" }
+                                        ?: readerPrefs.voiceProfile.displayName,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = primaryInk,
@@ -267,8 +276,73 @@ fun ReaderAudioSettingsSheetContent(
                             onDismissRequest = { narratorDropdownExpanded = false },
                             containerColor = itemBg
                         ) {
+                            if (clonedVoices.isNotEmpty()) {
+                                clonedVoices.forEach { cloned ->
+                                    val selected = readerPrefs.selectedClonedVoiceId == cloned.id
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(7.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.AutoAwesome,
+                                                    contentDescription = null,
+                                                    tint = IosBlue,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                                Text(
+                                                    text = "${cloned.name} (AI)",
+                                                    fontSize = 12.sp,
+                                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                                                    color = if (selected) IosBlue else primaryInk
+                                                )
+                                                if (selected) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Check,
+                                                        contentDescription = null,
+                                                        tint = IosBlue,
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        onClick = {
+                                            onSelectClonedVoice(cloned.id)
+                                            narratorDropdownExpanded = false
+                                        }
+                                    )
+                                }
+                                HorizontalDivider(thickness = 0.8.dp, color = borderCol.copy(alpha = 0.2f))
+                            }
+                            DropdownMenuItem(
+                                text = {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.AutoAwesome,
+                                            contentDescription = null,
+                                            tint = IosBlue,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Text(
+                                            text = "+ Tạo giọng nhân bản mới",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = IosBlue
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    narratorDropdownExpanded = false
+                                    onOpenVoiceCloneDialog()
+                                }
+                            )
+                            HorizontalDivider(thickness = 0.8.dp, color = borderCol.copy(alpha = 0.2f))
                             ReaderVoiceProfile.entries.forEach { profile ->
-                                val selected = readerPrefs.voiceProfile == profile
+                                val selected = activeClonedVoice == null && readerPrefs.voiceProfile == profile
                                 DropdownMenuItem(
                                     text = {
                                         Row(

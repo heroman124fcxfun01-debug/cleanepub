@@ -202,7 +202,7 @@ enum class TtsEngineType(
     val subtitle: String
 ) {
     SYSTEM_TTS("system_tts", "TTS Hệ thống", "Giọng đọc Offline gốc trên thiết bị"),
-    AI_TTS("ai_tts", "TTS AI", "Giọng AI tự nhiên (sẽ bổ sung sau)");
+    AI_TTS("ai_tts", "TTS AI (Nhân bản)", "Giọng nhân bản AI ONNX (100% Offline)");
 
     companion object {
         fun fromKey(key: String?): TtsEngineType {
@@ -242,7 +242,9 @@ data class ReaderPreferences(
     val advancedCustomEnabled: Boolean = false,
     val customPitch: Float = LibraryManager.DEFAULT_ADVANCED_PITCH,
     val customSpeechRate: Float = LibraryManager.DEFAULT_ADVANCED_RATE,
-    val sentencePauseMs: Int = LibraryManager.DEFAULT_SENTENCE_PAUSE_MS
+    val sentencePauseMs: Int = LibraryManager.DEFAULT_SENTENCE_PAUSE_MS,
+    // Bản nâng cấp 2.0: Giọng nhân bản AI (100% Offline ONNX / Dự phòng TTS thiết bị)
+    val selectedClonedVoiceId: String? = null
 ) {
     fun effectivePitchFor(profile: ReaderVoiceProfile): Float {
         return (customVoicePitches[profile.storageKey] ?: profile.pitch)
@@ -904,7 +906,8 @@ class LibraryManager(
             customSpeechRate = p.getFloat(KEY_CUSTOM_SPEECH_RATE, DEFAULT_ADVANCED_RATE)
                 .coerceIn(MIN_ADVANCED_RATE, MAX_ADVANCED_RATE),
             sentencePauseMs = p.getInt(KEY_SENTENCE_PAUSE_MS, DEFAULT_SENTENCE_PAUSE_MS)
-                .coerceIn(MIN_SENTENCE_PAUSE_MS, MAX_SENTENCE_PAUSE_MS)
+                .coerceIn(MIN_SENTENCE_PAUSE_MS, MAX_SENTENCE_PAUSE_MS),
+            selectedClonedVoiceId = p.getString(KEY_SELECTED_CLONED_VOICE_ID, null)?.takeIf { it.isNotBlank() }
         )
     }
 
@@ -959,6 +962,7 @@ class LibraryManager(
                 KEY_SENTENCE_PAUSE_MS,
                 readerPrefs.sentencePauseMs.coerceIn(MIN_SENTENCE_PAUSE_MS, MAX_SENTENCE_PAUSE_MS)
             )
+            ?.putString(KEY_SELECTED_CLONED_VOICE_ID, readerPrefs.selectedClonedVoiceId ?: "")
             ?.apply()
     }
 
@@ -1196,6 +1200,7 @@ class LibraryManager(
         private const val KEY_CUSTOM_PITCH = "reader_custom_pitch"
         private const val KEY_CUSTOM_SPEECH_RATE = "reader_custom_speech_rate"
         private const val KEY_SENTENCE_PAUSE_MS = "reader_sentence_pause_ms"
+        private const val KEY_SELECTED_CLONED_VOICE_ID = "reader_selected_cloned_voice_id"
         private const val KEY_SAMPLE_BOOK_SEEDED_V1 = "library_sample_book_seeded_v1"
 
         const val DEFAULT_FONT_ID = "literata"

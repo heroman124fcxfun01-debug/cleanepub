@@ -48,6 +48,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowBackIosNew
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Headphones
@@ -97,6 +98,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -106,6 +109,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.audio.AmbientSoundTrack
+import com.example.audio.ClonedVoiceProfile
+import com.example.audio.OnnxVoiceEngineMode
 import com.example.data.CustomImportedFont
 import com.example.data.HorizontalPageEffect
 import com.example.data.LibraryChapterMeta
@@ -120,6 +125,7 @@ import com.example.ui.ActiveBookReaderState
 import com.example.ui.components.AnimatedAudioPlayingBars
 import com.example.ui.components.NeoBrutalistPressBox
 import com.example.ui.components.ReaderAudioSettingsSheetContent
+import com.example.ui.components.VoiceCloneDialog
 import com.example.ui.components.neoHardOffsetShadow
 import com.example.ui.components.neoHardShadowColor
 import com.example.ui.components.neoInkBorderColor
@@ -195,7 +201,14 @@ fun BookReaderScreen(
     onConfirmCharacterAssignments: (Map<String, ReaderVoiceProfile>) -> Unit,
     onHideCharacterPicker: () -> Unit,
     onSelectAmbientSound: (AmbientSoundTrack) -> Unit,
-    onChangeAmbientVolume: (Float) -> Unit
+    onChangeAmbientVolume: (Float) -> Unit,
+    clonedVoices: List<ClonedVoiceProfile> = emptyList(),
+    voiceCloneEngineMode: OnnxVoiceEngineMode = OnnxVoiceEngineMode.SAFE_TTS_FALLBACK,
+    voiceCloneTargetSampleRate: Int = 16_000,
+    isExtractingVoiceClone: Boolean = false,
+    onSaveClonedVoice: (name: String, samples: FloatArray, sampleRate: Int, onDone: () -> Unit) -> Unit = { _, _, _, _ -> },
+    onSelectClonedVoice: (String?) -> Unit = {},
+    onDeleteClonedVoice: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     val listState = rememberLazyListState()
@@ -214,6 +227,7 @@ fun BookReaderScreen(
     var showAppearancePopover by remember { mutableStateOf(false) }
     var showAudioBar by remember { mutableStateOf(false) }
     var showAudioSettingsSheet by remember { mutableStateOf(false) }
+    var showVoiceCloneDialog by remember { mutableStateOf(false) }
 
     // Track current visible paragraph cleanly across BOTH Vertical and Horizontal reading modes
     var currentTrackedParagraphIndex by remember(readerState.currentChapterIndex) {
@@ -233,7 +247,18 @@ fun BookReaderScreen(
     } else {
         -1
     }
+    val speakingSentenceText = if (
+        isThisBookActiveInService &&
+        audioPlaybackState.chapterIndex == readerState.currentChapterIndex
+    ) {
+        audioPlaybackState.activeSentenceText
+    } else {
+        ""
+    }
     val activeSpeakerName = if (isThisBookActiveInService) audioPlaybackState.activeSpeakerName else null
+    val activeClonedVoice = remember(readerPrefs.selectedClonedVoiceId, clonedVoices) {
+        clonedVoices.firstOrNull { it.id == readerPrefs.selectedClonedVoiceId }
+    }
 
     val latestState by rememberUpdatedState(readerState)
     val latestSpeakingIdx by rememberUpdatedState(speakingParagraphIndex)
@@ -503,6 +528,7 @@ fun BookReaderScreen(
                                     fontFamily = activeFontFamily,
                                     inkColor = inkColor,
                                     highlighted = isSpeakingThis,
+                                    activeSentenceText = if (isSpeakingThis) speakingSentenceText else null,
                                     onClick = {
                                         if (showAppearancePopover || showAudioBar) {
                                             showAppearancePopover = false
@@ -721,6 +747,7 @@ fun BookReaderScreen(
                                             fontFamily = activeFontFamily,
                                             inkColor = inkColor,
                                             highlighted = isSpeakingThis,
+                                            activeSentenceText = if (isSpeakingThis) speakingSentenceText else null,
                                             onClick = {
                                                 if (showAppearancePopover || showAudioBar) {
                                                     showAppearancePopover = false
@@ -977,7 +1004,10 @@ fun BookReaderScreen(
                 isDarkReaderPaper = isDarkReaderPaper,
                 isPlaying = isPlayingAudio,
                 speechRate = readerPrefs.speechRate,
-                voiceLabel = activeSpeakerName ?: readerPrefs.voiceProfile.shortLabel,
+                voiceLabel = activeClonedVoice?.let { "✦ ${it.name}" }
+                    ?: activeSpeakerName
+                    ?: readerPrefs.voiceProfile.shortLabel,
+                hasClonedVoiceActive = activeClonedVoice != null,
                 sleepTimerActive = audioPlaybackState.hasActiveSleepTimer,
                 sleepTimerBadge = when {
                     audioPlaybackState.sleepTimerEndOfChapter -> "Hết ch."
@@ -1015,6 +1045,12 @@ fun BookReaderScreen(
                 },
                 onCycleSpeed = onCycleSpeechRate,
                 onCycleVoice = onCycleVoiceProfile,
+                onOpenVoiceCloneDialog = {
+                    if (isAnyAudioPlaying) {
+                        BookAudioPlaybackService.pause(context)
+                    }
+                    showVoiceCloneDialog = true
+                },
                 onSelectSleepTimerMinutes = { mins ->
                     BookAudioPlaybackService.setSleepTimer(context, mins)
                 },
@@ -1190,6 +1226,15 @@ fun BookReaderScreen(
                     onConfirmCharacterAssignments = onConfirmCharacterAssignments,
                     onSelectAmbientSound = onSelectAmbientSound,
                     onChangeAmbientVolume = onChangeAmbientVolume,
+                    clonedVoices = clonedVoices,
+                    onSelectClonedVoice = onSelectClonedVoice,
+                    onOpenVoiceCloneDialog = {
+                        showAudioSettingsSheet = false
+                        if (isAnyAudioPlaying) {
+                            BookAudioPlaybackService.pause(context)
+                        }
+                        showVoiceCloneDialog = true
+                    },
                     onClose = {
                         showAudioSettingsSheet = false
                         onHideCharacterPicker()
@@ -1197,6 +1242,21 @@ fun BookReaderScreen(
                 )
             }
         }
+    }
+
+    // 7. Hộp thoại Tạo & Quản lý Giọng đọc nhân bản AI (100% Offline ONNX / Dự phòng thiết bị)
+    if (showVoiceCloneDialog) {
+        VoiceCloneDialog(
+            clonedVoices = clonedVoices,
+            activeClonedVoiceId = readerPrefs.selectedClonedVoiceId,
+            engineMode = voiceCloneEngineMode,
+            targetSampleRate = voiceCloneTargetSampleRate,
+            isExtractingEmbedding = isExtractingVoiceClone,
+            onSaveClonedVoice = onSaveClonedVoice,
+            onSelectClonedVoice = onSelectClonedVoice,
+            onDeleteClonedVoice = onDeleteClonedVoice,
+            onDismiss = { showVoiceCloneDialog = false }
+        )
     }
 }
 
@@ -1246,12 +1306,36 @@ private fun ReaderParagraphBox(
     fontFamily: FontFamily,
     inkColor: Color,
     highlighted: Boolean,
+    activeSentenceText: String? = null,
     onClick: () -> Unit
 ) {
     val highlightBg = if (highlighted) {
-        IosBlue.copy(alpha = 0.14f)
+        IosBlue.copy(alpha = 0.08f)
     } else {
         Color.Transparent
+    }
+    val sentenceHighlightBg = IosOrange.copy(alpha = 0.34f)
+    val annotated = remember(text, highlighted, activeSentenceText, sentenceHighlightBg) {
+        if (!highlighted || activeSentenceText.isNullOrBlank()) {
+            null
+        } else {
+            val matchRange = findActiveSentenceRange(text, activeSentenceText)
+            if (matchRange != null) {
+                buildAnnotatedString {
+                    append(text)
+                    addStyle(
+                        style = SpanStyle(
+                            background = sentenceHighlightBg,
+                            fontWeight = FontWeight.SemiBold
+                        ),
+                        start = matchRange.first,
+                        end = matchRange.last + 1
+                    )
+                }
+            } else {
+                null
+            }
+        }
     }
     Box(
         modifier = Modifier
@@ -1268,16 +1352,60 @@ private fun ReaderParagraphBox(
                 vertical = if (highlighted) 5.dp else 0.dp
             )
     ) {
-        Text(
-            text = text,
-            fontSize = fontSize.sp,
-            lineHeight = lineHeightSp,
-            letterSpacing = letterSpacingSp,
-            fontFamily = fontFamily,
-            color = inkColor,
-            textAlign = TextAlign.Justify
-        )
+        if (annotated != null) {
+            Text(
+                text = annotated,
+                fontSize = fontSize.sp,
+                lineHeight = lineHeightSp,
+                letterSpacing = letterSpacingSp,
+                fontFamily = fontFamily,
+                color = inkColor,
+                textAlign = TextAlign.Justify
+            )
+        } else {
+            Text(
+                text = text,
+                fontSize = fontSize.sp,
+                lineHeight = lineHeightSp,
+                letterSpacing = letterSpacingSp,
+                fontFamily = fontFamily,
+                color = inkColor,
+                textAlign = TextAlign.Justify
+            )
+        }
     }
+}
+
+/**
+ * Định vị câu đang đọc trong đoạn văn gốc để tô sáng chính xác từng câu.
+ */
+private fun findActiveSentenceRange(paragraph: String, sentence: String): IntRange? {
+    val query = sentence.trim()
+    if (query.isEmpty() || paragraph.isEmpty()) return null
+
+    // 1. Khớp trực tiếp (không phân biệt hoa/thường)
+    val directIdx = paragraph.indexOf(query, ignoreCase = true)
+    if (directIdx >= 0) {
+        return directIdx until (directIdx + query.length).coerceAtMost(paragraph.length)
+    }
+
+    // 2. Khớp theo tiền tố 3-4 từ đầu tiên (hữu ích khi văn bản đã qua chuẩn hóa chữ viết tắt)
+    val words = query.split(Regex("\\s+")).filter { it.length >= 2 }
+    if (words.isEmpty()) return null
+    val anchor = words.take(3).joinToString(" ")
+    val startIdx = paragraph.indexOf(anchor, ignoreCase = true)
+        .takeIf { it >= 0 }
+        ?: paragraph.indexOf(words.first(), ignoreCase = true)
+    if (startIdx < 0) return null
+
+    var endIdx = startIdx + anchor.length
+    while (endIdx < paragraph.length) {
+        val ch = paragraph[endIdx]
+        endIdx++
+        if (ch == '.' || ch == '!' || ch == '?' || ch == '…' || ch == '\n') break
+    }
+    val safeEnd = (endIdx - 1).coerceIn(startIdx, paragraph.lastIndex)
+    return startIdx..safeEnd
 }
 
 @Composable
@@ -1396,6 +1524,7 @@ private fun IosFloatingAudioPill(
     isPlaying: Boolean,
     speechRate: Float,
     voiceLabel: String,
+    hasClonedVoiceActive: Boolean,
     sleepTimerActive: Boolean,
     sleepTimerBadge: String?,
     onPrevParagraph: () -> Unit,
@@ -1403,6 +1532,7 @@ private fun IosFloatingAudioPill(
     onNextParagraph: () -> Unit,
     onCycleSpeed: () -> Unit,
     onCycleVoice: () -> Unit,
+    onOpenVoiceCloneDialog: () -> Unit,
     onSelectSleepTimerMinutes: (Int) -> Unit,
     onStopAndClose: () -> Unit
 ) {
@@ -1656,6 +1786,48 @@ private fun IosFloatingAudioPill(
                     tint = inkColor,
                     modifier = Modifier.size(14.dp)
                 )
+            }
+        }
+
+        // Row 2: Nút viên thuốc nhỏ gọn "+ Tạo giọng nhân bản" (100% Offline ONNX)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            NeoBrutalistPressBox(
+                onClick = onOpenVoiceCloneDialog,
+                isPill = true,
+                shadowOffset = 2.dp,
+                pressDepth = 1.5.dp,
+                borderWidth = 1.5.dp,
+                containerColor = if (hasClonedVoiceActive) IosOrange else keyBg,
+                borderColor = borderColor,
+                shadowColor = shadowColor,
+                modifier = Modifier
+                    .height(27.dp)
+                    .testTag("audio_clone_voice_button")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AutoAwesome,
+                        contentDescription = "Tạo giọng nhân bản AI",
+                        tint = if (hasClonedVoiceActive) NeoInkLight else IosBlue,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Text(
+                        text = "+ Tạo giọng nhân bản",
+                        fontSize = 11.sp,
+                        lineHeight = 13.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = if (hasClonedVoiceActive) NeoInkLight else inkColor,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
             }
         }
     }

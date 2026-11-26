@@ -23,6 +23,11 @@ import com.example.MainActivity
 import com.example.R
 import com.example.audio.AmbientSoundEngine
 import com.example.audio.AmbientSoundTrack
+import com.example.audio.ClonedVoiceProfile
+import com.example.audio.ClonedVoiceRepository
+import com.example.audio.OfflineOnnxVoiceEngine
+import com.example.audio.OnnxAudioTrackPlayer
+import com.example.audio.OnnxVoiceEngineMode
 import com.example.audio.StoryCharacterScanner
 import com.example.audio.VietnameseTtsTextNormalizer
 import com.example.data.LibraryChapterMeta
@@ -31,11 +36,16 @@ import com.example.data.ReaderPreferences
 import com.example.data.ReaderVoiceProfile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 
 private const val AUDIO_CHANNEL_ID = "epub_clean_book_audio_channel"
@@ -59,6 +69,9 @@ class BookAudioPlaybackService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var libraryManager: LibraryManager
+    private lateinit var clonedVoiceRepo: ClonedVoiceRepository
+    private lateinit var onnxEngine: OfflineOnnxVoiceEngine
+    private val onnxPlayer = OnnxAudioTrackPlayer()
     private val ambientEngine = AmbientSoundEngine()
 
     private var ttsEngine: TextToSpeech? = null
@@ -78,8 +91,16 @@ class BookAudioPlaybackService : Service() {
     private var activeCharacterVoices: Map<String, ReaderVoiceProfile> = emptyMap()
     private var activePrefs: ReaderPreferences = ReaderPreferences()
 
-    // Trạng thái theo dõi hàng đợi câu & đoạn đang đọc
+    // Trạng thái theo dõi hàng đợi câu & đoạn đang đọc (hỗ trợ tô sáng câu & Lùi/Tiến câu)
     private var speakingParagraphIndex = -1
+    private var currentParagraphSentences: List<String> = emptyList()
+    private var speakingSentenceIndex = -1
+    private var speakingSentenceText = ""
+    private val utteranceSentenceMap = ConcurrentHashMap<String, Pair<Int, String>>()
+    private var activeClonedVoice: ClonedVoiceProfile? = null
+    private var activeUsingOnnxVoice = false
+    private var onnxStreamJob: Job? = null
+
     private var activeSpeakerName: String? = null
     private var paragraphFinalUtteranceId = ""
     private var activeParagraphGeneration = 0L
@@ -132,9 +153,16 @@ class BookAudioPlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         libraryManager = LibraryManager(applicationContext)
+        clonedVoiceRepo = ClonedVoiceRepository(applicationContext)
+        onnxEngine = OfflineOnnxVoiceEngine(applicationContext)
         activePrefs = libraryManager.getReaderPreferences()
+        activeClonedVoice = clonedVoiceRepo.findById(activePrefs.selectedClonedVoiceId)
         createNotificationChannel()
         initTtsEngine()
+        // Khởi nạp model ONNX / sea_g2p.bin trên luồng Worker ngầm (chế độ dự phòng an toàn nếu chưa có model)
+        serviceScope.launch {
+            onnxEngine.ensureInitialized()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -267,7 +295,16 @@ class BookAudioPlaybackService : Service() {
                 )
 
                 engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) = Unit
+                    override fun onStart(utteranceId: String?) {
+                        val sentenceInfo = utteranceId?.let { utteranceSentenceMap[it] } ?: return
+                        val capturedGen = activeParagraphGeneration
+                        mainHandler.post {
+                            if (!isPlaying || capturedGen != activeParagraphGeneration) return@post
+                            speakingSentenceIndex = sentenceInfo.first
+                            speakingSentenceText = sentenceInfo.second
+                            publishState()
+                        }
+                    }
 
                     override fun onDone(utteranceId: String?) {
                         // Chỉ chuyển đoạn khi câu CUỐI CÙNG của đoạn hiện tại vừa hoàn tất
@@ -474,11 +511,13 @@ class BookAudioPlaybackService : Service() {
         }
     }
 
-    private fun speakParagraphAt(startIndex: Int) {
+    private fun speakParagraphAt(startIndex: Int, startSentenceIndex: Int = 0) {
         val engine = ttsEngine ?: return
         if (!isTtsReady || activeParagraphs.isEmpty()) return
 
         mainHandler.removeCallbacksAndMessages(null)
+        cancelOnnxStreamPlayback()
+        utteranceSentenceMap.clear()
 
         // Tìm đoạn kế tiếp có nội dung đọc được sau khi chuẩn hóa tiếng Việt
         var targetIdx = startIndex.coerceIn(0, activeParagraphs.lastIndex)
@@ -499,18 +538,69 @@ class BookAudioPlaybackService : Service() {
             return
         }
 
+        val safeSentenceStart = startSentenceIndex.coerceIn(0, sentences.lastIndex)
+        val remainingSentences = sentences.subList(safeSentenceStart, sentences.size)
+
+        // Kiểm tra giọng nhân bản AI đang được chọn
+        val selectedClone = clonedVoiceRepo.findById(activePrefs.selectedClonedVoiceId)
+        activeClonedVoice = selectedClone
+
         val (targetProfile, speakerName) = resolveVoiceForParagraph(activeParagraphs, targetIdx)
         val isCharacterOverride = speakerName != null
+        val useClonedVoice = selectedClone != null && !isCharacterOverride
+
+        activeParagraphGeneration += 1L
+        val generation = activeParagraphGeneration
+        speakingParagraphIndex = targetIdx
+        currentParagraphSentences = sentences
+        speakingSentenceIndex = safeSentenceStart
+        speakingSentenceText = sentences[safeSentenceStart]
+        activeSpeakerName = if (useClonedVoice) selectedClone!!.name else speakerName
+        isPlaying = true
+
+        // Thử phát bằng ONNX Worker (nếu model ONNX tổng hợp đã có sẵn trong máy)
+        val clonedEmbedding = if (useClonedVoice && onnxEngine.isFullOnnxSynthesisReady()) {
+            clonedVoiceRepo.loadEmbedding(selectedClone!!)
+        } else {
+            null
+        }
+
+        if (useClonedVoice && clonedEmbedding != null) {
+            activeUsingOnnxVoice = true
+            runCatching { engine.stop() }
+            publishState()
+            syncAmbientPlayback()
+            persistProgressAsync(activeBookId, activeChapterIndex, targetIdx)
+
+            ensureForegroundNotification(
+                title = activeBookTitle.ifBlank { "Đang đọc sách" },
+                subtitle = "${activeChapterTitle.ifBlank { "Chương ${activeChapterIndex + 1}" }} • ${selectedClone!!.name}",
+                playing = true
+            )
+
+            launchPipelinedOnnxSentences(
+                sentences = sentences,
+                startSentenceIndex = safeSentenceStart,
+                embedding = clonedEmbedding,
+                generation = generation,
+                fallbackProfile = targetProfile
+            )
+            return
+        }
+
+        // Chế độ TTS Hệ thống / Dự phòng an toàn cho giọng nhân bản khi chưa có file model ONNX
+        activeUsingOnnxVoice = false
+        val clonePitchOverride = if (useClonedVoice && !activePrefs.advancedCustomEnabled) {
+            selectedClone!!.estimatedPitchRatio
+        } else {
+            null
+        }
         applyVoiceConfiguration(
             engine = engine,
             profile = targetProfile,
-            isCharacterOverride = isCharacterOverride
+            isCharacterOverride = isCharacterOverride,
+            pitchOverride = clonePitchOverride
         )
-
-        activeParagraphGeneration += 1L
-        speakingParagraphIndex = targetIdx
-        activeSpeakerName = speakerName
-        isPlaying = true
 
         publishState()
         syncAmbientPlayback()
@@ -518,9 +608,9 @@ class BookAudioPlaybackService : Service() {
 
         val subtitle = buildString {
             append(activeChapterTitle.ifBlank { "Chương ${activeChapterIndex + 1}" })
-            if (!speakerName.isNullOrBlank()) {
+            if (!activeSpeakerName.isNullOrBlank()) {
                 append(" • ")
-                append(speakerName)
+                append(activeSpeakerName)
             }
         }
         ensureForegroundNotification(
@@ -531,12 +621,118 @@ class BookAudioPlaybackService : Service() {
 
         enqueueSentencesWithNaturalPauses(
             engine = engine,
-            sentences = sentences,
+            sentences = remainingSentences,
+            sentenceIndexOffset = safeSentenceStart,
             pauseMs = activePrefs.sentencePauseMs.toLong(),
-            idPrefix = "para_${activeParagraphGeneration}_${activeChapterIndex}_$targetIdx",
+            idPrefix = "para_${generation}_${activeChapterIndex}_$targetIdx",
             fallbackProfile = targetProfile,
             isCharacterOverride = isCharacterOverride
         )
+    }
+
+    /**
+     * Tổng hợp giọng nói cuốn chiếu từng câu qua luồng ONNX Worker và phát qua [OnnxAudioTrackPlayer]:
+     * trong lúc đang phát câu `i`, tự động tổng hợp trước câu `i + 1` để đọc nối tiếp mượt mà,
+     * tự động tô sáng câu đang đọc và tự chuyển sang câu/đoạn tiếp theo.
+     */
+    private fun launchPipelinedOnnxSentences(
+        sentences: List<String>,
+        startSentenceIndex: Int,
+        embedding: FloatArray,
+        generation: Long,
+        fallbackProfile: ReaderVoiceProfile
+    ) {
+        onnxStreamJob = serviceScope.launch {
+            val speed = (if (activePrefs.advancedCustomEnabled) {
+                activePrefs.customSpeechRate
+            } else {
+                activePrefs.speechRate
+            }).coerceIn(0.8f, 1.5f)
+            val pauseMs = activePrefs.sentencePauseMs.coerceIn(
+                LibraryManager.MIN_SENTENCE_PAUSE_MS,
+                LibraryManager.MAX_SENTENCE_PAUSE_MS
+            ).toLong()
+
+            var nextDeferred = async {
+                onnxEngine.synthesizeSentence(sentences[startSentenceIndex], embedding, speed)
+            }
+
+            for (idx in startSentenceIndex until sentences.size) {
+                if (!isActive || generation != activeParagraphGeneration) return@launch
+
+                val currentAudio = nextDeferred.await()
+                if (!isActive || generation != activeParagraphGeneration) return@launch
+
+                if (idx + 1 < sentences.size) {
+                    val lookaheadSentence = sentences[idx + 1]
+                    nextDeferred = async {
+                        onnxEngine.synthesizeSentence(lookaheadSentence, embedding, speed)
+                    }
+                }
+
+                if (currentAudio == null) {
+                    // Dự phòng an toàn sang Android TTS nếu model trả về rỗng
+                    withContext(Dispatchers.Main) {
+                        if (isPlaying && generation == activeParagraphGeneration) {
+                            activeUsingOnnxVoice = false
+                            val remaining = sentences.subList(idx, sentences.size)
+                            val engine = ttsEngine ?: return@withContext
+                            applyVoiceConfiguration(
+                                engine = engine,
+                                profile = fallbackProfile,
+                                isCharacterOverride = false,
+                                pitchOverride = activeClonedVoice?.estimatedPitchRatio,
+                                force = true
+                            )
+                            enqueueSentencesWithNaturalPauses(
+                                engine = engine,
+                                sentences = remaining,
+                                sentenceIndexOffset = idx,
+                                pauseMs = pauseMs,
+                                idPrefix = "para_fb_${generation}_${activeChapterIndex}_$speakingParagraphIndex",
+                                fallbackProfile = fallbackProfile,
+                                isCharacterOverride = false
+                            )
+                        }
+                    }
+                    return@launch
+                }
+
+                withContext(Dispatchers.Main) {
+                    if (isPlaying && generation == activeParagraphGeneration) {
+                        speakingSentenceIndex = idx
+                        speakingSentenceText = sentences[idx]
+                        publishState()
+                    }
+                }
+
+                val completed = onnxPlayer.playBlocking(
+                    samples = currentAudio.pcmFloat,
+                    sampleRate = currentAudio.sampleRate,
+                    speed = speed
+                )
+                if (!completed || !isActive || generation != activeParagraphGeneration) return@launch
+
+                if (idx + 1 < sentences.size && pauseMs > 0L) {
+                    delay(pauseMs)
+                }
+            }
+
+            // Hoàn tất tất cả các câu của đoạn -> chuyển sang đoạn hoặc chương kế tiếp
+            val interParagraphPause = (pauseMs + 140L).coerceIn(220L, 950L)
+            delay(interParagraphPause)
+            withContext(Dispatchers.Main) {
+                if (isPlaying && generation == activeParagraphGeneration) {
+                    advanceToNextParagraphOrChapter()
+                }
+            }
+        }
+    }
+
+    private fun cancelOnnxStreamPlayback() {
+        onnxStreamJob?.cancel()
+        onnxStreamJob = null
+        onnxPlayer.stopImmediately()
     }
 
     /**
@@ -548,6 +744,7 @@ class BookAudioPlaybackService : Service() {
     private fun enqueueSentencesWithNaturalPauses(
         engine: TextToSpeech,
         sentences: List<String>,
+        sentenceIndexOffset: Int = 0,
         pauseMs: Long,
         idPrefix: String,
         fallbackProfile: ReaderVoiceProfile,
@@ -573,6 +770,7 @@ class BookAudioPlaybackService : Service() {
             }
             val uttId = "${idPrefix}_s$idx"
             lastUttId = uttId
+            utteranceSentenceMap[uttId] = (sentenceIndexOffset + idx) to sentence
             val status = runCatching {
                 engine.speak(sentence, queueMode, params, uttId)
             }.getOrDefault(TextToSpeech.ERROR)
@@ -595,6 +793,7 @@ class BookAudioPlaybackService : Service() {
 
     private fun pausePlayback() {
         mainHandler.removeCallbacksAndMessages(null)
+        cancelOnnxStreamPlayback()
         activeParagraphGeneration += 1L
         isPlaying = false
         paragraphFinalUtteranceId = ""
@@ -614,10 +813,19 @@ class BookAudioPlaybackService : Service() {
 
     private fun stepParagraph(delta: Int) {
         val bookId = activeBookId ?: return
-        val baseIdx = speakingParagraphIndex.coerceAtLeast(0)
-        val nextIdx = baseIdx + delta
+        val basePara = speakingParagraphIndex.coerceAtLeast(0)
+        // Lùi / Tiến từng câu trong đoạn hiện tại trước khi nhảy sang đoạn liền kề
+        if (currentParagraphSentences.size > 1 && speakingSentenceIndex in currentParagraphSentences.indices) {
+            val targetSentence = speakingSentenceIndex + delta
+            if (targetSentence in currentParagraphSentences.indices) {
+                speakParagraphAt(basePara, startSentenceIndex = targetSentence)
+                return
+            }
+        }
+
+        val nextIdx = basePara + delta
         when {
-            nextIdx in activeParagraphs.indices -> speakParagraphAt(nextIdx)
+            nextIdx in activeParagraphs.indices -> speakParagraphAt(nextIdx, startSentenceIndex = 0)
             delta > 0 && activeChapterIndex + 1 < activeToc.size -> {
                 loadChapterAndSpeak(bookId, activeChapterIndex + 1, 0)
             }
@@ -629,6 +837,7 @@ class BookAudioPlaybackService : Service() {
 
     private fun reloadSettingsAndRefreshActiveAudio() {
         activePrefs = libraryManager.getReaderPreferences()
+        activeClonedVoice = clonedVoiceRepo.findById(activePrefs.selectedClonedVoiceId)
         val bookId = activeBookId
         if (bookId != null) {
             serviceScope.launch {
@@ -883,10 +1092,15 @@ class BookAudioPlaybackService : Service() {
                 chapterTitle = activeChapterTitle,
                 totalChapters = activeToc.size,
                 paragraphIndex = speakingParagraphIndex,
+                activeSentenceIndex = speakingSentenceIndex,
+                activeSentenceText = speakingSentenceText,
                 isPlaying = isPlaying,
                 isPaused = !isPlaying && activeBookId != null,
                 isTtsReady = isTtsReady,
                 activeSpeakerName = activeSpeakerName,
+                activeClonedVoiceId = activeClonedVoice?.id,
+                activeClonedVoiceName = activeClonedVoice?.name,
+                isUsingOnnxVoice = activeUsingOnnxVoice,
                 speechRate = activeRate,
                 voiceProfile = activePrefs.voiceProfile,
                 availableDeviceVoices = cachedDeviceVoiceModels,
@@ -908,11 +1122,16 @@ class BookAudioPlaybackService : Service() {
 
     private fun stopPlaybackAndService() {
         mainHandler.removeCallbacksAndMessages(null)
+        cancelOnnxStreamPlayback()
         clearSleepTimerInternal(publish = false)
         activeParagraphGeneration += 1L
         isPlaying = false
         isPreviewingAmbient = false
         paragraphFinalUtteranceId = ""
+        speakingSentenceIndex = -1
+        speakingSentenceText = ""
+        currentParagraphSentences = emptyList()
+        utteranceSentenceMap.clear()
         runCatching { ttsEngine?.stop() }
         ambientEngine.stop()
         persistProgressAsync(activeBookId, activeChapterIndex, speakingParagraphIndex.coerceAtLeast(0))
@@ -1017,12 +1236,14 @@ class BookAudioPlaybackService : Service() {
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
         sleepTimerHandler.removeCallbacksAndMessages(null)
+        cancelOnnxStreamPlayback()
         ambientEngine.stop()
         runCatching {
             ttsEngine?.stop()
             ttsEngine?.shutdown()
         }
         ttsEngine = null
+        runCatching { onnxEngine.close() }
         serviceScope.cancel()
         super.onDestroy()
     }

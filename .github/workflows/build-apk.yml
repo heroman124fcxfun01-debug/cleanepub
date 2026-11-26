@@ -18,12 +18,14 @@ permissions:
 
 jobs:
   build-apk:
-    name: Build EpubCleanAI APK
+    name: Build Cleanbook v2.0 APK
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -35,6 +37,22 @@ jobs:
         run: |
           if [ -n "${ANDROID_HOME:-}" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
             yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          fi
+
+      - name: Sync offline ONNX voice models into Android assets (if present)
+        run: |
+          if [ -f "models/manifest.json" ] && [ ! -f "app/src/main/assets/models/manifest.json" ]; then
+            echo "Copying root models/ into app/src/main/assets/models/..."
+            mkdir -p app/src/main/assets/models
+            cp -r models/* app/src/main/assets/models/
+          elif [ -f "public/models/manifest.json" ] && [ ! -f "app/src/main/assets/models/manifest.json" ]; then
+            echo "Copying public/models/ into app/src/main/assets/models/..."
+            mkdir -p app/src/main/assets/models
+            cp -r public/models/* app/src/main/assets/models/
+          elif [ -f "app/src/main/assets/models/manifest.json" ]; then
+            echo "Offline ONNX voice models already bundled in app/src/main/assets/models/."
+          else
+            echo "No models/manifest.json found — APK will run cleanly in safe device-TTS fallback mode."
           fi
 
       - name: Prepare debug keystore
@@ -69,18 +87,18 @@ jobs:
       - name: Prepare APK output
         run: |
           mkdir -p release-artifacts
-          cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/EpubCleanAI-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/Cleanbook-v2.0-debug.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: EpubCleanAI-APK
-          path: release-artifacts/EpubCleanAI-debug.apk
+          name: Cleanbook-v2.0-APK
+          path: release-artifacts/Cleanbook-v2.0-debug.apk
           retention-days: 30
 
       - name: Publish GitHub Release on version tag
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: release-artifacts/EpubCleanAI-debug.apk
+          files: release-artifacts/Cleanbook-v2.0-debug.apk
           generate_release_notes: true
