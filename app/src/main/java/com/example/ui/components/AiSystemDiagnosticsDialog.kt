@@ -673,6 +673,25 @@ fun AiSystemDiagnosticsDialog(
                                     }
                                 }
 
+                                if (report.metadataSummary.isNotEmpty()) {
+                                    HorizontalDivider(thickness = 0.8.dp, color = borderCol.copy(alpha = 0.2f))
+                                    Text(
+                                        text = "Metadata (config / heads / tokenizer / voices):",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = IosBlue
+                                    )
+                                    report.metadataSummary.forEach { (key, value) ->
+                                        Text(
+                                            text = "• $key: $value",
+                                            fontSize = 9.5.sp,
+                                            lineHeight = 13.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = primaryInk
+                                        )
+                                    }
+                                }
+
                                 if (report.copyErrors.isNotEmpty()) {
                                     HorizontalDivider(thickness = 0.8.dp, color = IosRed.copy(alpha = 0.35f))
                                     Text(

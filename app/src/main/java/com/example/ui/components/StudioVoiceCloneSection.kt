@@ -835,13 +835,16 @@ fun StudioVoiceCloneSection(
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
                             text = "Chi tiết lỗi AI ONNX (nguyên văn):",
                             fontSize = 10.5.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = IosRed
+                            color = IosRed,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
                         )
                         NeoBrutalistPressBox(
                             onClick = onOpenAiDiagnostics,
@@ -855,7 +858,7 @@ fun StudioVoiceCloneSection(
                             modifier = Modifier.height(24.dp)
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 7.dp),
+                                modifier = Modifier.padding(horizontal = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(3.dp)
                             ) {
@@ -869,7 +872,9 @@ fun StudioVoiceCloneSection(
                                     text = "Kiểm tra AI",
                                     fontSize = 9.5.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = IosRed
+                                    color = IosRed,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
                         }

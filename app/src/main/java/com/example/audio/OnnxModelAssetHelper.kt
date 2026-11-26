@@ -29,8 +29,16 @@ data class DiscoveredOnnxModels(
     val speakerEncoderFile: File?,
     val prefillModelFile: File?,
     val decodeStepModelFile: File?,
+    val acousticCachedFile: File?,
+    val textHeadGatherFile: File?,
+    val audioHeadFiles: List<File>,
     val backboneOrAcousticFile: File?,
+    val codecEncoderFile: File?,
     val codecDecoderFile: File?,
+    val codecDecoderStepFile: File?,
+    val headsJsonFile: File?,
+    val headsBinFile: File?,
+    val codecMetaJsonFile: File?,
     val g2pDictionaryFile: File?,
     val voicesJsonFile: File?,
     val tokenizerJsonFile: File?,
@@ -42,12 +50,24 @@ data class DiscoveredOnnxModels(
     val hasAnyOnnxModel: Boolean
         get() = allFiles.any { it.name.endsWith(".onnx", ignoreCase = true) }
 
+    val isVieNeuV3Bundle: Boolean
+        get() = prefillModelFile != null &&
+            decodeStepModelFile != null &&
+            acousticCachedFile != null &&
+            codecDecoderFile != null
+
     fun describeSummary(): String {
         val parts = mutableListOf<String>()
         speakerEncoderFile?.let { parts.add("enc=${it.name}") }
         prefillModelFile?.let { parts.add("prefill=${it.name}") }
         decodeStepModelFile?.let { parts.add("decode=${it.name}") }
-        backboneOrAcousticFile?.let { parts.add("model=${it.name}") }
+        acousticCachedFile?.let { parts.add("acoustic=${it.name}") }
+        textHeadGatherFile?.let { parts.add("text_head=${it.name}") }
+        if (audioHeadFiles.isNotEmpty()) parts.add("audio_heads=${audioHeadFiles.size}")
+        if (headsJsonFile != null && headsBinFile != null) parts.add("heads.bin")
+        if (backboneOrAcousticFile != null && backboneOrAcousticFile != acousticCachedFile) {
+            parts.add("model=${backboneOrAcousticFile.name}")
+        }
         codecDecoderFile?.let { parts.add("codec=${it.name}") }
         g2pDictionaryFile?.let { parts.add("g2p=${it.name}") }
         voicesJsonFile?.let { parts.add("voices=${it.name}") }
@@ -99,6 +119,7 @@ data class AiSystemDiagnosticReport(
     val totalFilesDirBytes: Long,
     val mappedRoles: Map<String, String>,
     val loadedSessions: Map<String, String>,
+    val metadataSummary: Map<String, String> = emptyMap(),
     val sessionErrors: Map<String, String>,
     val copyErrors: List<String>
 ) {
@@ -130,6 +151,11 @@ data class AiSystemDiagnosticReport(
             appendLine("(Chưa nạp được OrtSession nào)")
         } else {
             loadedSessions.forEach { (role, sig) -> appendLine(" ✓ $role: $sig") }
+        }
+        if (metadataSummary.isNotEmpty()) {
+            appendLine()
+            appendLine("--- 5. METADATA (config / heads / tokenizer / voices / sea_g2p) ---")
+            metadataSummary.forEach { (k, v) -> appendLine(" • $k: $v") }
         }
         if (copyErrors.isNotEmpty()) {
             appendLine()
@@ -375,6 +401,12 @@ object OnnxModelAssetHelper {
         val manifestFile = allFiles.firstOrNull { it.name.equals("manifest.json", ignoreCase = true) }
         val configFile = allFiles.firstOrNull { it.name.equals("config.json", ignoreCase = true) }
         val tokenizerFile = allFiles.firstOrNull { it.name.equals("tokenizer.json", ignoreCase = true) }
+        val headsJsonFile = allFiles.firstOrNull { it.name.equals("heads.json", ignoreCase = true) }
+        val headsBinFile = allFiles.firstOrNull { it.name.equals("heads.bin", ignoreCase = true) }
+        val codecMetaJsonFile = allFiles.firstOrNull {
+            it.name.equals("codec_browser_onnx_meta.json", ignoreCase = true) ||
+                (it.name.contains("codec", ignoreCase = true) && it.name.endsWith(".json", ignoreCase = true))
+        }
         val voicesFile = allFiles.firstOrNull {
             it.name.equals("voices.json", ignoreCase = true) ||
                 (it.name.contains("voice", ignoreCase = true) && it.name.endsWith(".json", ignoreCase = true))
@@ -427,27 +459,38 @@ object OnnxModelAssetHelper {
             }
         }
 
-        // 1. Speaker Encoder (`speaker_encoder*.onnx`, fallback `codec_encoder` / `audio_tokenizer_encode`)
+        fun isCodecOrTokenizerName(lower: String): Boolean =
+            lower.contains("moss") || lower.contains("audio_tokenizer") ||
+                lower.contains("neucodec") || lower.contains("codec") || lower.contains("vocoder")
+
+        // 1. Speaker Encoder (`speaker_encoder.onnx`)
         val speakerEncoder = findByHint(manifestSpeakerHint)
             ?: onnxFiles.firstOrNull { f ->
                 val n = f.name.lowercase(Locale.ROOT)
                 n.contains("speaker") || n.contains("ecapa") || n.contains("spk_enc") || n.contains("voice_enc")
             }
-            ?: onnxFiles.firstOrNull { f ->
-                val n = f.name.lowercase(Locale.ROOT)
-                (n.contains("codec") || n.contains("tokenizer") || n.contains("neucodec")) && n.contains("enc")
-            }
 
-        // 2. Audio Codec / Vocoder Decoder (STRICTLY exclude LLM decode_step / decoder_model_merged!)
-        fun isAudioCodecDecoderName(lower: String): Boolean {
+        // 2. MOSS / Neural Audio Codec Encoder & Decoders (classified BEFORE LLM decode_step!)
+        val codecEncoder = onnxFiles.firstOrNull { f ->
+            val n = f.name.lowercase(Locale.ROOT)
+            f != speakerEncoder && isCodecOrTokenizerName(n) && n.contains("enc")
+        }
+
+        val codecDecoderStep = onnxFiles.firstOrNull { f ->
+            val n = f.name.lowercase(Locale.ROOT)
+            f != speakerEncoder && isCodecOrTokenizerName(n) && n.contains("decode_step")
+        }
+
+        fun isAudioCodecFullDecoderName(lower: String): Boolean {
             if (lower.contains("decode_step") || lower.contains("vieneu_decode") ||
                 lower.contains("prefill") || lower.contains("backbone") ||
                 lower.contains("lm_head") || lower.contains("qwen") ||
-                lower.contains("decoder_model_merged")
+                lower.contains("decoder_model_merged") || lower.contains("audio_head_")
             ) {
                 return false
             }
-            return lower.contains("neucodec") ||
+            return lower.contains("decode_full") ||
+                lower.contains("neucodec") ||
                 lower.contains("vocoder") ||
                 lower.contains("hifigan") ||
                 lower.contains("istft") ||
@@ -461,33 +504,64 @@ object OnnxModelAssetHelper {
 
         val codecDecoder = findByHint(manifestCodecHint)
             ?: onnxFiles.firstOrNull { f ->
-                f != speakerEncoder && isAudioCodecDecoderName(f.name.lowercase(Locale.ROOT))
+                val n = f.name.lowercase(Locale.ROOT)
+                f != speakerEncoder && f != codecEncoder && f != codecDecoderStep &&
+                    isAudioCodecFullDecoderName(n)
             }
 
-        // 3. Split Autoregressive Prefill + Decode-Step (e.g. VieNeu-TTS v3 Turbo)
+        // 3. VieNeu-TTS v3 Turbo Split Backbone (`vieneu_prefill.onnx` + `vieneu_decode_step.onnx`)
+        // CRITICAL: Strictly exclude moss/codec/audio_tokenizer so `moss_audio_tokenizer_decode_step.onnx`
+        // NEVER shadows `vieneu_decode_step.onnx`!
         val prefillModel = onnxFiles.firstOrNull { f ->
-            f != speakerEncoder && f != codecDecoder && f.name.lowercase(Locale.ROOT).contains("prefill")
+            val n = f.name.lowercase(Locale.ROOT)
+            f != speakerEncoder && !isCodecOrTokenizerName(n) && n.contains("prefill")
         }
         val decodeStepModel = onnxFiles.firstOrNull { f ->
             val n = f.name.lowercase(Locale.ROOT)
-            f != speakerEncoder && f != codecDecoder && f != prefillModel &&
-                (n.contains("decode_step") || n.contains("vieneu_decode") || n.contains("step_decode"))
+            f != speakerEncoder && f != prefillModel && !isCodecOrTokenizerName(n) &&
+                (n.contains("vieneu_decode") || n.contains("decode_step") || n.contains("step_decode"))
         }
 
-        // 4. Unified Backbone / Generator / Acoustic Model
-        val backboneOrAcoustic = findByHint(manifestBackboneHint)?.takeIf {
-            it != speakerEncoder && it != codecDecoder && it != prefillModel && it != decodeStepModel
-        } ?: onnxFiles.firstOrNull { f ->
+        // 4. VieNeu-TTS v3 Acoustic Depth Transformer + Text/Audio Heads
+        val acousticCached = onnxFiles.firstOrNull { f ->
             val n = f.name.lowercase(Locale.ROOT)
-            f != speakerEncoder && f != codecDecoder && f != prefillModel && f != decodeStepModel &&
-                (n.contains("backbone") || n.contains("vieneu") || n.contains("generator") ||
-                    n.contains("acoustic") || n.contains("tts") || n.contains("vits") ||
-                    n.contains("decoder_model") || n.startsWith("model"))
-        } ?: onnxFiles.firstOrNull { f ->
-            val n = f.name.lowercase(Locale.ROOT)
-            f != speakerEncoder && f != codecDecoder && f != prefillModel && f != decodeStepModel &&
-                !n.contains("enc")
+            f != speakerEncoder && f != prefillModel && f != decodeStepModel &&
+                !isCodecOrTokenizerName(n) && n.contains("acoustic")
         }
+        val textHeadGather = onnxFiles.firstOrNull { f ->
+            val n = f.name.lowercase(Locale.ROOT)
+            !isCodecOrTokenizerName(n) && (n.contains("text_head") || n.contains("text_gather"))
+        }
+        val audioHeadRegex = Regex("^audio_head_(\\d+)\\.onnx$", RegexOption.IGNORE_CASE)
+        val audioHeadFiles = onnxFiles
+            .mapNotNull { f ->
+                val m = audioHeadRegex.matchEntire(f.name)
+                if (m != null) (m.groupValues[1].toIntOrNull() ?: 999) to f else null
+            }
+            .sortedBy { it.first }
+            .map { it.second }
+
+        val assignedSet = hashSetOf<File>().apply {
+            speakerEncoder?.let(::add)
+            codecEncoder?.let(::add)
+            codecDecoder?.let(::add)
+            codecDecoderStep?.let(::add)
+            prefillModel?.let(::add)
+            decodeStepModel?.let(::add)
+            textHeadGather?.let(::add)
+            addAll(audioHeadFiles)
+        }
+
+        // 5. Fallback Unified Backbone / Generator / Acoustic Model
+        val backboneOrAcoustic = acousticCached
+            ?: findByHint(manifestBackboneHint)?.takeIf { it !in assignedSet }
+            ?: onnxFiles.firstOrNull { f ->
+                val n = f.name.lowercase(Locale.ROOT)
+                f !in assignedSet &&
+                    (n.contains("backbone") || n.contains("vieneu") || n.contains("generator") ||
+                        n.contains("acoustic") || n.contains("tts") || n.contains("vits") ||
+                        n.contains("decoder_model") || n.startsWith("model"))
+            }
 
         // Detect codec output sample rate (48kHz for MOSS-Audio-Tokenizer, 24kHz for NeuCodec / VieNeu default)
         val codecLower = codecDecoder?.name?.lowercase(Locale.ROOT).orEmpty()
@@ -502,8 +576,16 @@ object OnnxModelAssetHelper {
             speakerEncoderFile = speakerEncoder,
             prefillModelFile = prefillModel,
             decodeStepModelFile = decodeStepModel,
+            acousticCachedFile = acousticCached,
+            textHeadGatherFile = textHeadGather,
+            audioHeadFiles = audioHeadFiles,
             backboneOrAcousticFile = backboneOrAcoustic,
+            codecEncoderFile = codecEncoder,
             codecDecoderFile = codecDecoder,
+            codecDecoderStepFile = codecDecoderStep,
+            headsJsonFile = headsJsonFile,
+            headsBinFile = headsBinFile,
+            codecMetaJsonFile = codecMetaJsonFile,
             g2pDictionaryFile = g2pFile,
             voicesJsonFile = voicesFile,
             tokenizerJsonFile = tokenizerFile,

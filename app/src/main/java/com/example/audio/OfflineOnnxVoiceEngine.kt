@@ -40,7 +40,8 @@ data class SynthesizedSentenceAudio(
 
 data class OnnxSynthesisResult(
     val audio: SynthesizedSentenceAudio? = null,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val traceLog: String? = null
 )
 
 /**
@@ -96,12 +97,20 @@ class OfflineOnnxVoiceEngine(context: Context) {
     private var speakerEncoderSession: OrtSession? = null
     private var prefillSession: OrtSession? = null
     private var decodeStepSession: OrtSession? = null
+    private var acousticCachedSession: OrtSession? = null
+    private var textHeadGatherSession: OrtSession? = null
+    private val audioHeadSessions = ArrayList<OrtSession>()
     private var backboneOrAcousticSession: OrtSession? = null
     private var codecDecoderSession: OrtSession? = null
 
     private var g2pLexicon: Map<String, IntArray> = emptyMap()
     private var tokenizerData: ParsedTokenizerData? = null
+    private var vieNeuConfig: VieNeuConfigData = VieNeuConfigData()
+    private var headWeightStore: VieNeuV3WeightStore? = null
+    private var richPresetVoices: List<VieNeuPresetVoice> = emptyList()
     private var presetVoices: Map<String, FloatArray> = emptyMap()
+    private var vieNeuV3Runner: VieNeuV3OnnxRunner? = null
+    private var seaG2pHeaderInfo: String = ""
     private val sessionLoadErrors = LinkedHashMap<String, String>()
     private val loadedSessionSignatures = LinkedHashMap<String, String>()
 
@@ -133,14 +142,29 @@ class OfflineOnnxVoiceEngine(context: Context) {
         targetSampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
         outputSampleRate = discovered.sampleRate
 
-        // Parse supporting dictionaries/configs from filesDir/models/
+        // Parse supporting dictionaries, configs, and VieNeu v3 binary head tables from filesDir/models/
         g2pLexicon = OnnxModelAssetHelper.parseSeaG2pBinary(discovered.g2pDictionaryFile)
+        seaG2pHeaderInfo = VietnameseIpaPhonemizer.inspectSeaG2pHeader(discovered.g2pDictionaryFile)
         tokenizerData = OnnxModelAssetHelper.parseTokenizerAndConfig(
             discovered.tokenizerJsonFile,
             discovered.configJsonFile
         )
-        tokenizerData?.outputSampleRate?.let { outputSampleRate = it }
+        vieNeuConfig = VieNeuV3WeightStore.parseConfigAndCodecMeta(
+            discovered.configJsonFile,
+            discovered.codecMetaJsonFile
+        )
+        headWeightStore = VieNeuV3WeightStore.loadFromFiles(
+            discovered.headsJsonFile,
+            discovered.headsBinFile
+        )
+        richPresetVoices = VieNeuV3WeightStore.parseRichVoicesJson(discovered.voicesJsonFile)
         presetVoices = OnnxModelAssetHelper.parseVoicesJson(discovered.voicesJsonFile)
+
+        if (discovered.isVieNeuV3Bundle) {
+            outputSampleRate = vieNeuConfig.outputSampleRate
+        } else {
+            tokenizerData?.outputSampleRate?.let { outputSampleRate = it }
+        }
 
         val env = try {
             OrtEnvironment.getEnvironment().also {
@@ -164,21 +188,23 @@ class OfflineOnnxVoiceEngine(context: Context) {
         }
 
         val opts = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(2)
+            setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 4))
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
         }
 
-        fun loadSessionByPath(role: String, file: File?): OrtSession? {
+        fun loadSessionByPath(role: String, file: File?, recordSignature: Boolean = true): OrtSession? {
             if (file == null) return null
             if (!file.exists() || file.length() <= 64L) {
                 sessionLoadErrors[role] = "Thiếu hoặc hỏng file ${file.name} (${file.length()} bytes tại ${file.absolutePath})"
                 return null
             }
             return try {
-                // CRITICAL: Always pass absolute file path on filesDir so ONNX Runtime finds sibling .onnx_data!
+                // CRITICAL: Always pass absolute file path on filesDir so ONNX Runtime finds sibling .onnx_data / .data!
                 val session = env.createSession(file.absolutePath, opts)
                 val sig = "${file.name} (${AiSystemDiagnosticReport.formatMb(file.length())}) | in=[${formatInputSignatures(session)}] | out=[${formatOutputSignatures(session)}]"
-                loadedSessionSignatures[role] = sig
+                if (recordSignature) {
+                    loadedSessionSignatures[role] = sig
+                }
                 Log.i(TAG, "Loaded $role from ${file.absolutePath} | $sig")
                 session
             } catch (e: Throwable) {
@@ -193,14 +219,59 @@ class OfflineOnnxVoiceEngine(context: Context) {
         speakerEncoderSession = loadSessionByPath("speaker_encoder", discovered.speakerEncoderFile)
         prefillSession = loadSessionByPath("prefill", discovered.prefillModelFile)
         decodeStepSession = loadSessionByPath("decode_step", discovered.decodeStepModelFile)
-        backboneOrAcousticSession = loadSessionByPath("backbone", discovered.backboneOrAcousticFile)
+        acousticCachedSession = loadSessionByPath("acoustic_cached", discovered.acousticCachedFile)
+        textHeadGatherSession = loadSessionByPath("text_head_gather", discovered.textHeadGatherFile)
+
+        // Load VieNeu v3 RVQ audio heads (audio_head_0..15.onnx)
+        audioHeadSessions.clear()
+        for ((idx, headFile) in discovered.audioHeadFiles.withIndex()) {
+            val s = loadSessionByPath("audio_head_$idx", headFile, recordSignature = idx == 0)
+            if (s != null) {
+                audioHeadSessions.add(s)
+            }
+        }
+        if (audioHeadSessions.isNotEmpty()) {
+            val firstSig = loadedSessionSignatures["audio_head_0"].orEmpty()
+            loadedSessionSignatures["audio_heads (x${audioHeadSessions.size})"] = firstSig
+            loadedSessionSignatures.remove("audio_head_0")
+        }
+
+        backboneOrAcousticSession = if (discovered.backboneOrAcousticFile == discovered.acousticCachedFile) {
+            acousticCachedSession
+        } else {
+            loadSessionByPath("backbone", discovered.backboneOrAcousticFile)
+        }
         codecDecoderSession = loadSessionByPath("codec_decoder", discovered.codecDecoderFile)
+
+        // Assemble VieNeu-TTS v3 Turbo Dual-AR runner when all core sessions are ready
+        val pSess = prefillSession
+        val dSess = decodeStepSession
+        val aSess = acousticCachedSession
+        val cSess = codecDecoderSession
+        vieNeuV3Runner = if (discovered.isVieNeuV3Bundle && pSess != null && dSess != null && aSess != null && cSess != null) {
+            VieNeuV3OnnxRunner(
+                env = env,
+                prefillSession = pSess,
+                decodeStepSession = dSess,
+                acousticSession = aSess,
+                textHeadGatherSession = textHeadGatherSession,
+                audioHeadSessions = audioHeadSessions.toList(),
+                mossDecodeFullSession = cSess,
+                weightStore = headWeightStore,
+                config = vieNeuConfig,
+                tokenizer = tokenizerData,
+                presetVoices = richPresetVoices
+            )
+        } else {
+            null
+        }
 
         if (sessionLoadErrors.isNotEmpty()) {
             lastInitError = sessionLoadErrors.entries.joinToString("\n") { "[${it.key}] ${it.value}" }
         }
 
         val anyLoaded = speakerEncoderSession != null ||
+            vieNeuV3Runner != null ||
             prefillSession != null ||
             backboneOrAcousticSession != null ||
             codecDecoderSession != null
@@ -214,21 +285,30 @@ class OfflineOnnxVoiceEngine(context: Context) {
     }
 
     private fun closeSessionsLocked() {
+        vieNeuV3Runner = null
         runCatching { speakerEncoderSession?.close() }
         runCatching { prefillSession?.close() }
         runCatching { decodeStepSession?.close() }
-        runCatching { backboneOrAcousticSession?.close() }
+        if (backboneOrAcousticSession != null && backboneOrAcousticSession !== acousticCachedSession) {
+            runCatching { backboneOrAcousticSession?.close() }
+        }
+        runCatching { acousticCachedSession?.close() }
+        runCatching { textHeadGatherSession?.close() }
+        audioHeadSessions.forEach { runCatching { it.close() } }
+        audioHeadSessions.clear()
         runCatching { codecDecoderSession?.close() }
         speakerEncoderSession = null
         prefillSession = null
         decodeStepSession = null
+        acousticCachedSession = null
+        textHeadGatherSession = null
         backboneOrAcousticSession = null
         codecDecoderSession = null
     }
 
     /**
      * Collects a complete diagnostic snapshot of `assets/models`, `context.filesDir/models`,
-     * `OrtEnvironment`, mapped model roles, loaded `OrtSession` tensor signatures, and verbatim errors.
+     * `OrtEnvironment`, mapped model roles, loaded `OrtSession` tensor signatures, metadata, and verbatim errors.
      */
     suspend fun runFullSystemDiagnostics(forceResync: Boolean = false): AiSystemDiagnosticReport =
         withContext(workerDispatcher) {
@@ -238,18 +318,38 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 OnnxModelAssetHelper.inspectFilesDirModelsFiles(appContext)
             val d = discoveredModels
             val mapped = linkedMapOf(
+                "pipeline" to if (vieNeuV3Runner != null) "VieNeu-TTS v3 Turbo Dual-AR (48kHz MOSS)" else "Generic ONNX TTS",
                 "speaker_encoder" to (d?.speakerEncoderFile?.name ?: "(không tìm thấy)"),
                 "prefill" to (d?.prefillModelFile?.name ?: "(không tìm thấy)"),
                 "decode_step" to (d?.decodeStepModelFile?.name ?: "(không tìm thấy)"),
-                "backbone / acoustic" to (d?.backboneOrAcousticFile?.name ?: "(không tìm thấy)"),
+                "acoustic_cached" to (d?.acousticCachedFile?.name ?: "(không tìm thấy)"),
+                "text_head_gather" to (d?.textHeadGatherFile?.name ?: "(không tìm thấy)"),
+                "audio_heads" to if (d != null && d.audioHeadFiles.isNotEmpty()) "${d.audioHeadFiles.size} file (audio_head_0..${d.audioHeadFiles.size - 1}.onnx)" else "(không tìm thấy)",
+                "heads.json + heads.bin" to if (headWeightStore != null) "${headWeightStore!!.entries.size} tensor" else "(chưa đọc được)",
                 "codec_decoder" to (d?.codecDecoderFile?.name ?: "(không tìm thấy)"),
-                "sea_g2p" to (d?.g2pDictionaryFile?.let { "${it.name} (${g2pLexicon.size} mục)" } ?: "(không tìm thấy)"),
+                "codec_encoder" to (d?.codecEncoderFile?.name ?: "(không tìm thấy)"),
+                "sea_g2p" to (d?.g2pDictionaryFile?.let { "${it.name} ($seaG2pHeaderInfo)" } ?: "(không tìm thấy)"),
                 "tokenizer.json" to (d?.tokenizerJsonFile?.let { "${it.name} (${tokenizerData?.tokenToId?.size ?: 0} token)" } ?: "(không tìm thấy)"),
                 "config.json" to (d?.configJsonFile?.name ?: "(không tìm thấy)"),
-                "voices.json" to (d?.voicesJsonFile?.let { "${it.name} (${presetVoices.size} preset)" } ?: "(không tìm thấy)"),
-                "manifest.json" to (d?.manifestJsonFile?.name ?: "(không tìm thấy)"),
+                "voices.json" to (d?.voicesJsonFile?.let { "${it.name} (${richPresetVoices.size} preset)" } ?: "(không tìm thấy)"),
                 "output_sample_rate" to "${outputSampleRate} Hz"
             )
+
+            val sampleToks = tokenizerData?.idToToken?.entries
+                ?.sortedBy { it.key }
+                ?.take(24)
+                ?.joinToString(" ") { "${it.key}:${it.value}" }
+                ?: "(trống)"
+            val voicesDetail = if (richPresetVoices.isEmpty()) "(trống)" else {
+                richPresetVoices.take(4).joinToString(" | ") { "${it.id}(${it.keysSummary})" }
+            }
+            val metadata = linkedMapOf(
+                "config.json" to vieNeuConfig.rawSummary.ifBlank { "(trống)" },
+                "heads.json" to (headWeightStore?.describeAll() ?: "(trống)"),
+                "tokenizer[0..23]" to sampleToks,
+                "voices.json" to voicesDetail
+            )
+
             AiSystemDiagnosticReport(
                 inspectedAtMillis = System.currentTimeMillis(),
                 engineMode = engineMode,
@@ -261,6 +361,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 totalFilesDirBytes = totalFilesDirBytes,
                 mappedRoles = mapped,
                 loadedSessions = LinkedHashMap(loadedSessionSignatures),
+                metadataSummary = metadata,
                 sessionErrors = LinkedHashMap(sessionLoadErrors),
                 copyErrors = d?.copyErrors.orEmpty()
             )
@@ -348,6 +449,11 @@ class OfflineOnnxVoiceEngine(context: Context) {
                     val durSec = audio.pcmFloat.size.toFloat() / audio.sampleRate.toFloat()
                     appendLine("Sóng âm đầu ra: ${audio.pcmFloat.size} mẫu @ ${audio.sampleRate} Hz (${String.format(Locale.US, "%.2f", durSec)} giây)")
                 }
+                if (!synth.traceLog.isNullOrBlank()) {
+                    appendLine()
+                    appendLine("TIẾN TRÌNH TỔNG HỢP (VieNeu v3):")
+                    appendLine(synth.traceLog.trimEnd())
+                }
                 if (!synth.errorMessage.isNullOrBlank()) {
                     appendLine()
                     appendLine("CHI TIẾT LỖI GỐC (NGUYÊN VĂN):")
@@ -377,7 +483,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
     }
 
     fun isFullOnnxSynthesisReady(): Boolean {
-        val hasGenerator = (prefillSession != null && decodeStepSession != null) ||
+        val hasGenerator = vieNeuV3Runner != null ||
+            (prefillSession != null && decodeStepSession != null) ||
             backboneOrAcousticSession != null
         return engineMode == OnnxVoiceEngineMode.ONNX_READY && hasGenerator
     }
@@ -651,6 +758,27 @@ class OfflineOnnxVoiceEngine(context: Context) {
         }
 
         val clampedSpeed = speed.coerceIn(0.8f, 1.5f)
+
+        // Primary Path: VieNeu-TTS v3 Turbo Dual-AR (prefill + decode_step + acoustic_cached + 16 audio heads + 48kHz MOSS codec)
+        val v3Runner = vieNeuV3Runner
+        if (v3Runner != null) {
+            val v3Out = v3Runner.synthesize(
+                cleanText = cleanText,
+                speakerEmbedding = speakerEmbedding,
+                speed = clampedSpeed
+            )
+            val rawWave = v3Out.waveform
+            return@withContext if (rawWave != null && v3Out.errorMessage == null) {
+                finalizeWaveformResult(rawWave, v3Out.sampleRate).copy(traceLog = v3Out.traceLog)
+            } else {
+                OnnxSynthesisResult(
+                    audio = null,
+                    errorMessage = v3Out.errorMessage ?: "VieNeu-TTS v3 Turbo không tạo được sóng âm.",
+                    traceLog = v3Out.traceLog
+                )
+            }
+        }
+
         val inputTokenIds = encodeTextToTokenIds(cleanText)
         if (inputTokenIds.isEmpty()) {
             return@withContext OnnxSynthesisResult(errorMessage = "G2P/Tokenizer không tạo được chuỗi token cho câu này.")
@@ -668,11 +796,11 @@ class OfflineOnnxVoiceEngine(context: Context) {
         }
 
         try {
-            // Case A: Split Autoregressive VieNeu-TTS (`prefill` + `decode_step` -> MANDATORY `codecDecoder`)
+            // Case A: Split Autoregressive Legacy TTS (`prefill` + `decode_step` -> MANDATORY `codecDecoder`)
             if (prefill != null && decodeStep != null) {
                 if (codecDecoder == null) {
                     return@withContext OnnxSynthesisResult(
-                        errorMessage = "Thiếu file codec/vocoder decoder ONNX để chuyển token âm thanh thành sóng PCM 24kHz. (${discoveredModels?.describeSummary()})"
+                        errorMessage = "Thiếu file codec/vocoder decoder ONNX để chuyển token âm thanh thành sóng PCM. (${discoveredModels?.describeSummary()})"
                     )
                 }
                 val generatedSpeechCodes = runAutoregressivePrefillAndDecode(
@@ -1012,42 +1140,25 @@ class OfflineOnnxVoiceEngine(context: Context) {
             ) {
                 val onnxVal = result[i]
                 if (onnxVal is OnnxTensor) {
-                    val info = onnxVal.info
-                    val shape = info.shape
-                    val type = info.type
-                    val payload = when (type) {
-                        OnnxJavaType.FLOAT16 -> {
-                            val sb = onnxVal.shortBuffer
-                            val arr = ShortArray(sb.remaining())
-                            sb.get(arr)
-                            CachedTensorPayload(null, arr, shape, type)
-                        }
-                        else -> {
-                            val fb = onnxVal.floatBuffer
-                            val arr = FloatArray(fb.remaining())
-                            fb.get(arr)
-                            CachedTensorPayload(arr, null, shape, OnnxJavaType.FLOAT)
-                        }
-                    }
-                    out[outName] = payload
+                    out[outName] = VieNeuV3WeightStore.readSafePayload(onnxVal)
                 }
             }
         }
         return out
     }
 
-    private fun findMatchingPastKv(inputName: String, pastKv: Map<String, Any>): CachedTensorPayload? {
+    private fun findMatchingPastKv(inputName: String, pastKv: Map<String, Any>): SafeTensorPayload? {
         if (pastKv.isEmpty()) return null
-        (pastKv[inputName] as? CachedTensorPayload)?.let { return it }
+        (pastKv[inputName] as? SafeTensorPayload)?.let { return it }
         val presentAlias = inputName
             .replace("past_key_values", "present")
             .replace("past_", "present_")
-        (pastKv[presentAlias] as? CachedTensorPayload)?.let { return it }
+        (pastKv[presentAlias] as? SafeTensorPayload)?.let { return it }
         val digits = inputName.filter { it.isDigit() }
         val isKey = inputName.lowercase(Locale.ROOT).contains("key") || inputName.lowercase(Locale.ROOT).startsWith("k")
         val isVal = inputName.lowercase(Locale.ROOT).contains("val") || inputName.lowercase(Locale.ROOT).startsWith("v")
         for ((k, v) in pastKv) {
-            if (v !is CachedTensorPayload) continue
+            if (v !is SafeTensorPayload) continue
             if (k.filter { it.isDigit() } == digits) {
                 val kl = k.lowercase(Locale.ROOT)
                 if ((isKey && (kl.contains("key") || kl.startsWith("k"))) ||
@@ -1062,18 +1173,10 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
     private fun createTensorFromPayload(
         env: OrtEnvironment,
-        payload: CachedTensorPayload,
+        payload: SafeTensorPayload,
         expectedType: OnnxJavaType
     ): OnnxTensor {
-        return if (expectedType == OnnxJavaType.FLOAT16 && payload.fp16Shorts != null) {
-            val bb = ByteBuffer.allocateDirect(payload.fp16Shorts.size * 2).order(ByteOrder.nativeOrder())
-            bb.asShortBuffer().put(payload.fp16Shorts)
-            bb.rewind()
-            OnnxTensor.createTensor(env, bb, payload.shape, OnnxJavaType.FLOAT16)
-        } else {
-            val floats = payload.floats ?: FloatArray(0)
-            OnnxTensor.createTensor(env, FloatBuffer.wrap(floats), payload.shape)
-        }
+        return VieNeuV3WeightStore.createOnnxTensorFromPayload(env, payload, expectedType)
     }
 
     private fun createEmptyTypedTensor(env: OrtEnvironment, dims: LongArray, type: OnnxJavaType): OnnxTensor {
