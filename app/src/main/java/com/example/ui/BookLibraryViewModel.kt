@@ -855,7 +855,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     val outWav = File(dir, "draft_${System.currentTimeMillis()}.wav")
                     if (onnxVoiceEngine.isFullOnnxSynthesisReady()) {
                         val synthRes = onnxVoiceEngine.synthesizeSentenceDetailed(
-                            sentence = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
+                            sentence = OnnxModelAssetHelper.AI_VOICE_QUICK_PREVIEW_SENTENCE,
                             speakerEmbedding = extracted.embedding,
                             speed = 1.0f,
                             referenceCodes = extracted.referenceCodes,

@@ -49,8 +49,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
     private val appContext = context.applicationContext
 
     private val ioMutex = Mutex()
-    private val ggufRunnerLazy = lazy { VieNeuGgufRunner() }
-    private val neuCodecLazy = lazy { NeuCodecOnnxEngine() }
+    private val ggufRunnerLazy = lazy { VieNeuGgufRunner(appContext) }
+    private val neuCodecLazy = lazy { NeuCodecOnnxEngine(appContext) }
     private val ggufRunner: VieNeuGgufRunner get() = ggufRunnerLazy.value
     private val neuCodec: NeuCodecOnnxEngine get() = neuCodecLazy.value
 

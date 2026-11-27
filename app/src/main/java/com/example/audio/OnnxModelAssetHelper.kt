@@ -159,10 +159,17 @@ object OnnxModelAssetHelper {
     const val FILES_MODELS_DIR = "models"
 
     /**
-     * Sample Vietnamese sentence used when previewing a newly cloned voice or running diagnostics.
+     * Sample Vietnamese sentence used when running full AI diagnostics.
      */
     const val AI_VOICE_TEST_SENTENCE =
         "Nó vẫn hiển thị rất nhiều, vì thế tôi đã bay ra ngoài hà nội để cảm nhận sắc xuân ở đây thật là tươi đẹp."
+
+    /**
+     * Short Vietnamese preview sentence used right after tapping "Tạo" so preview synthesis
+     * finishes fast with minimal KV-cache & RAM overhead on mobile devices.
+     */
+    const val AI_VOICE_QUICK_PREVIEW_SENTENCE =
+        "Xin chào, đây là giọng đọc thử nghiệm tiếng Việt."
 
     /**
      * Ready-to-read Vietnamese reference script offered to users recording their own voice sample.
@@ -391,7 +398,7 @@ object OnnxModelAssetHelper {
 
         val codecEncoder = onnxFiles.firstOrNull { f ->
             val n = f.name.lowercase(Locale.ROOT)
-            n.contains("enc") || n.contains("distill")
+            (n.contains("enc") || n.contains("distill")) && !n.contains("dec")
         }
 
         val codecDecoder = onnxFiles.firstOrNull { f ->

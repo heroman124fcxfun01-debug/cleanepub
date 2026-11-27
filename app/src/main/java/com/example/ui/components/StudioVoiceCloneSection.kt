@@ -748,7 +748,9 @@ fun StudioVoiceCloneSection(
                     onClick = {
                         val samples = activeInputSamples ?: return@NeoBrutalistPressBox
                         recorder.stopPreview()
-                        BookAudioPlaybackService.stopPreview(context)
+                        if (activeServicePreviewTag != null) {
+                            BookAudioPlaybackService.stopPreview(context)
+                        }
                         val name = voiceName.trim().ifBlank {
                             "Giọng AI #${clonedVoices.size + 1}"
                         }

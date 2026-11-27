@@ -5,7 +5,9 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
+import android.content.Context
 import android.util.Log
+import com.example.CrashReportStore
 import java.io.File
 import java.nio.FloatBuffer
 import java.nio.IntBuffer
@@ -25,8 +27,9 @@ import kotlin.math.abs
  *    - Consumes discrete FSQ speech token IDs (`[1, 1, F]` or `[1, F]`, `INT32` or `INT64`).
  *    - Reconstructs crystal-clear 24,000 Hz Mono Float32 PCM speech waveforms (`[1, 1, T_24k]`).
  */
-class NeuCodecOnnxEngine {
+class NeuCodecOnnxEngine(context: Context? = null) {
 
+    private val appContext: Context? = context?.applicationContext
     private var env: OrtEnvironment? = null
     private var encoderSession: OrtSession? = null
     private var decoderSession: OrtSession? = null
@@ -77,7 +80,7 @@ class NeuCodecOnnxEngine {
 
         val opts = try {
             OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 4))
+                setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(1, 2))
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
             }
         } catch (e: Throwable) {
@@ -102,6 +105,11 @@ class NeuCodecOnnxEngine {
             loadErrors[role] = "Thiếu hoặc hỏng file ${file.name} (${file.length()} bytes tại ${file.absolutePath})"
             return null
         }
+        CrashReportStore.markNativeOperationStart(
+            context = appContext,
+            operation = "OrtSession.createSession ($role)",
+            detail = "${file.name} (${AiSystemDiagnosticReport.formatMb(file.length())})"
+        )
         return try {
             val session = ortEnv.createSession(file.absolutePath, opts)
             val sig = "${file.name} (${AiSystemDiagnosticReport.formatMb(file.length())}) | " +
@@ -114,6 +122,8 @@ class NeuCodecOnnxEngine {
             loadErrors[role] = err
             Log.e(TAG, err, e)
             null
+        } finally {
+            CrashReportStore.clearNativeOperation(appContext)
         }
     }
 
@@ -300,6 +310,11 @@ class NeuCodecOnnxEngine {
                     inputs[name] = tensor
                 }
 
+                CrashReportStore.markNativeOperationStart(
+                    context = appContext,
+                    operation = "NeuCodec Decoder session.run",
+                    detail = "codes=${codes.size}, inputs=${feedTrace.joinToString(", ")}"
+                )
                 session.run(inputs).use { result ->
                     if (result.size() <= 0) {
                         throw IllegalStateException("neucodec_decoder.onnx không trả về sóng âm đầu ra.")
@@ -317,6 +332,7 @@ class NeuCodecOnnxEngine {
                     e
                 )
             } finally {
+                CrashReportStore.clearNativeOperation(appContext)
                 inputs.values.forEach { runCatching { it.close() } }
             }
         }
