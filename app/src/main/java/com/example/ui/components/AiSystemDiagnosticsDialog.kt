@@ -194,7 +194,7 @@ fun AiSystemDiagnosticsDialog(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "assets/models • filesDir/models • MediaCodec • ONNX",
+                                text = "VieNeu-TTS GGUF (llama.cpp) • NeuCodec ONNX 24kHz",
                                 fontSize = 10.sp,
                                 color = secondaryInk,
                                 maxLines = 1,
@@ -301,9 +301,9 @@ fun AiSystemDiagnosticsDialog(
                                     )
                                     Text(
                                         text = when (report?.engineMode) {
-                                            OnnxVoiceEngineMode.ONNX_READY -> "ONNX Engine: Sẵn sàng"
-                                            OnnxVoiceEngineMode.SAFE_TTS_FALLBACK -> "ONNX Engine: Chưa sẵn sàng (Fallback)"
-                                            else -> "ONNX Engine: Đang kiểm tra…"
+                                            OnnxVoiceEngineMode.ONNX_READY -> "VieNeu GGUF + NeuCodec: Sẵn sàng"
+                                            OnnxVoiceEngineMode.SAFE_TTS_FALLBACK -> "VieNeu Engine: Chưa sẵn sàng (Fallback)"
+                                            else -> "VieNeu Engine: Đang kiểm tra…"
                                         },
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.ExtraBold,
@@ -320,7 +320,7 @@ fun AiSystemDiagnosticsDialog(
                             }
 
                             Text(
-                                text = "OrtEnvironment: ${report?.ortEnvironmentStatus ?: "Đang đọc…"}",
+                                text = "Runtime: ${report?.ortEnvironmentStatus ?: "Đang đọc…"}",
                                 fontSize = 10.5.sp,
                                 fontFamily = FontFamily.Monospace,
                                 color = primaryInk
@@ -411,7 +411,7 @@ fun AiSystemDiagnosticsDialog(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Text(
-                                text = "Chạy thử & Bắt lỗi gốc (MediaCodec / OrtSession)",
+                                text = "Chạy thử & Bắt lỗi gốc (MediaCodec / NeuCodec / GGUF)",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = primaryInk
@@ -631,7 +631,7 @@ fun AiSystemDiagnosticsDialog(
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Text(
-                                    text = "3. Ánh xạ Model & OrtSession đã nạp",
+                                    text = "3. Ánh xạ Model & Runtime đã nạp (GGUF / NeuCodec)",
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.ExtraBold,
                                     color = primaryInk
@@ -649,7 +649,7 @@ fun AiSystemDiagnosticsDialog(
                                 HorizontalDivider(thickness = 0.8.dp, color = borderCol.copy(alpha = 0.2f))
 
                                 Text(
-                                    text = "OrtSession đã nạp thành công (${report.loadedSessions.size}):",
+                                    text = "Model / Session đã nạp thành công (${report.loadedSessions.size}):",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = IosGreen

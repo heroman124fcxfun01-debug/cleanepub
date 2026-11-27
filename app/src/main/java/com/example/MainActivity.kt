@@ -690,8 +690,8 @@ private fun EpubCleanNavHost(
                             onImportVoiceAudio = { uri, onDecoded ->
                                 libraryViewModel.importVoiceAudioFile(uri, onDecoded)
                             },
-                            onCreateDraftClonedVoice = { name, samples, sampleRate ->
-                                libraryViewModel.createDraftClonedVoice(name, samples, sampleRate)
+                            onCreateDraftClonedVoice = { name, samples, sampleRate, referenceText ->
+                                libraryViewModel.createDraftClonedVoice(name, samples, sampleRate, referenceText)
                             },
                             onClearDraftClonedVoice = { libraryViewModel.clearDraftClonedVoice() },
                             onCommitSaveClonedVoices = { onSaved ->

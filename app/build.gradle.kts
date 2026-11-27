@@ -62,7 +62,7 @@ android {
     buildConfig = true
   }
   androidResources {
-    noCompress += listOf("onnx", "bin", "data", "onnx_data", "json", "txt", "ort", "npz")
+    noCompress += listOf("gguf", "onnx", "bin", "data", "onnx_data", "json", "txt", "tsv", "ort", "npz")
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {
@@ -128,6 +128,7 @@ dependencies {
   // implementation(libs.okhttp)
   implementation(libs.pdfbox.android)
   implementation(libs.onnxruntime.android)
+  implementation(libs.llamacpp.kotlin)
   // implementation(libs.play.services.location)
   // implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)

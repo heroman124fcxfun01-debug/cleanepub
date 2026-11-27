@@ -104,7 +104,7 @@ fun StudioVoiceCloneSection(
     lastAiVerbatimError: String? = null,
     onOpenAiDiagnostics: () -> Unit = {},
     onImportAudioUri: (Uri, (ImportedVoiceSample) -> Unit) -> Unit,
-    onCreateDraftVoice: (name: String, samples: FloatArray, sampleRate: Int) -> Unit,
+    onCreateDraftVoice: (name: String, samples: FloatArray, sampleRate: Int, referenceText: String) -> Unit,
     onClearDraftVoice: () -> Unit,
     onSaveAllVoices: (onSaved: () -> Unit) -> Unit,
     onSelectClonedVoice: (String?) -> Unit,
@@ -116,6 +116,7 @@ fun StudioVoiceCloneSection(
     val recState by recorder.uiState.collectAsStateWithLifecycle()
 
     var voiceName by remember { mutableStateOf("") }
+    var referenceText by remember { mutableStateOf("") }
     var importedSample by remember { mutableStateOf<ImportedVoiceSample?>(null) }
     var localPreviewTarget by remember { mutableStateOf<String?>(null) }
     var permissionDeniedNote by remember { mutableStateOf<String?>(null) }
@@ -201,6 +202,8 @@ fun StudioVoiceCloneSection(
         else -> null
     }
     val hasValidInput = activeInputSamples != null && activeInputSamples.isNotEmpty() && !recState.isRecording
+    val hasValidReferenceText = referenceText.trim().length >= 4
+    val canCreateDraft = hasValidInput && hasValidReferenceText
 
     val isPreviewingRawSample = recState.isPlayingPreview && localPreviewTarget == "raw_sample"
     val isPreviewingDraftVoice = recState.isPlayingPreview && localPreviewTarget == "draft_voice"
@@ -329,7 +332,7 @@ fun StudioVoiceCloneSection(
                     Text(
                         text = when {
                             !sectionEnabled -> "Đang khóa & thu gọn (chọn AI Nhân bản ở trên)"
-                            engineMode == OnnxVoiceEngineMode.ONNX_READY -> "ONNX Offline sẵn sàng • Mono ${targetSampleRate / 1000}kHz"
+                            engineMode == OnnxVoiceEngineMode.ONNX_READY -> "VieNeu-TTS GGUF + NeuCodec 24kHz sẵn sàng"
                             else -> "100% Offline • Chỉ đọc bằng giọng AI (đã tắt tiếng hệ thống)"
                         },
                         fontSize = 10.sp,
@@ -646,6 +649,104 @@ fun StudioVoiceCloneSection(
                 }
             }
 
+            // 2.5. Ô BẮT BUỘC: Nội dung chữ trong file ghi âm mẫu (chuẩn pnnbao97/VieNeu-TTS)
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Nội dung chữ trong file ghi âm mẫu *",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = primaryInk,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    NeoBrutalistPressBox(
+                        onClick = {
+                            if (sectionEnabled && !isExtractingEmbedding) {
+                                referenceText = com.example.audio.OnnxModelAssetHelper.SUGGESTED_RECORDING_SCRIPT
+                            }
+                        },
+                        enabled = sectionEnabled && !isExtractingEmbedding,
+                        isPill = true,
+                        shadowOffset = 1.5.dp,
+                        pressDepth = 1.dp,
+                        borderWidth = 1.dp,
+                        containerColor = paperBg,
+                        borderColor = borderCol,
+                        shadowColor = if (sectionEnabled) shadowCol else Color.Transparent,
+                        modifier = Modifier
+                            .height(24.dp)
+                            .testTag("studio_clone_fill_script_button")
+                    ) {
+                        Text(
+                            text = "Điền câu mẫu để đọc",
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = IosBlue,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(horizontal = 8.dp)
+                        )
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(paperBg)
+                        .border(
+                            width = 1.3.dp,
+                            color = if (hasValidInput && !hasValidReferenceText) IosOrange else borderCol,
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                ) {
+                    if (referenceText.isEmpty()) {
+                        Text(
+                            text = "Gõ chính xác câu nói trong đoạn ghi âm/file import để VieNeu-TTS căn chỉnh âm vị tiếng Việt chuẩn xác…",
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            color = secondaryInk.copy(alpha = 0.72f)
+                        )
+                    }
+                    BasicTextField(
+                        value = referenceText,
+                        onValueChange = { if (sectionEnabled && it.length <= 500) referenceText = it },
+                        enabled = sectionEnabled && !isExtractingEmbedding,
+                        minLines = 2,
+                        maxLines = 4,
+                        textStyle = TextStyle(
+                            color = primaryInk,
+                            fontSize = 11.5.sp,
+                            lineHeight = 16.sp,
+                            fontWeight = FontWeight.Medium
+                        ),
+                        cursorBrush = SolidColor(IosBlue),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("studio_clone_ref_text_input")
+                    )
+                }
+
+                if (hasValidInput && !hasValidReferenceText) {
+                    Text(
+                        text = "Bắt buộc nhập đúng lời thoại của mẫu âm thanh để mở nút Tạo.",
+                        fontSize = 9.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = IosOrange
+                    )
+                }
+            }
+
             // 3. Hàng 3 nút theo đúng quy trình: [ Tạo ] -> [ Nghe thử (sáng lên sau khi tạo) ] -> [ Lưu ]
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -661,20 +762,20 @@ fun StudioVoiceCloneSection(
                         val name = voiceName.trim().ifBlank {
                             "Giọng AI #${clonedVoices.size + 1}"
                         }
-                        onCreateDraftVoice(name, samples, activeInputRate)
+                        onCreateDraftVoice(name, samples, activeInputRate, referenceText.trim())
                     },
-                    enabled = sectionEnabled && hasValidInput && !isExtractingEmbedding,
+                    enabled = sectionEnabled && canCreateDraft && !isExtractingEmbedding,
                     isPill = true,
                     shadowOffset = 2.5.dp,
                     pressDepth = 1.8.dp,
                     borderWidth = 1.5.dp,
-                    containerColor = if (hasValidInput && sectionEnabled) IosBlue else paperBg,
+                    containerColor = if (canCreateDraft && sectionEnabled) IosBlue else paperBg,
                     borderColor = borderCol,
-                    shadowColor = if (hasValidInput && sectionEnabled) shadowCol else Color.Transparent,
+                    shadowColor = if (canCreateDraft && sectionEnabled) shadowCol else Color.Transparent,
                     modifier = Modifier
                         .weight(1f)
                         .height(35.dp)
-                        .alpha(if (hasValidInput) 1f else 0.45f)
+                        .alpha(if (canCreateDraft) 1f else 0.45f)
                         .testTag("studio_clone_create_button")
                 ) {
                     Row(
@@ -692,7 +793,7 @@ fun StudioVoiceCloneSection(
                             Icon(
                                 imageVector = Icons.Rounded.AutoAwesome,
                                 contentDescription = "Tạo giọng nhân bản",
-                                tint = if (hasValidInput && sectionEnabled) Color.White else secondaryInk,
+                                tint = if (canCreateDraft && sectionEnabled) Color.White else secondaryInk,
                                 modifier = Modifier.size(14.dp)
                             )
                         }
@@ -700,7 +801,7 @@ fun StudioVoiceCloneSection(
                             text = if (isExtractingEmbedding && !hasCreatedDraft) "Đang tạo…" else "Tạo",
                             fontSize = 11.5.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = if (hasValidInput && sectionEnabled) Color.White else secondaryInk,
+                            color = if (canCreateDraft && sectionEnabled) Color.White else secondaryInk,
                             maxLines = 1,
                             softWrap = false
                         )
@@ -775,6 +876,7 @@ fun StudioVoiceCloneSection(
                         BookAudioPlaybackService.stopPreview(context)
                         onSaveAllVoices {
                             voiceName = ""
+                            referenceText = ""
                             importedSample = null
                             recorder.clearSample()
                         }
@@ -819,21 +921,22 @@ fun StudioVoiceCloneSection(
             // Thông báo trạng thái bản nháp vừa tạo (chờ bấm Lưu)
             AnimatedVisibility(visible = draftClonedVoice != null) {
                 draftClonedVoice?.let { draft ->
+                    val tokenCount = draft.referenceCodes?.size ?: 0
                     val modeBadge = when {
-                        draft.usedOnnxEncoder && draft.synthesizedPreview -> "ONNX Encoder + TTS"
-                        draft.usedOnnxEncoder -> "ONNX Encoder"
+                        draft.usedOnnxEncoder && draft.synthesizedPreview -> "GGUF + NeuCodec 24kHz"
+                        draft.usedOnnxEncoder -> "NeuCodec Encoder"
                         else -> "Vector dự phòng"
                     }
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(
-                            text = "✓ Đã tạo \"${draft.name}\" (${draft.embedding.size}d • $modeBadge) — Bấm Nghe thử để kiểm tra, rồi bấm Lưu.",
+                            text = "✓ Đã tạo \"${draft.name}\" ($tokenCount mã NeuCodec • $modeBadge) — Bấm Nghe thử để kiểm tra, rồi bấm Lưu.",
                             fontSize = 10.5.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = IosGreen
                         )
                         if (draft.synthesizedPreview) {
                             Text(
-                                text = "Câu mẫu AI ONNX: \"${com.example.audio.OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE}\"",
+                                text = "Câu mẫu VieNeu: \"${com.example.audio.OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE}\"",
                                 fontSize = 9.5.sp,
                                 color = secondaryInk
                             )
@@ -872,7 +975,7 @@ fun StudioVoiceCloneSection(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = "Chi tiết lỗi AI ONNX (nguyên văn):",
+                            text = "Chi tiết lỗi VieNeu GGUF / NeuCodec (nguyên văn):",
                             fontSize = 10.5.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = IosRed,
@@ -993,15 +1096,29 @@ fun StudioVoiceCloneSection(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                val tokenLabel = if (voice.referenceCodeCount > 0) {
+                                    "${voice.referenceCodeCount} mã NeuCodec"
+                                } else {
+                                    "${voice.embeddingDim}d"
+                                }
                                 Text(
-                                    text = "${String.format(Locale.US, "%.1fs", voice.durationSeconds)} • ${voice.embeddingDim}d ${
-                                        if (voice.usedOnnxEncoder) "ONNX" else "Vector"
-                                    }${if (isSelected) " • Đang chọn" else ""}",
+                                    text = "${String.format(Locale.US, "%.1fs", voice.durationSeconds)} • $tokenLabel${
+                                        if (isSelected) " • Đang chọn" else ""
+                                    }",
                                     fontSize = 9.5.sp,
                                     color = secondaryInk,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                if (voice.referenceText.isNotBlank()) {
+                                    Text(
+                                        text = "Lời mẫu: \"${voice.referenceText}\"",
+                                        fontSize = 9.sp,
+                                        color = secondaryInk.copy(alpha = 0.85f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
 

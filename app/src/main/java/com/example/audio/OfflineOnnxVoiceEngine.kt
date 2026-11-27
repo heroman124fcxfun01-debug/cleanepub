@@ -1,24 +1,11 @@
 package com.example.audio
 
-import ai.onnxruntime.OnnxJavaType
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtSession
-import ai.onnxruntime.TensorInfo
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.FloatBuffer
-import java.nio.IntBuffer
-import java.nio.LongBuffer
-import java.nio.ShortBuffer
 import java.util.Locale
 import java.util.concurrent.Executors
-import kotlin.math.abs
 
 enum class OnnxVoiceEngineMode {
     UNINITIALIZED,
@@ -30,7 +17,7 @@ data class SpeakerEmbeddingResult(
     val embedding: FloatArray,
     val usedOnnxEncoder: Boolean,
     val estimatedPitchRatio: Float,
-    val referenceCodes: Array<IntArray>? = null,
+    val referenceCodes: IntArray? = null,
     val errorMessage: String? = null
 )
 
@@ -46,40 +33,40 @@ data class OnnxSynthesisResult(
 )
 
 /**
- * 100% Offline ONNX Runtime VieNeu-TTS Voice Cloning & Speech Synthesis Engine.
+ * 100% Offline Official `pnnbao97/VieNeu-TTS` Engine (GGUF via `llama.cpp` + NeuCodec ONNX 24kHz).
  *
- * Key architecture guarantees:
- * 1. Recursively copies ALL files & subdirectories from `assets/models/` (including `.onnx`,
- *    `.onnx_data`, `.data`, `.bin`, `.json`) into `context.filesDir/models/` preserving structure.
- * 2. Initializes every [OrtSession] exclusively via absolute file path on `filesDir/models/...`
- *    (NEVER `InputStream.readBytes()`) so ONNX Runtime automatically resolves external `.onnx_data` weights.
- * 3. Runs `speaker_encoder.onnx` on normalized 16kHz Mono Float32 audio (supporting raw waveform or
- *    80-bin FFT log-mel filterbank inputs by inspecting `session.inputInfo`).
- * 4. Runs Vietnamese G2P (`sea_g2p.bin`) + `tokenizer.json` -> autoregressive backbone (`prefill` +
- *    `decode_step` or unified KV-cache / acoustic model) -> MANDATORY neural audio codec / vocoder
- *    decoder ONNX to reconstruct Mono 24,000 Hz (or codec native rate) `FloatArray` speech waveforms.
- * 5. Never swallows ONNX exceptions silently: preserves exact `e.message`, missing filenames, and
- *    tensor signatures for clear diagnostics in UI and logs.
+ * Pipeline:
+ * 1. Syncs `assets/models/` -> `context.filesDir/models/` (removing legacy 21-file web ONNX files).
+ * 2. Loads GGUF backbone (`pnnbao-ump/VieNeu-TTS-0.3B-q4-gguf`) via `org.nehuatl.llamacpp.LlamaContext`.
+ * 3. Loads `neucodec_encoder.onnx` (16kHz -> FSQ speech codes for instant offline voice cloning) and
+ *    `neucodec_decoder.onnx` (FSQ speech codes -> 24kHz Mono PCM WAV) via ONNX Runtime Android.
+ * 4. Loads `vi_espeak_ipa.tsv` (real eSpeak-NG Vietnamese IPA dictionary) and official `voices.json`.
+ * 5. Synthesizes Vietnamese speech using the official `pnnbao97/VieNeu-TTS` prompt:
+ *    `user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} {target_phones}<|TEXT_PROMPT_END|>\n`
+ *    `assistant:<|SPEECH_GENERATION_START|>{ref_codes}`
  */
 class OfflineOnnxVoiceEngine(context: Context) {
 
     private val appContext = context.applicationContext
 
     private val workerExecutor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "onnx-voice-worker").apply { isDaemon = true }
+        Thread(runnable, "vieneu-gguf-worker").apply { isDaemon = true }
     }
     private val workerDispatcher = workerExecutor.asCoroutineDispatcher()
+
+    private val ggufRunner = VieNeuGgufRunner()
+    private val neuCodec = NeuCodecOnnxEngine()
 
     @Volatile
     var engineMode: OnnxVoiceEngineMode = OnnxVoiceEngineMode.UNINITIALIZED
         private set
 
     @Volatile
-    var targetSampleRate: Int = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
+    var targetSampleRate: Int = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE
         private set
 
     @Volatile
-    var outputSampleRate: Int = DEFAULT_TTS_OUTPUT_SAMPLE_RATE
+    var outputSampleRate: Int = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE
         private set
 
     @Volatile
@@ -90,460 +77,99 @@ class OfflineOnnxVoiceEngine(context: Context) {
     var discoveredModels: DiscoveredOnnxModels? = null
         private set
 
-    @Volatile
-    var ortEnvironmentStatus: String = "Chưa khởi tạo"
-        private set
+    private var espeakG2p: VietnameseEspeakG2p = VietnameseEspeakG2p.loadFromFile(null)
+    private var presetVoices: List<VieNeuPresetVoice> = emptyList()
+    private val initErrors = LinkedHashMap<String, String>()
 
-    private var ortEnv: OrtEnvironment? = null
-    private var speakerEncoderSession: OrtSession? = null
-    private var prefillSession: OrtSession? = null
-    private var decodeStepSession: OrtSession? = null
-    private var acousticCachedSession: OrtSession? = null
-    private var textHeadGatherSession: OrtSession? = null
-    private val audioHeadSessions = ArrayList<OrtSession>()
-    private var backboneOrAcousticSession: OrtSession? = null
-    private var codecDecoderSession: OrtSession? = null
-
-    private var g2pLexicon: Map<String, IntArray> = emptyMap()
-    private var seaG2pDict: SeaG2pBinaryDict? = null
-    private var tokenizerData: ParsedTokenizerData? = null
-    private var vieNeuConfig: VieNeuConfigData = VieNeuConfigData()
-    private var headWeightStore: VieNeuV3WeightStore? = null
-    private var richPresetVoices: List<VieNeuPresetVoice> = emptyList()
-    private var presetVoices: Map<String, FloatArray> = emptyMap()
-    private var vieNeuV3Runner: VieNeuV3OnnxRunner? = null
-    private var seaG2pHeaderInfo: String = ""
-    private var lastCodecEncodeNote: String = ""
-    private val sessionLoadErrors = LinkedHashMap<String, String>()
-    private val loadedSessionSignatures = LinkedHashMap<String, String>()
-
-    /**
-     * Copies `assets/models/` -> `context.filesDir/models/` recursively and loads all ONNX sessions
-     * from absolute `filesDir` paths on the dedicated worker thread.
-     */
-    suspend fun ensureInitialized(forceResync: Boolean = false): OnnxVoiceEngineMode = withContext(workerDispatcher) {
-        if (!forceResync && engineMode != OnnxVoiceEngineMode.UNINITIALIZED) {
-            return@withContext engineMode
-        }
-
-        if (forceResync) {
-            closeSessionsLocked()
-            engineMode = OnnxVoiceEngineMode.UNINITIALIZED
-        }
-
-        sessionLoadErrors.clear()
-        loadedSessionSignatures.clear()
-        lastInitError = null
-
-        val discovered = OnnxModelAssetHelper.syncAssetsModelsToFilesDir(appContext)
-        discoveredModels = discovered
-        if (discovered.copyErrors.isNotEmpty()) {
-            sessionLoadErrors["assets_copy"] = discovered.copyErrors.joinToString("\n")
-        }
-
-        // Speaker encoder always consumes 16kHz Mono Float32; TTS output is 24kHz (or codec rate)
-        targetSampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
-        outputSampleRate = discovered.sampleRate
-
-        // Parse supporting dictionaries, configs, and VieNeu v3 binary head tables from filesDir/models/
-        g2pLexicon = OnnxModelAssetHelper.parseSeaG2pBinary(discovered.g2pDictionaryFile)
-        runCatching { seaG2pDict?.close() }
-        seaG2pDict = SeaG2pBinaryDict.open(discovered.g2pDictionaryFile)
-        seaG2pHeaderInfo = VietnameseIpaPhonemizer.inspectSeaG2pHeader(discovered.g2pDictionaryFile)
-        tokenizerData = OnnxModelAssetHelper.parseTokenizerAndConfig(
-            discovered.tokenizerJsonFile,
-            discovered.configJsonFile
-        )
-        vieNeuConfig = VieNeuV3WeightStore.parseConfigAndCodecMeta(
-            discovered.configJsonFile,
-            discovered.codecMetaJsonFile
-        )
-        headWeightStore = VieNeuV3WeightStore.loadFromFiles(
-            discovered.headsJsonFile,
-            discovered.headsBinFile
-        )
-        richPresetVoices = VieNeuV3WeightStore.parseRichVoicesJson(discovered.voicesJsonFile)
-        presetVoices = OnnxModelAssetHelper.parseVoicesJson(discovered.voicesJsonFile)
-
-        if (discovered.isVieNeuV3Bundle) {
-            outputSampleRate = vieNeuConfig.outputSampleRate
-        } else {
-            tokenizerData?.outputSampleRate?.let { outputSampleRate = it }
-        }
-
-        val env = try {
-            OrtEnvironment.getEnvironment().also {
-                ortEnvironmentStatus = "OK (OrtEnvironment sẵn sàng)"
-            }
-        } catch (e: Throwable) {
-            val fullErr = OnnxModelAssetHelper.formatFullThrowable(e)
-            ortEnvironmentStatus = "LỖI: $fullErr"
-            lastInitError = "OrtEnvironment.getEnvironment() thất bại:\n$fullErr"
-            sessionLoadErrors["OrtEnvironment"] = fullErr
-            Log.e(TAG, lastInitError, e)
-            engineMode = OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
-            return@withContext engineMode
-        }
-        ortEnv = env
-
-        if (!discovered.hasAnyOnnxModel) {
-            lastInitError = "Chưa tìm thấy file .onnx nào trong assets/models/ hoặc ${discovered.modelsRootDir.absolutePath}."
-            engineMode = OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
-            return@withContext engineMode
-        }
-
-        val opts = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 4))
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
-        }
-
-        fun loadSessionByPath(role: String, file: File?, recordSignature: Boolean = true): OrtSession? {
-            if (file == null) return null
-            if (!file.exists() || file.length() <= 64L) {
-                sessionLoadErrors[role] = "Thiếu hoặc hỏng file ${file.name} (${file.length()} bytes tại ${file.absolutePath})"
-                return null
-            }
-            return try {
-                // CRITICAL: Always pass absolute file path on filesDir so ONNX Runtime finds sibling .onnx_data / .data!
-                val session = env.createSession(file.absolutePath, opts)
-                val sig = "${file.name} (${AiSystemDiagnosticReport.formatMb(file.length())}) | in=[${formatInputSignatures(session)}] | out=[${formatOutputSignatures(session)}]"
-                if (recordSignature) {
-                    loadedSessionSignatures[role] = sig
-                }
-                Log.i(TAG, "Loaded $role from ${file.absolutePath} | $sig")
-                session
-            } catch (e: Throwable) {
-                val fullErr = OnnxModelAssetHelper.formatFullThrowable(e)
-                val msg = "OrtSession.createSession(${file.name}) thất bại:\n$fullErr"
-                Log.e(TAG, msg, e)
-                sessionLoadErrors[role] = msg
-                null
-            }
-        }
-
-        speakerEncoderSession = loadSessionByPath("speaker_encoder", discovered.speakerEncoderFile)
-        prefillSession = loadSessionByPath("prefill", discovered.prefillModelFile)
-        decodeStepSession = loadSessionByPath("decode_step", discovered.decodeStepModelFile)
-        acousticCachedSession = loadSessionByPath("acoustic_cached", discovered.acousticCachedFile)
-        textHeadGatherSession = loadSessionByPath("text_head_gather", discovered.textHeadGatherFile)
-
-        // Load VieNeu v3 RVQ audio heads (audio_head_0..15.onnx)
-        audioHeadSessions.clear()
-        for ((idx, headFile) in discovered.audioHeadFiles.withIndex()) {
-            val s = loadSessionByPath("audio_head_$idx", headFile, recordSignature = idx == 0)
-            if (s != null) {
-                audioHeadSessions.add(s)
-            }
-        }
-        if (audioHeadSessions.isNotEmpty()) {
-            val firstSig = loadedSessionSignatures["audio_head_0"].orEmpty()
-            loadedSessionSignatures["audio_heads (x${audioHeadSessions.size})"] = firstSig
-            loadedSessionSignatures.remove("audio_head_0")
-        }
-
-        backboneOrAcousticSession = if (discovered.backboneOrAcousticFile == discovered.acousticCachedFile) {
-            acousticCachedSession
-        } else {
-            loadSessionByPath("backbone", discovered.backboneOrAcousticFile)
-        }
-        codecDecoderSession = loadSessionByPath("codec_decoder", discovered.codecDecoderFile)
-
-        // Assemble VieNeu-TTS v3 Turbo Dual-AR runner when all core sessions are ready
-        val pSess = prefillSession
-        val dSess = decodeStepSession
-        val aSess = acousticCachedSession
-        val cSess = codecDecoderSession
-        vieNeuV3Runner = if (discovered.isVieNeuV3Bundle && pSess != null && dSess != null && aSess != null && cSess != null) {
-            VieNeuV3OnnxRunner(
-                env = env,
-                prefillSession = pSess,
-                decodeStepSession = dSess,
-                acousticSession = aSess,
-                textHeadGatherSession = textHeadGatherSession,
-                audioHeadSessions = audioHeadSessions.toList(),
-                mossDecodeFullSession = cSess,
-                weightStore = headWeightStore,
-                config = vieNeuConfig,
-                tokenizer = tokenizerData,
-                presetVoices = richPresetVoices,
-                seaG2pDict = seaG2pDict
-            )
-        } else {
-            null
-        }
-
-        if (sessionLoadErrors.isNotEmpty()) {
-            lastInitError = sessionLoadErrors.entries.joinToString("\n") { "[${it.key}] ${it.value}" }
-        }
-
-        val anyLoaded = speakerEncoderSession != null ||
-            vieNeuV3Runner != null ||
-            prefillSession != null ||
-            backboneOrAcousticSession != null ||
-            codecDecoderSession != null
-
-        engineMode = if (anyLoaded) {
-            OnnxVoiceEngineMode.ONNX_READY
-        } else {
-            OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
-        }
-        engineMode
-    }
-
-    private fun closeSessionsLocked() {
-        vieNeuV3Runner = null
-        runCatching { seaG2pDict?.close() }
-        seaG2pDict = null
-        runCatching { speakerEncoderSession?.close() }
-        runCatching { prefillSession?.close() }
-        runCatching { decodeStepSession?.close() }
-        if (backboneOrAcousticSession != null && backboneOrAcousticSession !== acousticCachedSession) {
-            runCatching { backboneOrAcousticSession?.close() }
-        }
-        runCatching { acousticCachedSession?.close() }
-        runCatching { textHeadGatherSession?.close() }
-        audioHeadSessions.forEach { runCatching { it.close() } }
-        audioHeadSessions.clear()
-        runCatching { codecDecoderSession?.close() }
-        speakerEncoderSession = null
-        prefillSession = null
-        decodeStepSession = null
-        acousticCachedSession = null
-        textHeadGatherSession = null
-        backboneOrAcousticSession = null
-        codecDecoderSession = null
-    }
-
-    /**
-     * Collects a complete diagnostic snapshot of `assets/models`, `context.filesDir/models`,
-     * `OrtEnvironment`, mapped model roles, loaded `OrtSession` tensor signatures, metadata, and verbatim errors.
-     */
-    suspend fun runFullSystemDiagnostics(forceResync: Boolean = false): AiSystemDiagnosticReport =
+    suspend fun ensureInitialized(forceResync: Boolean = false): OnnxVoiceEngineMode =
         withContext(workerDispatcher) {
-            ensureInitialized(forceResync = forceResync)
-            val (assetsFiles, totalAssetsBytes) = OnnxModelAssetHelper.inspectAssetsModelsFiles(appContext)
-            val (filesDirPath, filesDirFiles, totalFilesDirBytes) =
-                OnnxModelAssetHelper.inspectFilesDirModelsFiles(appContext)
-            val d = discoveredModels
-            val mapped = linkedMapOf(
-                "pipeline" to if (vieNeuV3Runner != null) "VieNeu-TTS v3 Turbo Dual-AR (48kHz MOSS)" else "Generic ONNX TTS",
-                "speaker_encoder" to (d?.speakerEncoderFile?.name ?: "(không tìm thấy)"),
-                "prefill" to (d?.prefillModelFile?.name ?: "(không tìm thấy)"),
-                "decode_step" to (d?.decodeStepModelFile?.name ?: "(không tìm thấy)"),
-                "acoustic_cached" to (d?.acousticCachedFile?.name ?: "(không tìm thấy)"),
-                "text_head_gather" to (d?.textHeadGatherFile?.name ?: "(không tìm thấy)"),
-                "audio_heads" to if (d != null && d.audioHeadFiles.isNotEmpty()) "${d.audioHeadFiles.size} file (audio_head_0..${d.audioHeadFiles.size - 1}.onnx)" else "(không tìm thấy)",
-                "heads.json + heads.bin" to if (headWeightStore != null) "${headWeightStore!!.entries.size} tensor" else "(chưa đọc được)",
-                "codec_decoder" to (d?.codecDecoderFile?.name ?: "(không tìm thấy)"),
-                "codec_encoder" to (d?.codecEncoderFile?.name ?: "(không tìm thấy)"),
-                "sea_g2p" to (d?.g2pDictionaryFile?.let { "${it.name} ($seaG2pHeaderInfo)" } ?: "(không tìm thấy)"),
-                "tokenizer.json" to (d?.tokenizerJsonFile?.let { "${it.name} (${tokenizerData?.tokenToId?.size ?: 0} token)" } ?: "(không tìm thấy)"),
-                "config.json" to (d?.configJsonFile?.name ?: "(không tìm thấy)"),
-                "voices.json" to (d?.voicesJsonFile?.let { "${it.name} (${richPresetVoices.size} preset)" } ?: "(không tìm thấy)"),
-                "output_sample_rate" to "${outputSampleRate} Hz"
-            )
-
-            val sampleToks = tokenizerData?.idToToken?.entries
-                ?.sortedBy { it.key }
-                ?.take(24)
-                ?.joinToString(" ") { "${it.key}:${it.value}" }
-                ?: "(trống)"
-            val decodedMerges = VietnameseIpaPhonemizer.describeDecodedBpeMerges(tokenizerData, limit = 120)
-            val voicesDetail = if (richPresetVoices.isEmpty()) "(trống)" else {
-                richPresetVoices.take(3).joinToString(" | ") { "${it.id}(${it.keysSummary})" }
+            if (!forceResync && engineMode != OnnxVoiceEngineMode.UNINITIALIZED) {
+                return@withContext engineMode
             }
-            val manifestText = d?.manifestJsonFile?.takeIf { it.exists() }?.let { mf ->
-                runCatching { mf.readText(Charsets.UTF_8).replace(Regex("\\s+"), " ").take(600) }.getOrNull()
-            } ?: "(trống)"
-            val calibrationSummary = vieNeuV3Runner?.getOrRunCalibration()?.diagnosticSummary ?: "(chưa có VieNeuV3Runner)"
-            val metadata = linkedMapOf(
-                "config.json" to vieNeuConfig.rawSummary.ifBlank { "(trống)" },
-                "codec_meta" to vieNeuConfig.codecMetaSummary.ifBlank { "(trống)" },
-                "manifest.json" to manifestText,
-                "heads.json" to (headWeightStore?.describeAll() ?: "(trống)"),
-                "sea_g2p_mmap" to (seaG2pDict?.diagnosticSummary ?: "(chưa mở được SEAP)"),
-                "tokenizer_info" to "byteBpe=${tokenizerData?.isByteLevelBpe == true}, merges=${tokenizerData?.merges?.size ?: 0}, pre=${tokenizerData?.preTokenizerSummary.orEmpty()}",
-                "tokenizer[0..23]" to sampleToks,
-                "tokenizer[300..418] (decoded UTF-8)" to decodedMerges,
-                "voices.json" to voicesDetail,
-                "auto_calibration" to calibrationSummary
-            )
 
-            AiSystemDiagnosticReport(
-                inspectedAtMillis = System.currentTimeMillis(),
-                engineMode = engineMode,
-                ortEnvironmentStatus = ortEnvironmentStatus,
-                assetsModelsFiles = assetsFiles,
-                totalAssetsBytes = totalAssetsBytes,
-                filesDirModelsPath = filesDirPath,
-                filesDirModelsFiles = filesDirFiles,
-                totalFilesDirBytes = totalFilesDirBytes,
-                mappedRoles = mapped,
-                loadedSessions = LinkedHashMap(loadedSessionSignatures),
-                metadataSummary = metadata,
-                sessionErrors = LinkedHashMap(sessionLoadErrors),
-                copyErrors = d?.copyErrors.orEmpty()
+            if (forceResync) {
+                ggufRunner.release()
+                neuCodec.closeSessions()
+                engineMode = OnnxVoiceEngineMode.UNINITIALIZED
+            }
+
+            initErrors.clear()
+            lastInitError = null
+
+            val discovered = OnnxModelAssetHelper.syncAssetsModelsToFilesDir(appContext)
+            discoveredModels = discovered
+            if (discovered.copyErrors.isNotEmpty()) {
+                initErrors["assets_copy"] = discovered.copyErrors.joinToString("\n")
+            }
+
+            targetSampleRate = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE
+            outputSampleRate = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE
+
+            espeakG2p = VietnameseEspeakG2p.loadFromFile(discovered.espeakDictFile)
+            presetVoices = OnnxModelAssetHelper.parseOfficialVoicesJson(discovered.voicesJsonFile)
+
+            if (!discovered.hasAnyModel) {
+                lastInitError = "Chưa tìm thấy model VieNeu-TTS GGUF hoặc NeuCodec ONNX trong assets/models/."
+                engineMode = OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
+                return@withContext engineMode
+            }
+
+            // 1. Initialize NeuCodec ONNX Encoder & Decoder
+            neuCodec.initialize(
+                encoderFile = discovered.codecEncoderFile,
+                decoderFile = discovered.codecDecoderFile
             )
+            neuCodec.loadErrors.forEach { (role, err) -> initErrors[role] = err }
+
+            // 2. Initialize VieNeu-TTS GGUF Backbone via llama.cpp
+            val ggufOk = ggufRunner.loadModel(discovered.ggufBackboneFile)
+            if (!ggufOk) {
+                ggufRunner.lastLoadError?.let { initErrors["gguf_backbone"] = it }
+            }
+
+            if (initErrors.isNotEmpty()) {
+                lastInitError = initErrors.entries.joinToString("\n") { "[${it.key}] ${it.value}" }
+            }
+
+            val ready = ggufRunner.isLoaded || neuCodec.hasEncoder || neuCodec.hasDecoder
+            engineMode = if (ready) {
+                OnnxVoiceEngineMode.ONNX_READY
+            } else {
+                OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
+            }
+            Log.i(
+                TAG,
+                "Init done: mode=$engineMode | gguf=${ggufRunner.isLoaded} | enc=${neuCodec.hasEncoder} | " +
+                    "dec=${neuCodec.hasDecoder} | g2p=${espeakG2p.entryCount} | presets=${presetVoices.size}"
+            )
+            engineMode
         }
 
-    /**
-     * Interactive test for "Kiểm tra hệ thống AI": executes speaker voice creation (`speaker_encoder.onnx`)
-     * and returns verbatim `e.toString()` + `e.cause?.message` if anything fails.
-     */
-    suspend fun runDiagnosticVoiceCreateTest(
-        sampleFloat16k: FloatArray? = null,
-        sampleRate: Int = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
-    ): AiDiagnosticTestResult = withContext(workerDispatcher) {
-        val startMs = System.currentTimeMillis()
-        try {
-            ensureInitialized()
-            val inputSamples = sampleFloat16k?.takeIf { it.isNotEmpty() } ?: FloatArray(16_000 * 3) { i ->
-                val t = i.toDouble() / 16_000.0
-                (0.35 * kotlin.math.sin(2.0 * kotlin.math.PI * 185.0 * t) +
-                    0.18 * kotlin.math.sin(2.0 * kotlin.math.PI * 370.0 * t)).toFloat()
-            }
-            val result = extractSpeakerEmbedding(inputSamples, sampleRate)
-            val elapsed = System.currentTimeMillis() - startMs
-            val ok = result.usedOnnxEncoder && result.embedding.isNotEmpty() && result.errorMessage.isNullOrBlank()
-            val detail = buildString {
-                appendLine("Trạng thái: ${if (ok) "THÀNH CÔNG (ONNX Encoder)" else if (result.embedding.isNotEmpty()) "CẢNH BÁO / DỰ PHÒNG" else "THẤT BẠI"}")
-                appendLine("Thời gian chạy: ${elapsed} ms")
-                appendLine("Mẫu đầu vào: ${inputSamples.size} mẫu @ ${sampleRate} Hz")
-                appendLine("Dùng ONNX speaker_encoder: ${result.usedOnnxEncoder}")
-                appendLine("Kích thước vector đặc trưng: ${result.embedding.size} chiều")
-                appendLine("ReferenceCodes (MOSS encode): ${result.referenceCodes?.size ?: 0} frames (${lastCodecEncodeNote.ifBlank { "n/a" }})")
-                appendLine("Pitch ratio ước lượng: ${String.format(Locale.US, "%.3f", result.estimatedPitchRatio)}")
-                loadedSessionSignatures["speaker_encoder"]?.let { appendLine("Session: $it") }
-                if (!result.errorMessage.isNullOrBlank()) {
-                    appendLine()
-                    appendLine("CHI TIẾT LỖI GỐC (NGUYÊN VĂN):")
-                    appendLine(result.errorMessage)
-                }
-            }
-            AiDiagnosticTestResult(
-                title = "Thử tạo giọng (speaker_encoder.onnx)",
-                success = ok,
-                elapsedMs = elapsed,
-                detailLog = detail.trimEnd()
-            )
-        } catch (e: Throwable) {
-            val elapsed = System.currentTimeMillis() - startMs
-            AiDiagnosticTestResult(
-                title = "Thử tạo giọng (speaker_encoder.onnx)",
-                success = false,
-                elapsedMs = elapsed,
-                detailLog = "NGOẠI LỆ NGUYÊN VĂN:\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
-            )
-        }
-    }
-
-    /**
-     * Interactive test for "Kiểm tra hệ thống AI": synthesizes [OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE]
-     * through the full ONNX TTS + Codec Decoder pipeline and captures verbatim `e.toString()` + `e.cause?.message`.
-     */
-    suspend fun runDiagnosticSentenceReadTest(
-        sentence: String = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
-        speakerEmbedding: FloatArray? = null,
-        referenceCodes: Array<IntArray>? = null
-    ): Pair<AiDiagnosticTestResult, SynthesizedSentenceAudio?> = withContext(workerDispatcher) {
-        val startMs = System.currentTimeMillis()
-        try {
-            ensureInitialized()
-            val firstPreset = richPresetVoices.firstOrNull { it.speakerEmbedding?.isNotEmpty() == true }
-            val emb = speakerEmbedding?.takeIf { it.isNotEmpty() }
-                ?: firstPreset?.speakerEmbedding
-                ?: presetVoices.values.firstOrNull()
-                ?: OnnxModelAssetHelper.l2Normalize(FloatArray(192) { i -> ((i % 17) - 8) / 16f })
-            val refCodes = referenceCodes?.takeIf { it.isNotEmpty() }
-                ?: if (speakerEmbedding == null) firstPreset?.refCodes else null
-
-            val synth = synthesizeSentenceDetailed(
-                sentence = sentence,
-                speakerEmbedding = emb,
-                speed = 1.0f,
-                referenceCodes = refCodes
-            )
-            val elapsed = System.currentTimeMillis() - startMs
-            val audio = synth.audio
-            val ok = audio != null
-            val detail = buildString {
-                appendLine("Câu mẫu: \"$sentence\"")
-                appendLine("Trạng thái: ${if (ok) "THÀNH CÔNG (đang phát âm thanh ONNX)" else "THẤT BẠI"}")
-                appendLine("Thời gian tổng hợp: ${elapsed} ms")
-                appendLine("Embedding đầu vào: ${emb.size} chiều | refCodes=${refCodes?.size ?: 0} frames")
-                if (audio != null) {
-                    val durSec = audio.pcmFloat.size.toFloat() / audio.sampleRate.toFloat()
-                    appendLine("Sóng âm đầu ra: ${audio.pcmFloat.size} mẫu @ ${audio.sampleRate} Hz (${String.format(Locale.US, "%.2f", durSec)} giây)")
-                }
-                if (!synth.traceLog.isNullOrBlank()) {
-                    appendLine()
-                    appendLine("TIẾN TRÌNH TỔNG HỢP (VieNeu v3):")
-                    appendLine(synth.traceLog.trimEnd())
-                }
-                if (!synth.errorMessage.isNullOrBlank()) {
-                    appendLine()
-                    appendLine("CHI TIẾT LỖI GỐC (NGUYÊN VĂN):")
-                    appendLine(synth.errorMessage)
-                }
-                if (sessionLoadErrors.isNotEmpty()) {
-                    appendLine()
-                    appendLine("LỖI NẠP SESSION TRƯỚC ĐÓ:")
-                    sessionLoadErrors.forEach { (k, v) -> appendLine("[$k] $v") }
-                }
-            }
-            AiDiagnosticTestResult(
-                title = "Thử đọc câu mẫu (ONNX TTS + Codec)",
-                success = ok,
-                elapsedMs = elapsed,
-                detailLog = detail.trimEnd()
-            ) to audio
-        } catch (e: Throwable) {
-            val elapsed = System.currentTimeMillis() - startMs
-            AiDiagnosticTestResult(
-                title = "Thử đọc câu mẫu (ONNX TTS + Codec)",
-                success = false,
-                elapsedMs = elapsed,
-                detailLog = "NGOẠI LỆ NGUYÊN VĂN:\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
-            ) to null
-        }
-    }
-
-    fun isFullOnnxSynthesisReady(): Boolean {
-        val hasGenerator = vieNeuV3Runner != null ||
-            (prefillSession != null && decodeStepSession != null) ||
-            backboneOrAcousticSession != null
-        return engineMode == OnnxVoiceEngineMode.ONNX_READY && hasGenerator
-    }
+    fun isFullOnnxSynthesisReady(): Boolean =
+        engineMode == OnnxVoiceEngineMode.ONNX_READY &&
+            ggufRunner.isLoaded &&
+            neuCodec.hasDecoder
 
     fun getReadinessDiagnostic(): String {
         val d = discoveredModels
-        if (d == null || !d.hasAnyOnnxModel) {
-            return lastInitError ?: "Chưa có bộ model VieNeu-TTS (.onnx / .onnx_data) trong assets/models/."
-        }
-        if (sessionLoadErrors.isNotEmpty()) {
-            return sessionLoadErrors.entries.joinToString(" | ") { "${it.key}: ${it.value}" }
+        if (d == null || !d.hasAnyModel) {
+            return lastInitError ?: "Chưa có bộ model VieNeu-TTS GGUF + NeuCodec trong assets/models/."
         }
         val missing = mutableListOf<String>()
-        if (prefillSession == null && backboneOrAcousticSession == null) {
-            missing.add("thiếu model backbone/generator (.onnx)")
-        }
-        if (prefillSession != null && decodeStepSession == null) {
-            missing.add("thiếu model decode_step (.onnx)")
-        }
-        if ((prefillSession != null || backboneOrAcousticSession != null) && codecDecoderSession == null) {
-            missing.add("cảnh báo: chưa có codec/vocoder decoder (.onnx)")
-        }
+        if (!ggufRunner.isLoaded) missing.add("chưa nạp được backbone .gguf (${ggufRunner.lastLoadError ?: "thiếu file .gguf"})")
+        if (!neuCodec.hasDecoder) missing.add("chưa nạp được neucodec_decoder.onnx")
+        if (!neuCodec.hasEncoder) missing.add("cảnh báo: chưa có neucodec_encoder.onnx")
         return if (missing.isEmpty()) {
-            "Sẵn sàng (${d.describeSummary()})"
+            "Sẵn sàng VieNeu-TTS GGUF + NeuCodec 24kHz (${d.describeSummary()})"
         } else {
-            "${missing.joinToString(", ")} [${d.describeSummary()}]"
+            missing.joinToString(" | ")
         }
     }
 
-    // -------------------------------------------------------------------------
-    // 1. Speaker Embedding Extraction (`speaker_encoder.onnx` on 16kHz Mono Float32)
-    // -------------------------------------------------------------------------
-
+    /**
+     * Extracts discrete 50 Hz NeuCodec FSQ speech token IDs (`IntArray`) from a user's recorded
+     * or imported 16 kHz Mono audio sample using `neucodec_encoder.onnx`.
+     */
     suspend fun extractSpeakerEmbedding(
         samples: FloatArray,
         sampleRate: Int
@@ -558,12 +184,11 @@ class OfflineOnnxVoiceEngine(context: Context) {
             )
         }
 
-        // Enforce exact 16,000 Hz Mono Float32 [-1.0f, 1.0f] for speaker_encoder.onnx
-        val samples16k = if (sampleRate != AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE) {
+        val samples16k = if (sampleRate != NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE) {
             AudioFileDecoder.normalizeAndResampleMonoFloat(
                 monoFloat = samples,
                 sourceRate = sampleRate,
-                targetRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
+                targetRate = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE
             )
         } else {
             samples
@@ -571,1138 +196,342 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
         val estimatedPitchRatio = OnnxModelAssetHelper.estimateSpeakerPitchRatio(
             samples16k,
-            AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
+            NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE
         )
+        val fingerprint = OnnxModelAssetHelper.computeAcousticFingerprint(samples16k)
 
-        val encoder = speakerEncoderSession
-        val env = ortEnv
-        val encoderFile = discoveredModels?.speakerEncoderFile
-
-        if (encoder != null && env != null) {
-            try {
-                val onnxEmbedding = runSpeakerEncoderSession(env, encoder, samples16k)
-                if (onnxEmbedding.isEmpty() || onnxEmbedding.all { !it.isFinite() || abs(it) < 1e-9f }) {
-                    throw IllegalStateException("speaker_encoder trả về vector rỗng hoặc toàn 0.")
-                }
-                val sanitized = FloatArray(onnxEmbedding.size) { i ->
-                    if (onnxEmbedding[i].isFinite()) onnxEmbedding[i] else 0f
-                }
-                val targetNorm = resolveReferenceSpeakerEmbeddingNorm()
-                val scaledEmbedding = scaleEmbeddingToTargetNorm(sanitized, targetNorm)
-                val refCodes = runCatching {
-                    encodeReferenceAudioCodesTransient(env, samples, sampleRate)
-                }.getOrNull()
+        if (neuCodec.hasEncoder) {
+            val encoded = neuCodec.encodeReferenceAudio(samples16k, NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE)
+            encoded.onSuccess { codes ->
                 return@withContext SpeakerEmbeddingResult(
-                    embedding = scaledEmbedding,
+                    embedding = fingerprint,
                     usedOnnxEncoder = true,
                     estimatedPitchRatio = estimatedPitchRatio,
-                    referenceCodes = refCodes,
+                    referenceCodes = codes,
                     errorMessage = null
                 )
-            } catch (e: Throwable) {
-                val fullErr = OnnxModelAssetHelper.formatFullThrowable(e)
-                val errMsg = "Lỗi chạy ${encoderFile?.name ?: "speaker_encoder.onnx"}:\n$fullErr\nInputs: ${formatInputSignatures(encoder)}\nOutputs: ${formatOutputSignatures(encoder)}"
-                Log.e(TAG, errMsg, e)
+            }.onFailure { err ->
+                val fullErr = "Lỗi chạy neucodec_encoder.onnx:\n${OnnxModelAssetHelper.formatFullThrowable(err)}"
+                Log.e(TAG, fullErr, err)
                 return@withContext SpeakerEmbeddingResult(
                     embedding = FloatArray(0),
                     usedOnnxEncoder = false,
                     estimatedPitchRatio = estimatedPitchRatio,
-                    errorMessage = errMsg
+                    referenceCodes = null,
+                    errorMessage = fullErr
                 )
             }
         }
 
-        // Check if speaker_encoder file existed on disk but failed to load into OrtSession
-        val loadErr = sessionLoadErrors["speaker_encoder"]
-        if (loadErr != null) {
-            return@withContext SpeakerEmbeddingResult(
-                embedding = FloatArray(0),
-                usedOnnxEncoder = false,
-                estimatedPitchRatio = estimatedPitchRatio,
-                errorMessage = loadErr
-            )
-        }
-
-        // No ONNX models bundled in APK (preview mode) -> safe acoustic voiceprint with clear note
-        val acousticVector = OnnxModelAssetHelper.computeFallbackVoiceprintEmbedding(
-            samples16k,
-            AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
-        )
-        val note = if (discoveredModels?.hasAnyOnnxModel == true) {
-            "Không tìm thấy file speaker_encoder.onnx trong ${discoveredModels?.modelsRootDir?.absolutePath} (${discoveredModels?.describeSummary()})"
-        } else {
-            null
-        }
+        val loadErr = initErrors["neucodec_encoder"]
+            ?: "Thiếu file neucodec_encoder.onnx trong assets/models/ để mã hóa giọng nói nhân bản."
         SpeakerEmbeddingResult(
-            embedding = acousticVector,
+            embedding = fingerprint,
             usedOnnxEncoder = false,
             estimatedPitchRatio = estimatedPitchRatio,
-            errorMessage = note
+            referenceCodes = null,
+            errorMessage = loadErr
         )
     }
 
-    private fun runSpeakerEncoderSession(
-        env: OrtEnvironment,
-        session: OrtSession,
-        samples16k: FloatArray
-    ): FloatArray {
-        val inputs = LinkedHashMap<String, OnnxTensor>()
-        try {
-            var computedFrames = 0
-            for ((name, nodeInfo) in session.inputInfo) {
-                val tInfo = nodeInfo.info as? TensorInfo
-                val shape = tInfo?.shape
-                val lower = name.lowercase(Locale.ROOT)
-                val type = tInfo?.type ?: OnnxJavaType.FLOAT
-
-                val tensor = when {
-                    type == OnnxJavaType.INT64 || type == OnnxJavaType.INT32 || lower.contains("len") -> {
-                        val lenVal = if (lower.contains("frame") || computedFrames > 0) {
-                            computedFrames.coerceAtLeast(1).toLong()
-                        } else {
-                            samples16k.size.toLong()
-                        }
-                        if (type == OnnxJavaType.INT32) {
-                            OnnxTensor.createTensor(env, IntBuffer.wrap(intArrayOf(lenVal.toInt())), longArrayOf(1L))
-                        } else if (type == OnnxJavaType.FLOAT) {
-                            OnnxTensor.createTensor(env, FloatBuffer.wrap(floatArrayOf(1.0f)), longArrayOf(1L))
-                        } else {
-                            OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(lenVal)), longArrayOf(1L))
-                        }
-                    }
-
-                    shape != null && shape.size == 4 -> {
-                        val melBins = shape[3].toInt().takeIf { it in 40..128 }
-                            ?: shape[2].toInt().takeIf { it in 40..128 }
-                            ?: 80
-                        val timeFirst = shape[3].toInt() == melBins || shape[2] <= 0L
-                        val (mel, frames) = OnnxModelAssetHelper.computeLogMelSpectrogram(
-                            samples16k = samples16k,
-                            sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE,
-                            melBins = melBins,
-                            timeFirst = timeFirst
-                        )
-                        computedFrames = frames
-                        val dims = if (timeFirst) {
-                            longArrayOf(1L, 1L, frames.toLong(), melBins.toLong())
-                        } else {
-                            longArrayOf(1L, 1L, melBins.toLong(), frames.toLong())
-                        }
-                        OnnxTensor.createTensor(env, FloatBuffer.wrap(mel), dims)
-                    }
-
-                    shape != null && shape.size == 3 -> {
-                        when {
-                            // [1, 1, samples] -> raw 16kHz waveform (NeuCodec / WavLM / audio encoder)
-                            shape[1] == 1L && (shape[2] <= 0L || shape[2] > 256L) -> {
-                                OnnxTensor.createTensor(
-                                    env,
-                                    FloatBuffer.wrap(samples16k),
-                                    longArrayOf(1L, 1L, samples16k.size.toLong())
-                                )
-                            }
-                            // [1, melBins, frames] -> channels-first log-mel (CAM++ / WeSpeaker)
-                            shape[1] in 40L..128L -> {
-                                val melBins = shape[1].toInt()
-                                val (mel, frames) = OnnxModelAssetHelper.computeLogMelSpectrogram(
-                                    samples16k = samples16k,
-                                    sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE,
-                                    melBins = melBins,
-                                    timeFirst = false
-                                )
-                                computedFrames = frames
-                                OnnxTensor.createTensor(
-                                    env,
-                                    FloatBuffer.wrap(mel),
-                                    longArrayOf(1L, melBins.toLong(), frames.toLong())
-                                )
-                            }
-                            // [1, frames, melBins] -> time-first log-mel (ECAPA-TDNN / SpeechBrain / VieNeu)
-                            else -> {
-                                val melBins = shape[2].toInt().takeIf { it in 40..128 } ?: 80
-                                val (mel, frames) = OnnxModelAssetHelper.computeLogMelSpectrogram(
-                                    samples16k = samples16k,
-                                    sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE,
-                                    melBins = melBins,
-                                    timeFirst = true
-                                )
-                                computedFrames = frames
-                                OnnxTensor.createTensor(
-                                    env,
-                                    FloatBuffer.wrap(mel),
-                                    longArrayOf(1L, frames.toLong(), melBins.toLong())
-                                )
-                            }
-                        }
-                    }
-
-                    shape != null && shape.size == 2 -> {
-                        // [1, samples] raw 16kHz waveform
-                        OnnxTensor.createTensor(
-                            env,
-                            FloatBuffer.wrap(samples16k),
-                            longArrayOf(1L, samples16k.size.toLong())
-                        )
-                    }
-
-                    else -> {
-                        OnnxTensor.createTensor(
-                            env,
-                            FloatBuffer.wrap(samples16k),
-                            longArrayOf(samples16k.size.toLong())
-                        )
-                    }
-                }
-                inputs[name] = tensor
-            }
-
-            session.run(inputs).use { result ->
-                if (result.size() <= 0) {
-                    throw IllegalStateException("speaker_encoder không trả về tensor đầu ra.")
-                }
-                return flattenAnyNumericOutputToFloat(result[0].value)
-                    ?: throw IllegalStateException("Không đọc được giá trị số từ đầu ra speaker_encoder.")
-            }
-        } finally {
-            inputs.values.forEach { runCatching { it.close() } }
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // 2. Full TTS Synthesis Pipeline (G2P/Tokenizer -> Generator -> Codec Decoder)
-    // -------------------------------------------------------------------------
-
+    /**
+     * Synthesizes a Vietnamese sentence using the official `pnnbao97/VieNeu-TTS` GGUF + NeuCodec pipeline:
+     * 1. Phonemizes `referenceText` and `sentence` using eSpeak-NG Vietnamese IPA (`VietnameseEspeakG2p`).
+     * 2. Generates `<|speech_N|>` tokens with `VieNeuGgufRunner` (`llama.cpp`) conditioned on `referenceCodes`.
+     * 3. Decodes generated speech tokens into a 24,000 Hz Mono Float32 PCM waveform with `neucodec_decoder.onnx`.
+     */
     suspend fun synthesizeSentenceDetailed(
         sentence: String,
-        speakerEmbedding: FloatArray,
-        speed: Float,
-        referenceCodes: Array<IntArray>? = null
+        speakerEmbedding: FloatArray = FloatArray(0),
+        speed: Float = 1.0f,
+        referenceCodes: IntArray? = null,
+        referenceText: String? = null
     ): OnnxSynthesisResult = withContext(workerDispatcher) {
         ensureInitialized()
-        val env = ortEnv
-        if (env == null) {
+
+        if (!ggufRunner.isLoaded) {
             return@withContext OnnxSynthesisResult(
-                errorMessage = lastInitError ?: "ONNX Runtime chưa sẵn sàng (thiếu file model trong assets/models/)."
+                errorMessage = ggufRunner.lastLoadError
+                    ?: "Chưa nạp được model VieNeu-TTS GGUF (${discoveredModels?.describeSummary()})."
             )
         }
-        val cleanText = VietnameseTtsTextNormalizer.normalizeForTts(sentence)
-        if (cleanText.isBlank()) {
+        if (!neuCodec.hasDecoder) {
+            return@withContext OnnxSynthesisResult(
+                errorMessage = neuCodec.loadErrors["neucodec_decoder"]
+                    ?: "Thiếu file neucodec_decoder.onnx để giải mã sóng âm 24kHz."
+            )
+        }
+
+        val cleanTarget = VietnameseTtsTextNormalizer.normalizeForTts(sentence).trim()
+        if (cleanTarget.isEmpty()) {
             return@withContext OnnxSynthesisResult(errorMessage = "Câu văn bản trống sau khi chuẩn hóa.")
         }
 
-        val clampedSpeed = speed.coerceIn(0.8f, 1.5f)
+        // Resolve reference voice: custom cloned voice (refCodes + refText) or preset fallback from voices.json
+        val resolvedRefCodes: IntArray
+        val resolvedRefText: String
+        val voiceSourceLabel: String
 
-        // Primary Path: VieNeu-TTS v3 Turbo Dual-AR (prefill + decode_step + acoustic_cached + 16 audio heads + 48kHz MOSS codec)
-        val v3Runner = vieNeuV3Runner
-        if (v3Runner != null) {
-            val v3Out = v3Runner.synthesize(
-                cleanText = cleanText,
-                speakerEmbedding = speakerEmbedding,
-                speed = clampedSpeed,
-                referenceCodes = referenceCodes
+        if (referenceCodes != null && referenceCodes.size >= 8) {
+            resolvedRefCodes = referenceCodes
+            resolvedRefText = referenceText?.trim().orEmpty()
+            voiceSourceLabel = "Custom Cloned Voice (${resolvedRefCodes.size} NeuCodec codes)"
+        } else {
+            val preset = presetVoices.firstOrNull { it.referenceCodes.size >= 8 }
+            if (preset == null) {
+                return@withContext OnnxSynthesisResult(
+                    errorMessage = "Giọng nhân bản chưa có mã âm thanh NeuCodec (referenceCodes) và không có voices.json dự phòng. Hãy tạo lại giọng mới trong Studio."
+                )
+            }
+            resolvedRefCodes = preset.referenceCodes
+            resolvedRefText = preset.referenceText
+            voiceSourceLabel = "Preset voices.json '${preset.id}' (${resolvedRefCodes.size} codes)"
+        }
+
+        val refPhones = if (resolvedRefText.isNotBlank()) espeakG2p.phonemize(resolvedRefText) else ""
+        val targetPhones = espeakG2p.phonemize(cleanTarget)
+        if (targetPhones.isBlank()) {
+            return@withContext OnnxSynthesisResult(
+                errorMessage = "Bộ chuyển âm vị tiếng Việt không tạo được chuỗi IPA cho câu này."
             )
-            val rawWave = v3Out.waveform
-            return@withContext if (rawWave != null && v3Out.errorMessage == null) {
-                finalizeWaveformResult(rawWave, v3Out.sampleRate).copy(traceLog = v3Out.traceLog)
-            } else {
+        }
+
+        val estMaxTokens = (targetPhones.length * 4 + 120).coerceIn(180, 1280)
+        val genRes = ggufRunner.generateSpeechCodes(
+            refPhones = refPhones,
+            targetPhones = targetPhones,
+            refCodes = resolvedRefCodes,
+            temperature = 0.8,
+            topK = 50,
+            maxNewTokens = estMaxTokens
+        )
+
+        if (genRes.errorMessage != null || genRes.speechCodes.size < 4) {
+            return@withContext OnnxSynthesisResult(
+                audio = null,
+                errorMessage = genRes.errorMessage ?: "GGUF không sinh ra mã âm thanh hợp lệ.",
+                traceLog = buildString {
+                    appendLine("Voice: $voiceSourceLabel")
+                    appendLine("RefText: $resolvedRefText")
+                    appendLine("RefIPA: $refPhones")
+                    appendLine("TargetIPA: $targetPhones")
+                    appendLine("GGUF elapsed: ${genRes.elapsedMs} ms | codes=${genRes.speechCodes.size}")
+                    appendLine("RawOut: ${genRes.rawOutputText}")
+                }
+            )
+        }
+
+        val decodeStart = System.currentTimeMillis()
+        val decoded = neuCodec.decodeSpeechCodes(genRes.speechCodes)
+        val decodeMs = System.currentTimeMillis() - decodeStart
+
+        decoded.fold(
+            onSuccess = { waveform ->
+                val durSec = waveform.size.toFloat() / NeuCodecOnnxEngine.DECODER_SAMPLE_RATE.toFloat()
+                val trace = buildString {
+                    appendLine("Pipeline: Official pnnbao97/VieNeu-TTS GGUF + NeuCodec ONNX (24kHz)")
+                    appendLine("Voice: $voiceSourceLabel")
+                    appendLine("RefText: ${resolvedRefText.take(120)}")
+                    appendLine("RefIPA: ${refPhones.take(160)}")
+                    appendLine("TargetIPA: ${targetPhones.take(180)}")
+                    appendLine("GGUF: ${genRes.speechCodes.size} speech tokens trong ${genRes.elapsedMs} ms")
+                    appendLine("NeuCodec Decode: ${waveform.size} samples @ 24kHz (${String.format(Locale.US, "%.2fs", durSec)}) trong $decodeMs ms")
+                }
+                OnnxSynthesisResult(
+                    audio = SynthesizedSentenceAudio(
+                        pcmFloat = waveform,
+                        sampleRate = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE
+                    ),
+                    errorMessage = null,
+                    traceLog = trace
+                )
+            },
+            onFailure = { err ->
                 OnnxSynthesisResult(
                     audio = null,
-                    errorMessage = v3Out.errorMessage ?: "VieNeu-TTS v3 Turbo không tạo được sóng âm.",
-                    traceLog = v3Out.traceLog
+                    errorMessage = "Lỗi giải mã neucodec_decoder.onnx:\n${OnnxModelAssetHelper.formatFullThrowable(err)}",
+                    traceLog = "Generated ${genRes.speechCodes.size} codes in ${genRes.elapsedMs} ms"
                 )
             }
-        }
+        )
+    }
 
-        val inputTokenIds = encodeTextToTokenIds(cleanText)
-        if (inputTokenIds.isEmpty()) {
-            return@withContext OnnxSynthesisResult(errorMessage = "G2P/Tokenizer không tạo được chuỗi token cho câu này.")
-        }
+    suspend fun runFullSystemDiagnostics(forceResync: Boolean = false): AiSystemDiagnosticReport =
+        withContext(workerDispatcher) {
+            ensureInitialized(forceResync = forceResync)
+            val (assetsFiles, totalAssetsBytes) = OnnxModelAssetHelper.inspectAssetsModelsFiles(appContext)
+            val (filesDirPath, filesDirFiles, totalFilesDirBytes) =
+                OnnxModelAssetHelper.inspectFilesDirModelsFiles(appContext)
+            val d = discoveredModels
 
-        val prefill = prefillSession
-        val decodeStep = decodeStepSession
-        val unified = backboneOrAcousticSession
-        val codecDecoder = codecDecoderSession
+            val mapped = linkedMapOf(
+                "pipeline" to "Official pnnbao97/VieNeu-TTS (GGUF + NeuCodec ONNX 24kHz)",
+                "gguf_backbone" to (d?.ggufBackboneFile?.name ?: "(không tìm thấy *.gguf)"),
+                "neucodec_encoder" to (d?.codecEncoderFile?.name ?: "(không tìm thấy neucodec_encoder.onnx)"),
+                "neucodec_decoder" to (d?.codecDecoderFile?.name ?: "(không tìm thấy neucodec_decoder.onnx)"),
+                "espeak_g2p_dict" to (d?.espeakDictFile?.let { "${it.name} (${espeakG2p.entryCount} âm tiết)" }
+                    ?: "Dùng luật dự phòng eSpeak-NG vi (${espeakG2p.entryCount} âm tiết)"),
+                "voices.json" to (d?.voicesJsonFile?.let { "${it.name} (${presetVoices.size} giọng mẫu)" }
+                    ?: "(không tìm thấy)"),
+                "output_sample_rate" to "${NeuCodecOnnxEngine.DECODER_SAMPLE_RATE} Hz"
+            )
 
-        if (prefill == null && unified == null) {
-            return@withContext OnnxSynthesisResult(
-                errorMessage = "Thiếu model sinh giọng nói ONNX (backbone/prefill). Chi tiết: ${getReadinessDiagnostic()}"
+            val loaded = LinkedHashMap<String, String>()
+            if (ggufRunner.isLoaded) {
+                loaded["llama.cpp (GGUF)"] = ggufRunner.statusSummary
+            }
+            loaded.putAll(neuCodec.loadedSignatures)
+
+            val sampleIpa = espeakG2p.phonemize("Xin chào, đây là giọng đọc thử nghiệm tiếng Việt.")
+            val presetPreview = if (presetVoices.isEmpty()) "(trống)" else {
+                presetVoices.take(3).joinToString(" | ") {
+                    "${it.id}(codes=${it.referenceCodes.size}, text='${it.referenceText.take(32)}')"
+                }
+            }
+            val metadata = linkedMapOf(
+                "gguf_special_tokens" to ggufRunner.specialTokenCheckSummary.ifBlank { "(chưa kiểm tra)" },
+                "espeak_g2p_entries" to "${espeakG2p.entryCount} entries",
+                "g2p_sample_vi" to sampleIpa,
+                "voices_presets" to presetPreview
+            )
+
+            val combinedStatus = "ORT: ${neuCodec.ortEnvironmentStatus} | GGUF: ${ggufRunner.statusSummary}"
+
+            AiSystemDiagnosticReport(
+                inspectedAtMillis = System.currentTimeMillis(),
+                engineMode = engineMode,
+                ortEnvironmentStatus = combinedStatus,
+                assetsModelsFiles = assetsFiles,
+                totalAssetsBytes = totalAssetsBytes,
+                filesDirModelsPath = filesDirPath,
+                filesDirModelsFiles = filesDirFiles,
+                totalFilesDirBytes = totalFilesDirBytes,
+                mappedRoles = mapped,
+                loadedSessions = loaded,
+                metadataSummary = metadata,
+                sessionErrors = LinkedHashMap(initErrors),
+                copyErrors = d?.copyErrors.orEmpty()
             )
         }
 
+    suspend fun runDiagnosticVoiceCreateTest(
+        sampleFloat16k: FloatArray? = null,
+        sampleRate: Int = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE
+    ): AiDiagnosticTestResult = withContext(workerDispatcher) {
+        val startMs = System.currentTimeMillis()
         try {
-            // Case A: Split Autoregressive Legacy TTS (`prefill` + `decode_step` -> MANDATORY `codecDecoder`)
-            if (prefill != null && decodeStep != null) {
-                if (codecDecoder == null) {
-                    return@withContext OnnxSynthesisResult(
-                        errorMessage = "Thiếu file codec/vocoder decoder ONNX để chuyển token âm thanh thành sóng PCM. (${discoveredModels?.describeSummary()})"
-                    )
-                }
-                val generatedSpeechCodes = runAutoregressivePrefillAndDecode(
-                    env = env,
-                    prefillSession = prefill,
-                    decodeSession = decodeStep,
-                    promptIds = inputTokenIds,
-                    speakerEmbedding = speakerEmbedding,
-                    maxSteps = (cleanText.length * 7).coerceIn(48, 480)
-                )
-                if (generatedSpeechCodes.isEmpty()) {
-                    return@withContext OnnxSynthesisResult(
-                        errorMessage = "Model autoregressive (${discoveredModels?.decodeStepModelFile?.name}) không sinh ra token âm thanh nào."
-                    )
-                }
-                val waveform = runCodecOrVocoderDecoder(
-                    env = env,
-                    decoderSession = codecDecoder,
-                    discreteCodes = generatedSpeechCodes,
-                    melFeatures = null
-                )
-                return@withContext finalizeWaveformResult(waveform, outputSampleRate)
+            ensureInitialized()
+            val inputSamples = sampleFloat16k?.takeIf { it.isNotEmpty() } ?: FloatArray(16_000 * 3) { i ->
+                val t = i.toDouble() / 16_000.0
+                (0.35 * kotlin.math.sin(2.0 * kotlin.math.PI * 185.0 * t) +
+                    0.18 * kotlin.math.sin(2.0 * kotlin.math.PI * 370.0 * t)).toFloat()
             }
-
-            // Case B: Unified Backbone / Acoustic Generator (`backbone.onnx` / `model.onnx` / `acoustic.onnx`)
-            val mainSession = unified ?: prefill!!
-            val mainFileName = discoveredModels?.backboneOrAcousticFile?.name
-                ?: discoveredModels?.prefillModelFile?.name
-                ?: "model.onnx"
-
-            // Detect whether unified model is an autoregressive KV-cache LM or single-pass acoustic/VITS model
-            val hasPastKvInputs = mainSession.inputInfo.keys.any { it.lowercase(Locale.ROOT).contains("past") }
-            if (hasPastKvInputs) {
-                if (codecDecoder == null) {
-                    return@withContext OnnxSynthesisResult(
-                        errorMessage = "Model $mainFileName sinh token âm thanh nhưng thiếu file codec/vocoder decoder ONNX (neucodec/vocoder). (${discoveredModels?.describeSummary()})"
-                    )
+            val res = extractSpeakerEmbedding(inputSamples, sampleRate)
+            val elapsed = System.currentTimeMillis() - startMs
+            val ok = res.usedOnnxEncoder && (res.referenceCodes?.size ?: 0) >= 8 && res.errorMessage.isNullOrBlank()
+            val detail = buildString {
+                appendLine("Trạng thái: ${if (ok) "THÀNH CÔNG (NeuCodec ONNX Encoder)" else "THẤT BẠI"}")
+                appendLine("Thời gian chạy: $elapsed ms")
+                appendLine("Đầu vào: ${inputSamples.size} mẫu @ $sampleRate Hz")
+                appendLine("Số mã FSQ NeuCodec trích xuất: ${res.referenceCodes?.size ?: 0} tokens (~50 tok/s)")
+                res.referenceCodes?.take(12)?.let { sampleCodes ->
+                    appendLine("12 mã đầu tiên: ${sampleCodes.joinToString(", ")}")
                 }
-                val generatedCodes = runUnifiedAutoregressiveKvModel(
-                    env = env,
-                    session = mainSession,
-                    promptIds = inputTokenIds,
-                    speakerEmbedding = speakerEmbedding,
-                    maxSteps = (cleanText.length * 7).coerceIn(48, 480)
-                )
-                if (generatedCodes.isEmpty()) {
-                    return@withContext OnnxSynthesisResult(
-                        errorMessage = "Model $mainFileName không sinh được chuỗi token âm thanh hợp lệ."
-                    )
+                neuCodec.loadedSignatures["neucodec_encoder"]?.let { appendLine("Session: $it") }
+                if (!res.errorMessage.isNullOrBlank()) {
+                    appendLine()
+                    appendLine("CHI TIẾT LỖI GỐC (NGUYÊN VĂN):")
+                    appendLine(res.errorMessage)
                 }
-                val waveform = runCodecOrVocoderDecoder(
-                    env = env,
-                    decoderSession = codecDecoder,
-                    discreteCodes = generatedCodes,
-                    melFeatures = null
-                )
-                return@withContext finalizeWaveformResult(waveform, outputSampleRate)
             }
-
-            // Case C: Single-pass Acoustic/VITS generator (+ mandatory codec/vocoder decoder if present)
-            val (floatOut, longOut) = runSinglePassGenerator(
-                env = env,
-                session = mainSession,
-                tokenIds = inputTokenIds,
-                speakerEmbedding = speakerEmbedding,
-                speed = clampedSpeed
+            AiDiagnosticTestResult(
+                title = "Thử mã hóa giọng mẫu (neucodec_encoder.onnx)",
+                success = ok,
+                elapsedMs = elapsed,
+                detailLog = detail.trimEnd()
             )
-
-            val waveform = when {
-                codecDecoder != null && longOut != null && longOut.isNotEmpty() -> {
-                    runCodecOrVocoderDecoder(env, codecDecoder, discreteCodes = longOut, melFeatures = null)
-                }
-                codecDecoder != null && floatOut != null && floatOut.isNotEmpty() -> {
-                    // Check if codec decoder expects INT64 codes (convert argmax/ids) or FLOAT mel spectrogram
-                    val decFirstType = (codecDecoder.inputInfo.values.firstOrNull()?.info as? TensorInfo)?.type
-                    if (decFirstType == OnnxJavaType.INT64 || decFirstType == OnnxJavaType.INT32) {
-                        val codes = LongArray(floatOut.size) { floatOut[it].toLong().coerceAtLeast(0L) }
-                        runCodecOrVocoderDecoder(env, codecDecoder, discreteCodes = codes, melFeatures = null)
-                    } else {
-                        runCodecOrVocoderDecoder(env, codecDecoder, discreteCodes = null, melFeatures = floatOut)
-                    }
-                }
-                floatOut != null && floatOut.size >= 512 -> floatOut
-                else -> {
-                    return@withContext OnnxSynthesisResult(
-                        errorMessage = "Model $mainFileName trả về dữ liệu quá ngắn (${floatOut?.size ?: 0} mẫu float, ${longOut?.size ?: 0} token) và không có codec decoder phù hợp."
-                    )
-                }
-            }
-
-            finalizeWaveformResult(waveform, outputSampleRate)
         } catch (e: Throwable) {
-            val detail = OnnxModelAssetHelper.formatFullThrowable(e)
-            Log.e(TAG, "ONNX synthesis failed:\n$detail", e)
-            OnnxSynthesisResult(errorMessage = detail)
-        }
-    }
-
-    suspend fun synthesizeSentence(
-        sentence: String,
-        speakerEmbedding: FloatArray,
-        speed: Float
-    ): SynthesizedSentenceAudio? {
-        return synthesizeSentenceDetailed(sentence, speakerEmbedding, speed).audio
-    }
-
-    private fun finalizeWaveformResult(waveform: FloatArray, sampleRate: Int): OnnxSynthesisResult {
-        if (waveform.size < 256) {
-            return OnnxSynthesisResult(
-                errorMessage = "Bộ giải mã âm thanh (codec/vocoder) trả về sóng âm quá ngắn (${waveform.size} mẫu)."
+            AiDiagnosticTestResult(
+                title = "Thử mã hóa giọng mẫu (neucodec_encoder.onnx)",
+                success = false,
+                elapsedMs = System.currentTimeMillis() - startMs,
+                detailLog = "NGOẠI LỆ NGUYÊN VĂN:\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
             )
         }
-        val normalized = OnnxModelAssetHelper.normalizeOutputWaveform(waveform)
-        val hasAudioEnergy = normalized.any { abs(it) > 1e-4f }
-        if (!hasAudioEnergy) {
-            return OnnxSynthesisResult(
-                errorMessage = "Bộ giải mã âm thanh trả về sóng im lặng hoàn toàn (toàn số 0)."
+    }
+
+    suspend fun runDiagnosticSentenceReadTest(
+        sentence: String = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
+        speakerEmbedding: FloatArray? = null,
+        referenceCodes: IntArray? = null,
+        referenceText: String? = null
+    ): Pair<AiDiagnosticTestResult, SynthesizedSentenceAudio?> = withContext(workerDispatcher) {
+        val startMs = System.currentTimeMillis()
+        try {
+            ensureInitialized()
+            val synth = synthesizeSentenceDetailed(
+                sentence = sentence,
+                speakerEmbedding = speakerEmbedding ?: FloatArray(0),
+                speed = 1.0f,
+                referenceCodes = referenceCodes,
+                referenceText = referenceText
             )
-        }
-        return OnnxSynthesisResult(
-            audio = SynthesizedSentenceAudio(
-                pcmFloat = normalized,
-                sampleRate = sampleRate.coerceIn(16_000, 48_000)
-            ),
-            errorMessage = null
-        )
-    }
-
-    // -------------------------------------------------------------------------
-    // Autoregressive Prefill + Decode-Step & Unified KV-Cache Runners
-    // -------------------------------------------------------------------------
-
-    private fun runAutoregressivePrefillAndDecode(
-        env: OrtEnvironment,
-        prefillSession: OrtSession,
-        decodeSession: OrtSession,
-        promptIds: LongArray,
-        speakerEmbedding: FloatArray,
-        maxSteps: Int
-    ): LongArray {
-        val eosId = tokenizerData?.eosTokenId ?: 2L
-        val speechEndId = tokenizerData?.speechEndTokenId
-        val speechBase = tokenizerData?.speechTokenBaseId ?: 0L
-
-        // 1. Run prefill
-        val prefillInputs = buildLmStepInputs(
-            env = env,
-            session = prefillSession,
-            tokenIds = promptIds,
-            totalSeqLen = promptIds.size,
-            speakerEmbedding = speakerEmbedding,
-            pastKv = emptyMap()
-        )
-
-        val generatedCodes = ArrayList<Long>(maxSteps)
-        var currentKv = LinkedHashMap<String, Any>()
-        var nextToken: Long
-
-        try {
-            prefillSession.run(prefillInputs).use { prefillRes ->
-                val logits = extractLastStepLogits(prefillRes)
-                    ?: throw IllegalStateException("Prefill không trả về logits. Outputs: ${prefillSession.outputNames}")
-                nextToken = argmaxToken(logits)
-                currentKv = extractPresentKvTensorsData(prefillSession, prefillRes)
-            }
-        } finally {
-            prefillInputs.values.forEach { runCatching { it.close() } }
-        }
-
-        // 2. Iterative decode steps
-        var seqLen = promptIds.size
-        var repeatCount = 0
-        var lastToken = -1L
-
-        for (step in 0 until maxSteps) {
-            if (nextToken == eosId || (speechEndId != null && nextToken == speechEndId)) break
-            if (nextToken == lastToken) {
-                repeatCount++
-                if (repeatCount >= 18) break
-            } else {
-                repeatCount = 0
-                lastToken = nextToken
-            }
-
-            val codecToken = if (speechBase > 0L && nextToken >= speechBase) {
-                nextToken - speechBase
-            } else {
-                nextToken.coerceAtLeast(0L)
-            }
-            generatedCodes.add(codecToken)
-
-            seqLen += 1
-            val stepInputs = buildLmStepInputs(
-                env = env,
-                session = decodeSession,
-                tokenIds = longArrayOf(nextToken),
-                totalSeqLen = seqLen,
-                speakerEmbedding = speakerEmbedding,
-                pastKv = currentKv
-            )
-            try {
-                decodeSession.run(stepInputs).use { stepRes ->
-                    val logits = extractLastStepLogits(stepRes) ?: break
-                    nextToken = argmaxToken(logits)
-                    currentKv = extractPresentKvTensorsData(decodeSession, stepRes)
+            val elapsed = System.currentTimeMillis() - startMs
+            val audio = synth.audio
+            val ok = audio != null
+            val detail = buildString {
+                appendLine("Câu mẫu: \"$sentence\"")
+                appendLine("Trạng thái: ${if (ok) "THÀNH CÔNG (đang phát sóng âm 24kHz)" else "THẤT BẠI"}")
+                appendLine("Tổng thời gian: $elapsed ms")
+                if (audio != null) {
+                    val dur = audio.pcmFloat.size.toFloat() / audio.sampleRate.toFloat()
+                    appendLine("Đầu ra: ${audio.pcmFloat.size} mẫu @ ${audio.sampleRate} Hz (${String.format(Locale.US, "%.2fs", dur)})")
                 }
-            } finally {
-                stepInputs.values.forEach { runCatching { it.close() } }
-            }
-        }
-
-        return LongArray(generatedCodes.size) { generatedCodes[it] }
-    }
-
-    private fun runUnifiedAutoregressiveKvModel(
-        env: OrtEnvironment,
-        session: OrtSession,
-        promptIds: LongArray,
-        speakerEmbedding: FloatArray,
-        maxSteps: Int
-    ): LongArray {
-        // Unified merged KV-cache decoder uses the same session for prefill and decode steps
-        return runAutoregressivePrefillAndDecode(
-            env = env,
-            prefillSession = session,
-            decodeSession = session,
-            promptIds = promptIds,
-            speakerEmbedding = speakerEmbedding,
-            maxSteps = maxSteps
-        )
-    }
-
-    private data class CachedTensorPayload(
-        val floats: FloatArray?,
-        val fp16Shorts: ShortArray?,
-        val shape: LongArray,
-        val type: OnnxJavaType
-    )
-
-    private fun buildLmStepInputs(
-        env: OrtEnvironment,
-        session: OrtSession,
-        tokenIds: LongArray,
-        totalSeqLen: Int,
-        speakerEmbedding: FloatArray,
-        pastKv: Map<String, Any>
-    ): LinkedHashMap<String, OnnxTensor> {
-        val inputs = LinkedHashMap<String, OnnxTensor>()
-        val curLen = tokenIds.size
-        for ((name, nodeInfo) in session.inputInfo) {
-            val lower = name.lowercase(Locale.ROOT)
-            val tInfo = nodeInfo.info as? TensorInfo
-            val shape = tInfo?.shape
-            val type = tInfo?.type ?: OnnxJavaType.FLOAT
-
-            val tensor = when {
-                lower.contains("past") || lower.contains("cache") || lower.startsWith("k_") || lower.startsWith("v_") -> {
-                    val matched = findMatchingPastKv(name, pastKv)
-                    if (matched != null) {
-                        createTensorFromPayload(env, matched, type)
-                    } else {
-                        // Zero-length KV cache for initial prefill step
-                        val dims = shape?.mapIndexed { idx, d ->
-                            when {
-                                d > 0L -> d
-                                idx == 0 -> 1L
-                                idx == 2 || (shape.size == 4 && idx == 2) -> 0L
-                                else -> 1L
-                            }
-                        }?.toLongArray() ?: longArrayOf(1L, 1L, 0L, 64L)
-                        createEmptyTypedTensor(env, dims, type)
-                    }
+                if (!synth.traceLog.isNullOrBlank()) {
+                    appendLine()
+                    appendLine("TIẾN TRÌNH TỔNG HỢP (VieNeu-TTS GGUF + NeuCodec):")
+                    appendLine(synth.traceLog.trimEnd())
                 }
-
-                lower.contains("attention_mask") || lower == "mask" -> {
-                    val mask = LongArray(totalSeqLen) { 1L }
-                    if (type == OnnxJavaType.INT32) {
-                        OnnxTensor.createTensor(env, IntBuffer.wrap(IntArray(totalSeqLen) { 1 }), longArrayOf(1L, totalSeqLen.toLong()))
-                    } else if (type == OnnxJavaType.BOOL) {
-                        OnnxTensor.createTensor(env, arrayOf(BooleanArray(totalSeqLen) { true }))
-                    } else {
-                        OnnxTensor.createTensor(env, LongBuffer.wrap(mask), longArrayOf(1L, totalSeqLen.toLong()))
-                    }
+                if (!synth.errorMessage.isNullOrBlank()) {
+                    appendLine()
+                    appendLine("CHI TIẾT LỖI GỐC (NGUYÊN VĂN):")
+                    appendLine(synth.errorMessage)
                 }
-
-                lower.contains("position_ids") || lower == "pos" -> {
-                    val startPos = (totalSeqLen - curLen).coerceAtLeast(0)
-                    val pos = LongArray(curLen) { (startPos + it).toLong() }
-                    OnnxTensor.createTensor(env, LongBuffer.wrap(pos), longArrayOf(1L, curLen.toLong()))
-                }
-
-                lower.contains("spk") || lower.contains("speaker") || lower.contains("embed") || lower.contains("voice") -> {
-                    val expectedDim = shape?.lastOrNull()?.toInt()?.takeIf { it > 0 } ?: speakerEmbedding.size
-                    val fitted = fitFloatVector(speakerEmbedding, expectedDim)
-                    val dims = if (shape != null && shape.size == 3) {
-                        longArrayOf(1L, 1L, fitted.size.toLong())
-                    } else {
-                        longArrayOf(1L, fitted.size.toLong())
-                    }
-                    OnnxTensor.createTensor(env, FloatBuffer.wrap(fitted), dims)
-                }
-
-                lower.contains("use_cache") -> {
-                    OnnxTensor.createTensor(env, booleanArrayOf(pastKv.isNotEmpty()))
-                }
-
-                lower.contains("input_ids") || lower.contains("token") || type == OnnxJavaType.INT64 -> {
-                    val dims = if (shape != null && shape.size == 1) {
-                        longArrayOf(curLen.toLong())
-                    } else {
-                        longArrayOf(1L, curLen.toLong())
-                    }
-                    OnnxTensor.createTensor(env, LongBuffer.wrap(tokenIds), dims)
-                }
-
-                else -> {
-                    val dims = shape?.map { if (it > 0L) it else 1L }?.toLongArray() ?: longArrayOf(1L)
-                    createEmptyTypedTensor(env, dims, type)
+                if (initErrors.isNotEmpty()) {
+                    appendLine()
+                    appendLine("LỖI KHỞI TẠO TRƯỚC ĐÓ:")
+                    initErrors.forEach { (k, v) -> appendLine("[$k] $v") }
                 }
             }
-            inputs[name] = tensor
-        }
-        return inputs
-    }
-
-    private fun extractPresentKvTensorsData(
-        session: OrtSession,
-        result: OrtSession.Result
-    ): LinkedHashMap<String, Any> {
-        val out = LinkedHashMap<String, Any>()
-        val outputNames = session.outputNames.toList()
-        for (i in 0 until result.size()) {
-            val outName = outputNames.getOrNull(i) ?: continue
-            val lower = outName.lowercase(Locale.ROOT)
-            if (lower.contains("present") || lower.contains("cache") || lower.contains("past") ||
-                lower.startsWith("k_") || lower.startsWith("v_")
-            ) {
-                val onnxVal = result[i]
-                if (onnxVal is OnnxTensor) {
-                    out[outName] = VieNeuV3WeightStore.readSafePayload(onnxVal)
-                }
-            }
-        }
-        return out
-    }
-
-    private fun findMatchingPastKv(inputName: String, pastKv: Map<String, Any>): SafeTensorPayload? {
-        if (pastKv.isEmpty()) return null
-        (pastKv[inputName] as? SafeTensorPayload)?.let { return it }
-        val presentAlias = inputName
-            .replace("past_key_values", "present")
-            .replace("past_", "present_")
-        (pastKv[presentAlias] as? SafeTensorPayload)?.let { return it }
-        val digits = inputName.filter { it.isDigit() }
-        val isKey = inputName.lowercase(Locale.ROOT).contains("key") || inputName.lowercase(Locale.ROOT).startsWith("k")
-        val isVal = inputName.lowercase(Locale.ROOT).contains("val") || inputName.lowercase(Locale.ROOT).startsWith("v")
-        for ((k, v) in pastKv) {
-            if (v !is SafeTensorPayload) continue
-            if (k.filter { it.isDigit() } == digits) {
-                val kl = k.lowercase(Locale.ROOT)
-                if ((isKey && (kl.contains("key") || kl.startsWith("k"))) ||
-                    (isVal && (kl.contains("val") || kl.startsWith("v")))
-                ) {
-                    return v
-                }
-            }
-        }
-        return null
-    }
-
-    private fun createTensorFromPayload(
-        env: OrtEnvironment,
-        payload: SafeTensorPayload,
-        expectedType: OnnxJavaType
-    ): OnnxTensor {
-        return VieNeuV3WeightStore.createOnnxTensorFromPayload(env, payload, expectedType)
-    }
-
-    private fun createEmptyTypedTensor(env: OrtEnvironment, dims: LongArray, type: OnnxJavaType): OnnxTensor {
-        val count = dims.fold(1L) { acc, d -> acc * d }.toInt().coerceAtLeast(0)
-        return when (type) {
-            OnnxJavaType.FLOAT16 -> {
-                val bb = ByteBuffer.allocateDirect(count * 2).order(ByteOrder.nativeOrder())
-                OnnxTensor.createTensor(env, bb, dims, OnnxJavaType.FLOAT16)
-            }
-            OnnxJavaType.INT64 -> OnnxTensor.createTensor(env, LongBuffer.wrap(LongArray(count)), dims)
-            OnnxJavaType.INT32 -> OnnxTensor.createTensor(env, IntBuffer.wrap(IntArray(count)), dims)
-            else -> OnnxTensor.createTensor(env, FloatBuffer.wrap(FloatArray(count)), dims)
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Single-Pass Generator & Mandatory Codec / Vocoder Decoder ONNX
-    // -------------------------------------------------------------------------
-
-    private fun runSinglePassGenerator(
-        env: OrtEnvironment,
-        session: OrtSession,
-        tokenIds: LongArray,
-        speakerEmbedding: FloatArray,
-        speed: Float
-    ): Pair<FloatArray?, LongArray?> {
-        val inputs = LinkedHashMap<String, OnnxTensor>()
-        try {
-            for ((name, nodeInfo) in session.inputInfo) {
-                val lower = name.lowercase(Locale.ROOT)
-                val tInfo = nodeInfo.info as? TensorInfo
-                val shape = tInfo?.shape
-                val type = tInfo?.type ?: OnnxJavaType.FLOAT
-
-                val tensor = when {
-                    lower.contains("len") -> {
-                        if (type == OnnxJavaType.INT32) {
-                            OnnxTensor.createTensor(env, IntBuffer.wrap(intArrayOf(tokenIds.size)), longArrayOf(1L))
-                        } else {
-                            OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(tokenIds.size.toLong())), longArrayOf(1L))
-                        }
-                    }
-                    lower.contains("spk") || lower.contains("speaker") || lower.contains("embed") || lower.contains("style") || lower.contains("voice") -> {
-                        val expectedDim = shape?.lastOrNull()?.toInt()?.takeIf { it > 0 } ?: speakerEmbedding.size
-                        val fitted = fitFloatVector(speakerEmbedding, expectedDim)
-                        val dims = if (shape != null && shape.size == 3) {
-                            longArrayOf(1L, 1L, fitted.size.toLong())
-                        } else {
-                            longArrayOf(1L, fitted.size.toLong())
-                        }
-                        OnnxTensor.createTensor(env, FloatBuffer.wrap(fitted), dims)
-                    }
-                    lower.contains("scale") || lower.contains("speed") || lower.contains("alpha") -> {
-                        val lengthScale = (1.0f / speed).coerceIn(0.65f, 1.35f)
-                        val count = shape?.lastOrNull()?.toInt()?.takeIf { it in 1..4 } ?: 1
-                        val vals = FloatArray(count) { idx ->
-                            when (idx) {
-                                0 -> if (count == 1) lengthScale else 0.667f
-                                1 -> lengthScale
-                                else -> 0.8f
-                            }
-                        }
-                        OnnxTensor.createTensor(env, FloatBuffer.wrap(vals), longArrayOf(count.toLong()))
-                    }
-                    type == OnnxJavaType.INT64 || lower.contains("input") || lower.contains("token") || lower.contains("phoneme") || lower.contains("text") -> {
-                        val dims = if (shape != null && shape.size == 1) longArrayOf(tokenIds.size.toLong()) else longArrayOf(1L, tokenIds.size.toLong())
-                        OnnxTensor.createTensor(env, LongBuffer.wrap(tokenIds), dims)
-                    }
-                    type == OnnxJavaType.INT32 -> {
-                        val ints = IntArray(tokenIds.size) { tokenIds[it].toInt() }
-                        val dims = if (shape != null && shape.size == 1) longArrayOf(ints.size.toLong()) else longArrayOf(1L, ints.size.toLong())
-                        OnnxTensor.createTensor(env, IntBuffer.wrap(ints), dims)
-                    }
-                    else -> {
-                        val expectedDim = shape?.lastOrNull()?.toInt()?.takeIf { it > 0 } ?: speakerEmbedding.size
-                        val fitted = fitFloatVector(speakerEmbedding, expectedDim)
-                        OnnxTensor.createTensor(env, FloatBuffer.wrap(fitted), longArrayOf(1L, fitted.size.toLong()))
-                    }
-                }
-                inputs[name] = tensor
-            }
-
-            session.run(inputs).use { result ->
-                if (result.size() <= 0) return null to null
-                val first = result[0]
-                val raw = first.value
-                val floats = flattenAnyNumericOutputToFloat(raw)
-                val longs = flattenIntOutputToLong(raw)
-                return floats to longs
-            }
-        } finally {
-            inputs.values.forEach { runCatching { it.close() } }
-        }
-    }
-
-    /**
-     * Mandatory Codec / Vocoder Decoder step (NeuCodec / MOSS-Audio-Tokenizer / HiFi-GAN / Vocos):
-     * Converts discrete speech tokens (`INT64` / `INT32`) or acoustic mel frames (`FLOAT`) into
-     * a Mono `FloatArray` audio waveform ready for 16-bit PCM `AudioTrack` / WAV playback.
-     */
-    private fun runCodecOrVocoderDecoder(
-        env: OrtEnvironment,
-        decoderSession: OrtSession,
-        discreteCodes: LongArray?,
-        melFeatures: FloatArray?
-    ): FloatArray {
-        val inputs = LinkedHashMap<String, OnnxTensor>()
-        try {
-            for ((name, nodeInfo) in decoderSession.inputInfo) {
-                val tInfo = nodeInfo.info as? TensorInfo
-                val shape = tInfo?.shape
-                val type = tInfo?.type ?: OnnxJavaType.INT64
-                val lower = name.lowercase(Locale.ROOT)
-
-                val tensor = when {
-                    lower.contains("len") && (type == OnnxJavaType.INT64 || type == OnnxJavaType.INT32) -> {
-                        val count = discreteCodes?.size ?: ((melFeatures?.size ?: 80) / 80).coerceAtLeast(1)
-                        if (type == OnnxJavaType.INT32) {
-                            OnnxTensor.createTensor(env, IntBuffer.wrap(intArrayOf(count)), longArrayOf(1L))
-                        } else {
-                            OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(count.toLong())), longArrayOf(1L))
-                        }
-                    }
-
-                    type == OnnxJavaType.INT64 || type == OnnxJavaType.INT32 -> {
-                        val codes = discreteCodes ?: throw IllegalStateException(
-                            "Codec decoder yêu cầu input INT64 ($name) nhưng không có chuỗi token âm thanh."
-                        )
-                        val dims = when {
-                            shape != null && shape.size == 3 -> {
-                                val groups = shape[1].toInt().takeIf { it in 1..32 } ?: 1
-                                val frames = (codes.size / groups).coerceAtLeast(1)
-                                longArrayOf(1L, groups.toLong(), frames.toLong())
-                            }
-                            shape != null && shape.size == 2 -> longArrayOf(1L, codes.size.toLong())
-                            else -> longArrayOf(codes.size.toLong())
-                        }
-                        val needed = dims.fold(1L) { acc, d -> acc * d }.toInt()
-                        val fitted = if (codes.size == needed) codes else LongArray(needed) { codes[it % codes.size] }
-                        if (type == OnnxJavaType.INT32) {
-                            OnnxTensor.createTensor(env, IntBuffer.wrap(IntArray(needed) { fitted[it].toInt() }), dims)
-                        } else {
-                            OnnxTensor.createTensor(env, LongBuffer.wrap(fitted), dims)
-                        }
-                    }
-
-                    else -> {
-                        // FLOAT mel / latent input (e.g. [1, 80, T] or [1, T, 80])
-                        val feats = melFeatures ?: discreteCodes?.let { FloatArray(it.size) { i -> it[i].toFloat() } }
-                            ?: throw IllegalStateException("Codec/vocoder decoder thiếu dữ liệu đầu vào float ($name).")
-                        val melBins = shape?.getOrNull(1)?.toInt()?.takeIf { it in 16..512 }
-                            ?: shape?.getOrNull(2)?.toInt()?.takeIf { it in 16..512 }
-                            ?: 80
-                        val channelsFirst = shape?.getOrNull(1)?.toInt() == melBins || (shape?.size == 3 && shape[2] <= 0L)
-                        val frames = (feats.size / melBins).coerceAtLeast(1)
-                        val trimmed = if (frames * melBins == feats.size) feats else feats.copyOf(frames * melBins)
-                        val dims = if (channelsFirst) {
-                            longArrayOf(1L, melBins.toLong(), frames.toLong())
-                        } else {
-                            longArrayOf(1L, frames.toLong(), melBins.toLong())
-                        }
-                        OnnxTensor.createTensor(env, FloatBuffer.wrap(trimmed), dims)
-                    }
-                }
-                inputs[name] = tensor
-            }
-
-            decoderSession.run(inputs).use { result ->
-                if (result.size() <= 0) {
-                    throw IllegalStateException("Codec/vocoder decoder không trả về tensor sóng âm.")
-                }
-                val outVal = result[0]
-                val outInfo = (outVal as? OnnxTensor)?.info
-                val rawFloats = flattenAnyNumericOutputToFloat(outVal.value)
-                    ?: throw IllegalStateException("Không đọc được sóng âm float từ codec decoder.")
-
-                // If codec outputs stereo [1, 2, N] (e.g. MOSS-Audio-Tokenizer), mix down cleanly to Mono [N]
-                val outShape = outInfo?.shape
-                if (outShape != null && outShape.size == 3 && outShape[1] == 2L && rawFloats.size >= 2) {
-                    val monoLen = rawFloats.size / 2
-                    return FloatArray(monoLen) { i ->
-                        (rawFloats[i] + rawFloats[monoLen + i]) * 0.5f
-                    }
-                }
-                return rawFloats
-            }
-        } finally {
-            inputs.values.forEach { runCatching { it.close() } }
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Vietnamese G2P + Tokenizer Encoding & Tensor Utilities
-    // -------------------------------------------------------------------------
-
-    private fun encodeTextToTokenIds(cleanText: String): LongArray {
-        val tok = tokenizerData
-        if (tok != null && tok.tokenToId.isNotEmpty()) {
-            val ids = ArrayList<Long>(cleanText.length * 2 + 8)
-            tok.bosTokenId?.let { ids.add(it) }
-            val words = cleanText.split(Regex("\\s+")).filter { it.isNotEmpty() }
-            for ((idx, word) in words.withIndex()) {
-                val prefix = if (idx > 0) "Ġ" else ""
-                val direct = tok.tokenToId[prefix + word] ?: tok.tokenToId[word]
-                if (direct != null) {
-                    ids.add(direct)
-                } else {
-                    // Greedy longest-subword match in tokenizer.json vocab
-                    var cursor = 0
-                    val target = prefix + word
-                    while (cursor < target.length) {
-                        var matched: Long? = null
-                        var matchLen = 1
-                        val maxLook = minOf(target.length, cursor + 16)
-                        for (end in maxLook downTo cursor + 1) {
-                            val sub = target.substring(cursor, end)
-                            val found = tok.tokenToId[sub]
-                            if (found != null) {
-                                matched = found
-                                matchLen = end - cursor
-                                break
-                            }
-                        }
-                        if (matched != null) {
-                            ids.add(matched)
-                            cursor += matchLen
-                        } else {
-                            val chStr = target[cursor].toString()
-                            ids.add(tok.tokenToId[chStr] ?: ((target[cursor].code % 192) + 4).toLong())
-                            cursor++
-                        }
-                    }
-                }
-            }
-            tok.speechStartTokenId?.let { ids.add(it) }
-            return LongArray(ids.size) { ids[it] }
-        }
-
-        // G2P lexicon (`sea_g2p.bin`) fallback
-        val tokens = ArrayList<Long>(cleanText.length * 2 + 4)
-        tokens.add(1L) // BOS
-        val words = cleanText.lowercase(Locale("vi", "VN")).split(Regex("\\s+"))
-        for (rawWord in words) {
-            if (rawWord.isEmpty()) continue
-            val cleanWord = rawWord.trim { !it.isLetterOrDigit() }
-            val dictIds = g2pLexicon[cleanWord]
-            if (dictIds != null) {
-                for (id in dictIds) tokens.add(id.toLong())
-            } else {
-                for (ch in rawWord) {
-                    tokens.add(((ch.code % 192) + 4).toLong())
-                }
-            }
-            tokens.add(3L)
-        }
-        tokens.add(2L) // EOS
-        return LongArray(tokens.size) { tokens[it] }
-    }
-
-    private fun extractLastStepLogits(result: OrtSession.Result): FloatArray? {
-        if (result.size() <= 0) return null
-        val first = result[0]
-        if (first is OnnxTensor) {
-            val shape = first.info.shape
-            val vocabSize = shape.lastOrNull()?.toInt()?.takeIf { it > 1 } ?: return null
-            if (first.info.type == OnnxJavaType.FLOAT) {
-                val fb = first.floatBuffer
-                val total = fb.remaining()
-                if (total < vocabSize) return null
-                fb.position(total - vocabSize)
-                val last = FloatArray(vocabSize)
-                fb.get(last)
-                return last
-            }
-        }
-        val flat = flattenAnyNumericOutputToFloat(first.value) ?: return null
-        return flat
-    }
-
-    private fun argmaxToken(logits: FloatArray): Long {
-        var bestIdx = 0
-        var bestVal = Float.NEGATIVE_INFINITY
-        for (i in logits.indices) {
-            val v = logits[i]
-            if (v.isFinite() && v > bestVal) {
-                bestVal = v
-                bestIdx = i
-            }
-        }
-        return bestIdx.toLong()
-    }
-
-    private fun fitFloatVector(vec: FloatArray, targetDim: Int): FloatArray {
-        if (targetDim <= 0 || vec.size == targetDim) return vec
-        return FloatArray(targetDim) { i -> if (i < vec.size) vec[i] else 0f }
-    }
-
-    private fun flattenAnyNumericOutputToFloat(raw: Any?): FloatArray? {
-        val out = ArrayList<Float>()
-        fun collect(obj: Any?) {
-            when (obj) {
-                is FloatArray -> for (v in obj) out.add(v)
-                is DoubleArray -> for (v in obj) out.add(v.toFloat())
-                is LongArray -> for (v in obj) out.add(v.toFloat())
-                is IntArray -> for (v in obj) out.add(v.toFloat())
-                is Array<*> -> for (item in obj) collect(item)
-                is Float -> out.add(obj)
-                is Double -> out.add(obj.toFloat())
-                is Number -> out.add(obj.toFloat())
-            }
-        }
-        collect(raw)
-        if (out.isEmpty()) return null
-        return FloatArray(out.size) { out[it] }
-    }
-
-    private fun flattenIntOutputToLong(raw: Any?): LongArray? {
-        val out = ArrayList<Long>()
-        fun collect(obj: Any?) {
-            when (obj) {
-                is LongArray -> for (v in obj) out.add(v)
-                is IntArray -> for (v in obj) out.add(v.toLong())
-                is Array<*> -> for (item in obj) collect(item)
-                is Long -> out.add(obj)
-                is Int -> out.add(obj.toLong())
-            }
-        }
-        collect(raw)
-        if (out.isEmpty()) return null
-        return LongArray(out.size) { out[it] }
-    }
-
-    private fun formatInputSignatures(session: OrtSession): String {
-        return session.inputInfo.entries.joinToString(", ") { (k, v) ->
-            val ti = v.info as? TensorInfo
-            val shapeStr = ti?.shape?.joinToString("x") ?: "?"
-            "$k:${ti?.type ?: "?"}[$shapeStr]"
-        }
-    }
-
-    private fun formatOutputSignatures(session: OrtSession): String {
-        return session.outputInfo.entries.joinToString(", ") { (k, v) ->
-            val ti = v.info as? TensorInfo
-            val shapeStr = ti?.shape?.joinToString("x") ?: "?"
-            "$k:${ti?.type ?: "?"}[$shapeStr]"
-        }
-    }
-
-    private fun resolveReferenceSpeakerEmbeddingNorm(): Float {
-        val norms = richPresetVoices.mapNotNull { preset ->
-            val vec = preset.speakerEmbedding ?: return@mapNotNull null
-            if (vec.isEmpty()) return@mapNotNull null
-            var sq = 0.0
-            for (v in vec) if (v.isFinite()) sq += v * v
-            kotlin.math.sqrt(sq).toFloat().takeIf { it > 0.05f }
-        }.sorted()
-        if (norms.isEmpty()) return 1.0f
-        return norms[norms.size / 2]
-    }
-
-    private fun scaleEmbeddingToTargetNorm(raw: FloatArray, targetNorm: Float): FloatArray {
-        var sq = 0.0
-        for (v in raw) if (v.isFinite()) sq += v * v
-        val curNorm = kotlin.math.sqrt(sq).toFloat()
-        if (curNorm <= 1e-7f) return raw
-        val scale = targetNorm / curNorm
-        return FloatArray(raw.size) { i ->
-            val v = raw[i]
-            if (v.isFinite()) v * scale else 0f
-        }
-    }
-
-    /**
-     * Lazily loads `moss_audio_tokenizer_encode.onnx`, encodes the user's 3–8s reference clip into
-     * `[numFrames][16]` RVQ `referenceCodes` (matching `voices.json`), and immediately closes the session
-     * so the 42MB encoder weights hold 0 MB persistent RAM during normal synthesis.
-     */
-    private fun encodeReferenceAudioCodesTransient(
-        env: OrtEnvironment,
-        samples: FloatArray,
-        sampleRate: Int
-    ): Array<IntArray>? {
-        val encFile = discoveredModels?.codecEncoderFile ?: return null
-        if (!encFile.exists() || encFile.length() <= 64L || samples.isEmpty()) return null
-
-        val targetRate = vieNeuConfig.outputSampleRate.coerceIn(16_000, 48_000)
-        val resampled = if (sampleRate != targetRate) {
-            AudioFileDecoder.normalizeAndResampleMonoFloat(samples, sampleRate, targetRate)
-        } else {
-            samples
-        }
-        // Cap reference audio to 6.5s (~81 frames @ 12.5 Hz, matching voices.json 53..91 frames)
-        val maxSamples = (targetRate * 6.5f).toInt().coerceAtLeast(targetRate)
-        val clipped = if (resampled.size > maxSamples) resampled.copyOf(maxSamples) else resampled
-
-        val opts = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 4))
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
-        }
-        var encSession: OrtSession? = null
-        val inputs = LinkedHashMap<String, OnnxTensor>()
-        try {
-            encSession = env.createSession(encFile.absolutePath, opts)
-            for ((name, nodeInfo) in encSession.inputInfo) {
-                val tInfo = nodeInfo.info as? TensorInfo
-                val shape = tInfo?.shape
-                val type = tInfo?.type ?: OnnxJavaType.FLOAT
-                val lower = name.lowercase(Locale.ROOT)
-                inputs[name] = when {
-                    lower.contains("len") || type == OnnxJavaType.INT32 || type == OnnxJavaType.INT64 -> {
-                        if (type == OnnxJavaType.INT64) {
-                            OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(clipped.size.toLong())), longArrayOf(1L))
-                        } else {
-                            OnnxTensor.createTensor(env, IntBuffer.wrap(intArrayOf(clipped.size)), longArrayOf(1L))
-                        }
-                    }
-                    shape != null && shape.size == 3 && shape[1] == 2L -> {
-                        // Stereo [1, 2, T] (duplicate mono channel into L & R)
-                        val stereo = FloatArray(clipped.size * 2)
-                        System.arraycopy(clipped, 0, stereo, 0, clipped.size)
-                        System.arraycopy(clipped, 0, stereo, clipped.size, clipped.size)
-                        VieNeuV3WeightStore.createFloatOrFp16Tensor(
-                            env,
-                            stereo,
-                            longArrayOf(1L, 2L, clipped.size.toLong()),
-                            type
-                        )
-                    }
-                    shape != null && shape.size == 3 -> {
-                        VieNeuV3WeightStore.createFloatOrFp16Tensor(
-                            env,
-                            clipped,
-                            longArrayOf(1L, 1L, clipped.size.toLong()),
-                            type
-                        )
-                    }
-                    else -> {
-                        VieNeuV3WeightStore.createFloatOrFp16Tensor(
-                            env,
-                            clipped,
-                            longArrayOf(1L, clipped.size.toLong()),
-                            type
-                        )
-                    }
-                }
-            }
-
-            encSession.run(inputs).use { res ->
-                val outTensor = res[0] as? OnnxTensor ?: return null
-                val outShape = outTensor.info.shape
-                val flatInts = VieNeuV3WeightStore.readTensorAsIntsSafe(outTensor)
-                val nq = vieNeuConfig.numCodebooks.coerceIn(1, 32)
-                if (flatInts.size < nq) return null
-
-                // Output may be [1, T, 16] or [1, 16, T] or [T, 16] or [16, T]
-                val codebooksLast = outShape.lastOrNull() == nq.toLong()
-                val frames = (flatInts.size / nq).coerceIn(1, 128)
-                val matrix = Array(frames) { f ->
-                    IntArray(nq) { q ->
-                        val raw = if (codebooksLast) {
-                            flatInts[f * nq + q]
-                        } else {
-                            flatInts[q * frames + f]
-                        }
-                        raw.coerceIn(0, vieNeuConfig.codebookSize - 1)
-                    }
-                }
-                val sigNote = "in=[${formatInputSignatures(encSession)}] out=[${formatOutputSignatures(encSession)}] -> ${matrix.size}x$nq"
-                lastCodecEncodeNote = sigNote
-                Log.i(TAG, "Encoded reference audio via ${encFile.name}: $sigNote")
-                return matrix
-            }
+            AiDiagnosticTestResult(
+                title = "Thử đọc câu mẫu (GGUF + NeuCodec 24kHz)",
+                success = ok,
+                elapsedMs = elapsed,
+                detailLog = detail.trimEnd()
+            ) to audio
         } catch (e: Throwable) {
-            val sigNote = encSession?.let { "in=[${formatInputSignatures(it)}] out=[${formatOutputSignatures(it)}] " }.orEmpty()
-            lastCodecEncodeNote = "${sigNote}ERR=${e.message}"
-            Log.w(TAG, "Transient moss_audio_tokenizer_encode skipped: $lastCodecEncodeNote")
-            return null
-        } finally {
-            inputs.values.forEach { runCatching { it.close() } }
-            runCatching { encSession?.close() }
+            AiDiagnosticTestResult(
+                title = "Thử đọc câu mẫu (GGUF + NeuCodec 24kHz)",
+                success = false,
+                elapsedMs = System.currentTimeMillis() - startMs,
+                detailLog = "NGOẠI LỆ NGUYÊN VĂN:\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
+            ) to null
         }
     }
 
-    fun close() {
+    fun close() = release()
+
+    fun release() {
+        ggufRunner.cancelActiveGeneration()
         workerExecutor.execute {
-            closeSessionsLocked()
+            ggufRunner.release()
+            neuCodec.closeSessions()
         }
         workerExecutor.shutdown()
     }
 
     companion object {
-        private const val TAG = "OfflineOnnxVoiceEngine"
-        const val DEFAULT_TTS_OUTPUT_SAMPLE_RATE = 24_000
+        private const val TAG = "VieNeuGgufEngine"
+        const val DEFAULT_TTS_OUTPUT_SAMPLE_RATE = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE
     }
 }

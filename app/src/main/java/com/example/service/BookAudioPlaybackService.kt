@@ -649,6 +649,7 @@ class BookAudioPlaybackService : Service() {
                 startSentenceIndex = safeSentenceStart,
                 embedding = clonedEmbedding,
                 referenceCodes = clonedRefCodes,
+                referenceText = selectedClone.referenceText,
                 generation = generation
             )
             return
@@ -716,18 +717,19 @@ class BookAudioPlaybackService : Service() {
         sentences: List<String>,
         startSentenceIndex: Int,
         embedding: FloatArray,
-        referenceCodes: Array<IntArray>?,
+        referenceCodes: IntArray?,
+        referenceText: String,
         generation: Long
     ) {
         onnxStreamJob = serviceScope.launch {
-            // Đảm bảo quá trình sao chép assets/models/ -> filesDir/models/ và nạp OrtSession đã hoàn tất
+            // Đảm bảo quá trình sao chép assets/models/ -> filesDir/models/ và nạp GGUF + NeuCodec đã hoàn tất
             onnxEngine.ensureInitialized()
             if (!onnxEngine.isFullOnnxSynthesisReady()) {
                 val diag = onnxEngine.getReadinessDiagnostic()
                 withContext(Dispatchers.Main) {
                     if (isPlaying && generation == activeParagraphGeneration) {
                         activeUsingOnnxVoice = false
-                        lastPlaybackNotice = "Không thể tổng hợp âm AI ONNX: $diag"
+                        lastPlaybackNotice = "Không thể tổng hợp âm VieNeu GGUF + NeuCodec: $diag"
                         pausePlayback()
                     }
                 }
@@ -745,7 +747,13 @@ class BookAudioPlaybackService : Service() {
             ).toLong()
 
             var nextDeferred = async {
-                onnxEngine.synthesizeSentenceDetailed(sentences[startSentenceIndex], embedding, speed, referenceCodes)
+                onnxEngine.synthesizeSentenceDetailed(
+                    sentence = sentences[startSentenceIndex],
+                    speakerEmbedding = embedding,
+                    speed = speed,
+                    referenceCodes = referenceCodes,
+                    referenceText = referenceText
+                )
             }
 
             for (idx in startSentenceIndex until sentences.size) {
@@ -760,7 +768,7 @@ class BookAudioPlaybackService : Service() {
                     withContext(Dispatchers.Main) {
                         if (isPlaying && generation == activeParagraphGeneration) {
                             activeUsingOnnxVoice = false
-                            lastPlaybackNotice = "Không thể tổng hợp âm AI ONNX cho đoạn văn này: $reason"
+                            lastPlaybackNotice = "Không thể tổng hợp âm VieNeu cho đoạn văn này: $reason"
                             pausePlayback()
                         }
                     }
@@ -770,7 +778,13 @@ class BookAudioPlaybackService : Service() {
                 if (idx + 1 < sentences.size) {
                     val lookaheadSentence = sentences[idx + 1]
                     nextDeferred = async {
-                        onnxEngine.synthesizeSentenceDetailed(lookaheadSentence, embedding, speed, referenceCodes)
+                        onnxEngine.synthesizeSentenceDetailed(
+                            sentence = lookaheadSentence,
+                            speakerEmbedding = embedding,
+                            speed = speed,
+                            referenceCodes = referenceCodes,
+                            referenceText = referenceText
+                        )
                     }
                 }
 
@@ -1089,7 +1103,8 @@ class BookAudioPlaybackService : Service() {
                         sentence = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
                         speakerEmbedding = embedding,
                         speed = activePrefs.speechRate.coerceIn(0.8f, 1.5f),
-                        referenceCodes = refCodes
+                        referenceCodes = refCodes,
+                        referenceText = targetVoice.referenceText
                     )
                 } else {
                     null

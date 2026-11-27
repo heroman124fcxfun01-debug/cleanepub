@@ -128,7 +128,7 @@ fun StudioScreen(
     onSentencePauseChanged: (Int) -> Unit,
     onResetAdvancedDefaults: () -> Unit,
     onImportVoiceAudio: (Uri, (ImportedVoiceSample) -> Unit) -> Unit,
-    onCreateDraftClonedVoice: (name: String, samples: FloatArray, sampleRate: Int) -> Unit,
+    onCreateDraftClonedVoice: (name: String, samples: FloatArray, sampleRate: Int, referenceText: String) -> Unit,
     onClearDraftClonedVoice: () -> Unit,
     onCommitSaveClonedVoices: (onSaved: () -> Unit) -> Unit,
     onSelectClonedVoice: (String?) -> Unit,
