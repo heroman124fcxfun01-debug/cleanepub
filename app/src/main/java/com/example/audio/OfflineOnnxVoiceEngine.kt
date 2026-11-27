@@ -6,8 +6,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 enum class OnnxVoiceEngineMode {
     UNINITIALIZED,
@@ -21,6 +23,8 @@ data class SpeakerEmbeddingResult(
     val estimatedPitchRatio: Float,
     val referenceCodes: IntArray? = null,
     val matchedPresetId: String? = null,
+    val secondaryPresetId: String? = null,
+    val blendWeightPrimary: Float = 1.0f,
     val matchedPresetRefText: String? = null,
     val timbreSettings: VoiceTimbreSettings = VoiceTimbreSettings(pitchRatio = estimatedPitchRatio),
     val acousticSummary: String = "",
@@ -61,6 +65,10 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
     // Cached ref_text -> eSpeak IPA string so reference text is phonemized once per voice
     private val refPhonesCache = ConcurrentHashMap<String, String>()
+    private val activeOpsCount = AtomicInteger(0)
+
+    val isBusy: Boolean
+        get() = activeOpsCount.get() > 0
 
     @Volatile
     var engineMode: OnnxVoiceEngineMode = OnnxVoiceEngineMode.UNINITIALIZED
@@ -270,29 +278,47 @@ class OfflineOnnxVoiceEngine(context: Context) {
             samples = samples16k,
             sampleRate = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE
         )
-        val (matchedPreset, timbreSettings) = VoiceTimbreProcessor.matchBestPresetAndComputeTimbre(
+        val blended = VoiceTimbreProcessor.matchBestPresetAndComputeTimbre(
             profile = acousticProfile,
             presets = presetVoices
         )
+        val matchedPreset = blended.primaryPreset
+        val secondaryPreset = blended.secondaryPreset
+        val timbreSettings = blended.timbreSettings
+
+        val blendLabel = when {
+            matchedPreset != null && secondaryPreset != null -> String.format(
+                Locale.US,
+                "%s(%.0f%%) + %s(%.0f%%)",
+                matchedPreset.id,
+                blended.primaryWeight * 100f,
+                secondaryPreset.id,
+                blended.secondaryWeight * 100f
+            )
+            matchedPreset != null -> matchedPreset.displayLabel
+            else -> "none"
+        }
         val summary = String.format(
             Locale.US,
-            "F0=%.0fHz | Centroid=%.0fHz | Tilt=%+.2f | Rate=%.1f syl/s -> %s (%s)",
+            "F0=%.0fHz | Formant=%.0fHz | MFCC13 | Tilt=%+.2f | Rate=%.1f syl/s -> %s (%s)",
             acousticProfile.f0Hz,
-            acousticProfile.spectralCentroidHz,
+            acousticProfile.formantCenterHz,
             acousticProfile.spectralTilt,
             acousticProfile.speakingRateSylPerSec,
-            matchedPreset?.displayLabel ?: "none",
+            blendLabel,
             timbreSettings.describeShort()
         )
-        Log.i(TAG, "Acoustic voice profiling: $summary")
+        Log.i(TAG, "Acoustic voice profiling (MFCC13 + Top-2 Blend): $summary")
 
         if (matchedPreset != null) {
             return@withContext SpeakerEmbeddingResult(
-                embedding = matchedPreset.voiceEmbedding ?: acousticProfile.fingerprint32,
+                embedding = blended.blendedVoiceEmbedding,
                 usedOnnxEncoder = false,
                 estimatedPitchRatio = timbreSettings.pitchRatio,
                 referenceCodes = matchedPreset.referenceCodes,
                 matchedPresetId = matchedPreset.id,
+                secondaryPresetId = secondaryPreset?.id,
+                blendWeightPrimary = blended.primaryWeight,
                 matchedPresetRefText = matchedPreset.referenceText,
                 timbreSettings = timbreSettings,
                 acousticSummary = summary,
@@ -302,13 +328,44 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
         val loadErr = "Không tìm thấy giọng mẫu hợp lệ trong voices.json (filesDir/models/voices.json)."
         SpeakerEmbeddingResult(
-            embedding = acousticProfile.fingerprint32,
+            embedding = blended.blendedVoiceEmbedding,
             usedOnnxEncoder = false,
             estimatedPitchRatio = timbreSettings.pitchRatio,
             referenceCodes = null,
             timbreSettings = timbreSettings,
             acousticSummary = summary,
             errorMessage = loadErr
+        )
+    }
+
+    /**
+     * Lazily synthesizes & persists `preview_<preset_id>.wav` for an official `voices.json` preset
+     * so tapping "Nghe thử" plays instantaneously (<50ms). Returns null if the engine is busy or unavailable.
+     */
+    suspend fun ensurePresetPreviewCached(presetId: String): File? = withContext(Dispatchers.IO) {
+        val storageId = OnnxModelAssetHelper.presetStorageId(presetId)
+        VoicePreviewCache.getValidPreviewFile(appContext, storageId)?.let { return@withContext it }
+        if (isBusy) return@withContext null
+
+        ensureInitialized()
+        if (!isFullOnnxSynthesisReady() || isBusy) return@withContext null
+
+        val preset = findPresetVoiceById(presetId) ?: return@withContext null
+        val synth = synthesizeSentenceDetailed(
+            sentence = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
+            speakerEmbedding = preset.voiceEmbedding ?: FloatArray(0),
+            speed = 1.0f,
+            referenceCodes = preset.referenceCodes,
+            referenceText = preset.referenceText,
+            matchedPresetId = preset.id,
+            timbreSettings = null
+        )
+        val audio = synth.audio ?: return@withContext null
+        VoicePreviewCache.savePreviewPcm(
+            context = appContext,
+            voiceId = storageId,
+            samples = audio.pcmFloat,
+            sampleRate = audio.sampleRate
         )
     }
 
@@ -330,69 +387,74 @@ class OfflineOnnxVoiceEngine(context: Context) {
         matchedPresetId: String? = null,
         timbreSettings: VoiceTimbreSettings? = null
     ): OnnxSynthesisResult = withContext(Dispatchers.IO) {
-        ensureInitialized()
+        activeOpsCount.incrementAndGet()
+        try {
+            ensureInitialized()
 
-        if (!ggufRunner.isLoaded) {
-            return@withContext OnnxSynthesisResult(
-                errorMessage = ggufRunner.lastLoadError
-                    ?: "Chưa nạp được model VieNeu-TTS GGUF (${discoveredModels?.describeSummary()})."
-            )
-        }
-        if (!neuCodec.hasDecoder) {
-            return@withContext OnnxSynthesisResult(
-                errorMessage = neuCodec.loadErrors["neucodec_decoder"]
-                    ?: "Thiếu file neucodec_decoder.onnx để giải mã sóng âm 24kHz."
-            )
-        }
-
-        val cleanTarget = VietnameseTtsTextNormalizer.normalizeForTts(sentence).trim()
-        if (cleanTarget.isEmpty()) {
-            return@withContext OnnxSynthesisResult(errorMessage = "Câu văn bản trống sau khi chuẩn hóa.")
-        }
-
-        // STRICT 1-to-1 ALIGNMENT between ref_codes and ref_text:
-        // If this voice is backed by a preset in voices.json (by matchedPresetId OR by exact referenceCodes match),
-        // ALWAYS pair it with THAT preset's exact original referenceText so GGUF NEVER speaks leftover/mismatched text!
-        val explicitPreset = matchedPresetId?.takeIf { it.isNotBlank() }?.let { findPresetVoiceById(it) }
-        val inferredPreset = explicitPreset ?: findPresetMatchingCodes(referenceCodes)
-
-        val resolvedRefCodes: IntArray
-        val resolvedRefText: String
-        val resolvedVoiceEmbedding: FloatArray?
-        val voiceSourceLabel: String
-
-        when {
-            inferredPreset != null -> {
-                resolvedRefCodes = inferredPreset.referenceCodes
-                resolvedRefText = inferredPreset.referenceText
-                resolvedVoiceEmbedding = inferredPreset.voiceEmbedding ?: speakerEmbedding.takeIf { it.isNotEmpty() }
-                voiceSourceLabel = "Preset '${inferredPreset.displayLabel}' (${resolvedRefCodes.size} codes)"
+            if (!ggufRunner.isLoaded) {
+                return@withContext OnnxSynthesisResult(
+                    errorMessage = ggufRunner.lastLoadError
+                        ?: "Chưa nạp được model VieNeu-TTS GGUF (${discoveredModels?.describeSummary()})."
+                )
             }
-            referenceCodes != null && referenceCodes.size >= 8 -> {
-                resolvedRefCodes = referenceCodes
-                resolvedRefText = referenceText?.trim().orEmpty()
-                resolvedVoiceEmbedding = speakerEmbedding.takeIf { it.isNotEmpty() }
-                voiceSourceLabel = "Custom Encoded Voice (${resolvedRefCodes.size} codes)"
+            if (!neuCodec.hasDecoder) {
+                return@withContext OnnxSynthesisResult(
+                    errorMessage = neuCodec.loadErrors["neucodec_decoder"]
+                        ?: "Thiếu file neucodec_decoder.onnx để giải mã sóng âm 24kHz."
+                )
             }
-            else -> {
-                val fallbackPreset = presetVoices.firstOrNull { it.referenceCodes.size >= 8 }
-                if (fallbackPreset == null) {
-                    return@withContext OnnxSynthesisResult(
-                        errorMessage = "Không tìm thấy giọng mẫu hợp lệ trong voices.json."
-                    )
+
+            val cleanTarget = VietnameseTtsTextNormalizer.normalizeForTts(sentence).trim()
+            if (cleanTarget.isEmpty()) {
+                return@withContext OnnxSynthesisResult(errorMessage = "Câu văn bản trống sau khi chuẩn hóa.")
+            }
+
+            // STRICT 1-to-1 ALIGNMENT between ref_codes and ref_text:
+            // Always pair with the matched preset's exact original referenceText so GGUF NEVER speaks sample text!
+            val explicitPreset = matchedPresetId?.takeIf { it.isNotBlank() }?.let { findPresetVoiceById(it) }
+            val inferredPreset = explicitPreset ?: findPresetMatchingCodes(referenceCodes)
+
+            val resolvedRefCodes: IntArray
+            val resolvedRefText: String
+            val resolvedVoiceEmbedding: FloatArray?
+            val voiceSourceLabel: String
+
+            when {
+                inferredPreset != null -> {
+                    resolvedRefCodes = inferredPreset.referenceCodes
+                    resolvedRefText = inferredPreset.referenceText
+                    // Prefer Top-2 weighted blended speakerEmbedding when supplied by a cloned voice profile
+                    resolvedVoiceEmbedding = speakerEmbedding.takeIf { it.isNotEmpty() } ?: inferredPreset.voiceEmbedding
+                    val blendSuffix = if (!timbreSettings?.secondaryPresetId.isNullOrBlank()) {
+                        " + blend ${timbreSettings?.secondaryPresetId}"
+                    } else ""
+                    voiceSourceLabel = "Preset '${inferredPreset.displayLabel}'$blendSuffix (${resolvedRefCodes.size} codes)"
                 }
-                resolvedRefCodes = fallbackPreset.referenceCodes
-                resolvedRefText = fallbackPreset.referenceText
-                resolvedVoiceEmbedding = fallbackPreset.voiceEmbedding ?: speakerEmbedding.takeIf { it.isNotEmpty() }
-                voiceSourceLabel = "Default Preset '${fallbackPreset.displayLabel}' (${resolvedRefCodes.size} codes)"
+                referenceCodes != null && referenceCodes.size >= 8 -> {
+                    resolvedRefCodes = referenceCodes
+                    resolvedRefText = referenceText?.trim().orEmpty()
+                    resolvedVoiceEmbedding = speakerEmbedding.takeIf { it.isNotEmpty() }
+                    voiceSourceLabel = "Custom Encoded Voice (${resolvedRefCodes.size} codes)"
+                }
+                else -> {
+                    val fallbackPreset = presetVoices.firstOrNull { it.referenceCodes.size >= 8 }
+                    if (fallbackPreset == null) {
+                        return@withContext OnnxSynthesisResult(
+                            errorMessage = "Không tìm thấy giọng mẫu hợp lệ trong voices.json."
+                        )
+                    }
+                    resolvedRefCodes = fallbackPreset.referenceCodes
+                    resolvedRefText = fallbackPreset.referenceText
+                    resolvedVoiceEmbedding = speakerEmbedding.takeIf { it.isNotEmpty() } ?: fallbackPreset.voiceEmbedding
+                    voiceSourceLabel = "Default Preset '${fallbackPreset.displayLabel}' (${resolvedRefCodes.size} codes)"
+                }
             }
-        }
 
-        val refPhones = if (resolvedRefText.isNotBlank()) {
-            refPhonesCache.getOrPut(resolvedRefText) { espeakG2p.phonemize(resolvedRefText) }
-        } else {
-            ""
-        }
+            val refPhones = if (resolvedRefText.isNotBlank()) {
+                refPhonesCache.getOrPut(resolvedRefText) { espeakG2p.phonemize(resolvedRefText) }
+            } else {
+                ""
+            }
         val targetPhones = espeakG2p.phonemize(cleanTarget)
         if (targetPhones.isBlank()) {
             return@withContext OnnxSynthesisResult(
@@ -436,44 +498,47 @@ class OfflineOnnxVoiceEngine(context: Context) {
         )
         val decodeMs = System.currentTimeMillis() - decodeStart
 
-        decoded.fold(
-            onSuccess = { rawWaveform ->
-                val dspStart = System.currentTimeMillis()
-                val shapedWaveform = VoiceTimbreProcessor.applyTimbreAndPitch(
-                    samples = rawWaveform,
-                    sampleRate = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE,
-                    timbre = timbreSettings
-                )
-                val dspMs = System.currentTimeMillis() - dspStart
-                val durSec = shapedWaveform.size.toFloat() / NeuCodecOnnxEngine.DECODER_SAMPLE_RATE.toFloat()
-                val trace = buildString {
-                    appendLine("Pipeline: Official pnnbao97/VieNeu-TTS GGUF + NeuCodec ONNX (24kHz)")
-                    appendLine("Voice: $voiceSourceLabel")
-                    if (timbreSettings != null && !timbreSettings.isIdentity) {
-                        appendLine("DSP Timbre: ${timbreSettings.describeShort()} (${dspMs}ms)")
+            decoded.fold(
+                onSuccess = { rawWaveform ->
+                    val dspStart = System.currentTimeMillis()
+                    val shapedWaveform = VoiceTimbreProcessor.applyTimbreAndPitch(
+                        samples = rawWaveform,
+                        sampleRate = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE,
+                        timbre = timbreSettings
+                    )
+                    val dspMs = System.currentTimeMillis() - dspStart
+                    val durSec = shapedWaveform.size.toFloat() / NeuCodecOnnxEngine.DECODER_SAMPLE_RATE.toFloat()
+                    val trace = buildString {
+                        appendLine("Pipeline: Official pnnbao97/VieNeu-TTS GGUF + NeuCodec ONNX (24kHz)")
+                        appendLine("Voice: $voiceSourceLabel")
+                        if (timbreSettings != null && !timbreSettings.isIdentity) {
+                            appendLine("DSP Pitch+Formant+EQ: ${timbreSettings.describeShort()} (${dspMs}ms)")
+                        }
+                        appendLine("RefText: ${resolvedRefText.take(120)}")
+                        appendLine("TargetText: ${cleanTarget.take(140)}")
+                        appendLine("GGUF: ${genRes.speechCodes.size} speech tokens trong ${genRes.elapsedMs} ms")
+                        appendLine("NeuCodec Decode: ${shapedWaveform.size} samples @ 24kHz (${String.format(Locale.US, "%.2fs", durSec)}) trong $decodeMs ms")
                     }
-                    appendLine("RefText: ${resolvedRefText.take(120)}")
-                    appendLine("TargetText: ${cleanTarget.take(140)}")
-                    appendLine("GGUF: ${genRes.speechCodes.size} speech tokens trong ${genRes.elapsedMs} ms")
-                    appendLine("NeuCodec Decode: ${shapedWaveform.size} samples @ 24kHz (${String.format(Locale.US, "%.2fs", durSec)}) trong $decodeMs ms")
+                    OnnxSynthesisResult(
+                        audio = SynthesizedSentenceAudio(
+                            pcmFloat = shapedWaveform,
+                            sampleRate = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE
+                        ),
+                        errorMessage = null,
+                        traceLog = trace
+                    )
+                },
+                onFailure = { err ->
+                    OnnxSynthesisResult(
+                        audio = null,
+                        errorMessage = "Lỗi giải mã neucodec_decoder.onnx:\n${OnnxModelAssetHelper.formatFullThrowable(err)}",
+                        traceLog = "Generated ${genRes.speechCodes.size} codes in ${genRes.elapsedMs} ms"
+                    )
                 }
-                OnnxSynthesisResult(
-                    audio = SynthesizedSentenceAudio(
-                        pcmFloat = shapedWaveform,
-                        sampleRate = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE
-                    ),
-                    errorMessage = null,
-                    traceLog = trace
-                )
-            },
-            onFailure = { err ->
-                OnnxSynthesisResult(
-                    audio = null,
-                    errorMessage = "Lỗi giải mã neucodec_decoder.onnx:\n${OnnxModelAssetHelper.formatFullThrowable(err)}",
-                    traceLog = "Generated ${genRes.speechCodes.size} codes in ${genRes.elapsedMs} ms"
-                )
-            }
-        )
+            )
+        } finally {
+            activeOpsCount.decrementAndGet()
+        }
     }
 
     suspend fun runFullSystemDiagnostics(forceResync: Boolean = false): AiSystemDiagnosticReport =
@@ -485,10 +550,10 @@ class OfflineOnnxVoiceEngine(context: Context) {
             val d = discoveredModels
 
             val mapped = linkedMapOf(
-                "pipeline" to "Official pnnbao97/VieNeu-TTS (GGUF + NeuCodec ONNX 24kHz + DSP WSOLA/EQ)",
+                "pipeline" to "Official pnnbao97/VieNeu-TTS (GGUF + NeuCodec 24kHz + MFCC13 Top-2 Blend + Pitch/Formant DSP)",
                 "gguf_backbone" to (d?.ggufBackboneFile?.name ?: "(không tìm thấy *.gguf)"),
                 "neucodec_decoder" to (d?.codecDecoderFile?.name ?: "(không tìm thấy neucodec_decoder.onnx)"),
-                "neucodec_encoder" to "Không sử dụng (phân tích đa chiều F0/Centroid/Rate -> khớp voices.json + DSP 24kHz)",
+                "neucodec_encoder" to "Không sử dụng (MFCC-13 + F0 + Formant -> pha trộn Top-2 voices.json + STFT Formant/WSOLA DSP)",
                 "espeak_g2p_dict" to (d?.espeakDictFile?.let { "${it.name} (${espeakG2p.entryCount} âm tiết)" }
                     ?: "Dùng luật dự phòng eSpeak-NG vi (${espeakG2p.entryCount} âm tiết)"),
                 "voices.json" to (d?.voicesJsonFile?.let { "${it.name} (${presetVoices.size} giọng mẫu)" }

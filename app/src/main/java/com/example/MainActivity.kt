@@ -284,6 +284,15 @@ private fun EpubCleanNavHost(
         if (activeMainTab == AppMainTab.BOOK_LIBRARY || activeMainTab == AppMainTab.STUDIO) {
             libraryViewModel.refreshLibrary()
         }
+        if (activeMainTab == AppMainTab.STUDIO) {
+            libraryViewModel.preRenderPresetPreviewsIfNeeded()
+        }
+    }
+
+    LaunchedEffect(showLibraryReaderSettingsSheet) {
+        if (showLibraryReaderSettingsSheet) {
+            libraryViewModel.preRenderPresetPreviewsIfNeeded()
+        }
     }
 
     // Re-check MANAGE_EXTERNAL_STORAGE & newly installed offline TTS voices on ON_RESUME

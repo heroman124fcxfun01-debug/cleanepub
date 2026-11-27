@@ -247,7 +247,7 @@ object OnnxModelAssetHelper {
      * finishes fast with minimal KV-cache & RAM overhead on mobile devices.
      */
     const val AI_VOICE_QUICK_PREVIEW_SENTENCE =
-        "Xin chào, đây là giọng đọc thử nghiệm tiếng Việt."
+        VoicePreviewCache.INSTANT_PREVIEW_SENTENCE
 
     /**
      * Ready-to-read Vietnamese reference script offered to users recording their own voice sample.

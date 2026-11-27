@@ -32,6 +32,7 @@ import com.example.audio.OnnxVoiceEngineMode
 import com.example.audio.OnnxSynthesisResult
 import com.example.audio.StoryCharacterScanner
 import com.example.audio.VietnameseTtsTextNormalizer
+import com.example.audio.VoicePreviewCache
 import com.example.audio.VoiceTimbreSettings
 import com.example.data.LibraryChapterMeta
 import com.example.data.LibraryManager
@@ -743,7 +744,9 @@ class BookAudioPlaybackService : Service() {
 
     private data class PreparedAiSegment(
         val chunk: AiChapterChunk,
-        val result: OnnxSynthesisResult
+        val pcm16: ShortArray?,
+        val sampleRate: Int,
+        val errorMessage: String? = null
     )
 
     /**
@@ -913,17 +916,16 @@ class BookAudioPlaybackService : Service() {
                 activePrefs.speechRate
             }).coerceIn(0.8f, 1.5f)
             val effectiveSpeed = (userSpeed * (timbreSettings?.speakingRateRatio ?: 1.0f)).coerceIn(0.82f, 1.5f)
-            // Khoảng nghỉ tự nhiên 0.25–0.40s giữa các câu khi đọc nối tiếp từ hàng đợi sinh trước
-            val naturalSentencePauseMs = activePrefs.sentencePauseMs.coerceIn(250, 400).toLong()
-            val naturalParagraphPauseMs = (naturalSentencePauseMs + 80L).coerceIn(300L, 480L)
 
-            // Bounded Channel(capacity = 2): giữ sẵn N+1 và N+2 trong RAM khi câu N đang phát qua AudioTrack
-            val preSynthQueue = Channel<PreparedAiSegment>(capacity = 2)
+            // Look-ahead buffer 3+ đoạn (Channel capacity = 4): giữ sẵn mảng PCM 16-bit 24kHz đã cắt khoảng lặng
+            // thừa (< 0.01f), ghép 15ms crossfade & nhịp thở 135-175ms sẵn sàng xả trực tiếp vào 1 AudioTrack duy nhất!
+            val preSynthQueue = Channel<PreparedAiSegment>(capacity = 4)
 
             val producerJob = launch(Dispatchers.IO) {
                 try {
-                    for (chunk in chunks) {
-                        if (!isActive || generation != activeParagraphGeneration) break
+                    var prevTail: FloatArray? = null
+                    chunks.forEachIndexed { idx, chunk ->
+                        if (!isActive || generation != activeParagraphGeneration) return@launch
                         val synthRes = onnxEngine.synthesizeSentenceDetailed(
                             sentence = chunk.speakText,
                             speakerEmbedding = resolvedEmb,
@@ -933,23 +935,54 @@ class BookAudioPlaybackService : Service() {
                             matchedPresetId = resolvedPresetId,
                             timbreSettings = timbreSettings
                         )
-                        if (!isActive || generation != activeParagraphGeneration) break
-                        preSynthQueue.send(PreparedAiSegment(chunk = chunk, result = synthRes))
-                        if (synthRes.audio == null) break
+                        if (!isActive || generation != activeParagraphGeneration) return@launch
+                        val audio = synthRes.audio
+                        if (audio == null) {
+                            preSynthQueue.send(
+                                PreparedAiSegment(
+                                    chunk = chunk,
+                                    pcm16 = null,
+                                    sampleRate = OfflineOnnxVoiceEngine.DEFAULT_TTS_OUTPUT_SAMPLE_RATE,
+                                    errorMessage = synthRes.errorMessage
+                                )
+                            )
+                            return@launch
+                        }
+                        val isLastChunk = idx == chunks.lastIndex
+                        val breathMs = if (chunk.endsParagraph) 175 else 135
+                        val (pcm16, nextTail) = OnnxAudioTrackPlayer.prepareSeamlessPcm16(
+                            samples = audio.pcmFloat,
+                            sampleRate = audio.sampleRate,
+                            breathSilenceMs = breathMs,
+                            crossfadeMs = 15,
+                            prevTail = prevTail,
+                            appendBreathPause = !isLastChunk
+                        )
+                        prevTail = nextTail
+                        preSynthQueue.send(
+                            PreparedAiSegment(
+                                chunk = chunk,
+                                pcm16 = pcm16,
+                                sampleRate = audio.sampleRate,
+                                errorMessage = null
+                            )
+                        )
                     }
                 } finally {
                     preSynthQueue.close()
                 }
             }
 
+            var streamOpened = false
+            var completedCleanly = false
             try {
                 var lastSavedPara = startParagraphIndex
                 for (prepared in preSynthQueue) {
                     if (!isActive || generation != activeParagraphGeneration) return@launch
                     val chunk = prepared.chunk
-                    val currentAudio = prepared.result.audio
-                    if (currentAudio == null) {
-                        val reason = prepared.result.errorMessage ?: "lỗi không xác định"
+                    val pcm16 = prepared.pcm16
+                    if (pcm16 == null) {
+                        val reason = prepared.errorMessage ?: "lỗi không xác định"
                         withContext(Dispatchers.Main) {
                             if (isPlaying && generation == activeParagraphGeneration) {
                                 activeUsingOnnxVoice = false
@@ -958,6 +991,24 @@ class BookAudioPlaybackService : Service() {
                             }
                         }
                         return@launch
+                    }
+
+                    // Khởi tạo MỘT AudioTrack MODE_STREAM 24kHz duy nhất cho toàn bộ chương (không release/tạo lại!)
+                    if (!streamOpened) {
+                        streamOpened = onnxPlayer.openContinuousStream(
+                            sampleRate = prepared.sampleRate,
+                            speed = effectiveSpeed
+                        )
+                        if (!streamOpened) {
+                            withContext(Dispatchers.Main) {
+                                if (isPlaying && generation == activeParagraphGeneration) {
+                                    activeUsingOnnxVoice = false
+                                    lastPlaybackNotice = "Không thể khởi tạo luồng AudioTrack 24kHz liên tục."
+                                    pausePlayback()
+                                }
+                            }
+                            return@launch
+                        }
                     }
 
                     withContext(Dispatchers.Main) {
@@ -974,20 +1025,16 @@ class BookAudioPlaybackService : Service() {
                         persistProgressAsync(activeBookId, activeChapterIndex, lastSavedPara)
                     }
 
-                    // Pitch & 3-band Formant/EQ đã được xử lý trực tiếp trên sóng âm 24kHz PCM bởi VoiceTimbreProcessor
-                    val completed = onnxPlayer.playBlocking(
-                        samples = currentAudio.pcmFloat,
-                        sampleRate = currentAudio.sampleRate,
-                        speed = effectiveSpeed,
-                        pitch = 1.0f
-                    )
-                    if (!completed || !isActive || generation != activeParagraphGeneration) return@launch
-
-                    val pause = if (chunk.endsParagraph) naturalParagraphPauseMs else naturalSentencePauseMs
-                    if (pause > 0L) {
-                        delay(pause)
-                    }
+                    // Đẩy nối tiếp trực tiếp PCM16 đã cắt khoảng lặng & 15ms crossfade vào cùng 1 AudioTrack (0ms ngắt quãng!)
+                    val writtenOk = onnxPlayer.writeContinuousChunkBlocking(pcm16)
+                    if (!writtenOk || !isActive || generation != activeParagraphGeneration) return@launch
                 }
+
+                if (streamOpened) {
+                    onnxPlayer.finishContinuousStreamAndDrain()
+                    streamOpened = false
+                }
+                completedCleanly = true
 
                 // Hoàn tất toàn bộ chương -> tự chuyển chương tiếp theo (hoặc dừng nếu bật hẹn giờ hết chương)
                 withContext(Dispatchers.Main) {
@@ -1006,6 +1053,9 @@ class BookAudioPlaybackService : Service() {
             } finally {
                 producerJob.cancel()
                 preSynthQueue.close()
+                if (streamOpened && !completedCleanly) {
+                    onnxPlayer.stopImmediately()
+                }
             }
         }
     }
@@ -1292,6 +1342,22 @@ class BookAudioPlaybackService : Service() {
 
         previewAudioJob = serviceScope.launch {
             try {
+                // 1. LUỒNG PHÁT NGAY LẬP TỨC (<50ms, 0ms suy luận AI):
+                // Nếu đã có sẵn tệp cache `filesDir/voice_previews/preview_<voice_id>.wav`, phát trực tiếp!
+                val initialCacheId: String? = when {
+                    targetClone != null -> targetClone.id
+                    requestedPresetId != null -> OnnxModelAssetHelper.presetStorageId(requestedPresetId)
+                    else -> null
+                }
+                if (initialCacheId != null) {
+                    val cachedWav = VoicePreviewCache.getValidPreviewFile(applicationContext, initialCacheId)
+                    if (cachedWav != null) {
+                        onnxPlayer.playWavFileBlocking(cachedWav)
+                        return@launch
+                    }
+                }
+
+                // 2. Chỉ khi chưa có file cache mới nạp model VieNeu-TTS GGUF + NeuCodec để tổng hợp 1 lần & lưu cache
                 onnxEngine.ensureInitialized()
                 if (!onnxEngine.isFullOnnxSynthesisReady()) {
                     val diag = onnxEngine.getReadinessDiagnostic()
@@ -1307,6 +1373,7 @@ class BookAudioPlaybackService : Service() {
                 val refText: String
                 val matchedPresetId: String?
                 val timbre: VoiceTimbreSettings?
+                val resolvedCacheId: String
 
                 if (targetClone != null) {
                     embedding = clonedVoiceRepo.loadEmbedding(targetClone) ?: FloatArray(0)
@@ -1314,6 +1381,7 @@ class BookAudioPlaybackService : Service() {
                     refText = targetClone.referenceText
                     matchedPresetId = targetClone.matchedPresetId.takeIf { it.isNotBlank() }
                     timbre = targetClone.toTimbreSettings()
+                    resolvedCacheId = targetClone.id
                 } else {
                     val preset = onnxEngine.findPresetVoiceById(requestedPresetId)
                     if (preset == null) {
@@ -1323,6 +1391,13 @@ class BookAudioPlaybackService : Service() {
                         }
                         return@launch
                     }
+                    resolvedCacheId = preset.storageId
+                    // Kiểm tra lại cache nếu trước đó requestedPresetId là null (giọng mặc định)
+                    val defaultCachedWav = VoicePreviewCache.getValidPreviewFile(applicationContext, resolvedCacheId)
+                    if (defaultCachedWav != null) {
+                        onnxPlayer.playWavFileBlocking(defaultCachedWav)
+                        return@launch
+                    }
                     embedding = preset.voiceEmbedding ?: FloatArray(0)
                     refCodes = preset.referenceCodes
                     refText = preset.referenceText
@@ -1330,9 +1405,9 @@ class BookAudioPlaybackService : Service() {
                     timbre = null
                 }
 
-                val previewSpeed = (activePrefs.speechRate * (timbre?.speakingRateRatio ?: 1.0f)).coerceIn(0.82f, 1.5f)
+                val previewSpeed = (timbre?.speakingRateRatio ?: 1.0f).coerceIn(0.88f, 1.14f)
                 val synthResult = onnxEngine.synthesizeSentenceDetailed(
-                    sentence = OnnxModelAssetHelper.AI_VOICE_QUICK_PREVIEW_SENTENCE,
+                    sentence = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
                     speakerEmbedding = embedding,
                     speed = previewSpeed,
                     referenceCodes = refCodes,
@@ -1343,12 +1418,23 @@ class BookAudioPlaybackService : Service() {
 
                 val synthesized = synthResult.audio
                 if (synthesized != null) {
-                    onnxPlayer.playBlocking(
+                    // Lưu cache `preview_<voice_id>.wav` để mọi lần bấm "Nghe thử" sau phát ngay trong <50ms!
+                    val savedWav = VoicePreviewCache.savePreviewPcm(
+                        context = applicationContext,
+                        voiceId = resolvedCacheId,
                         samples = synthesized.pcmFloat,
-                        sampleRate = synthesized.sampleRate,
-                        speed = previewSpeed,
-                        pitch = 1.0f
+                        sampleRate = synthesized.sampleRate
                     )
+                    if (savedWav != null) {
+                        onnxPlayer.playWavFileBlocking(savedWav)
+                    } else {
+                        onnxPlayer.playBlocking(
+                            samples = synthesized.pcmFloat,
+                            sampleRate = synthesized.sampleRate,
+                            speed = previewSpeed,
+                            pitch = 1.0f
+                        )
+                    }
                 } else {
                     val errDetail = synthResult.errorMessage ?: "Không thể sinh sóng âm 24kHz từ GGUF + NeuCodec."
                     withContext(Dispatchers.Main) {

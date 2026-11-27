@@ -17,6 +17,7 @@ import com.example.audio.OnnxAudioTrackPlayer
 import com.example.audio.OnnxModelAssetHelper
 import com.example.audio.OnnxVoiceEngineMode
 import com.example.audio.VieNeuPresetVoice
+import com.example.audio.VoicePreviewCache
 import com.example.data.BookCollection
 import com.example.data.CustomAmbientTrack
 import com.example.data.CustomImportedFont
@@ -43,6 +44,7 @@ import com.example.ui.theme.ReaderFontRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -197,6 +199,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     val audioPlaybackState: StateFlow<BookAudioPlaybackState> = AudioPlaybackStateHolder.state
 
     private var batchImportJob: Job? = null
+    private var presetPreviewPreRenderJob: Job? = null
 
     init {
         // Chỉ nạp danh mục sách nhẹ trên Dispatchers.IO.
@@ -1146,7 +1149,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             try {
                 val savedProfile = withContext(Dispatchers.IO) {
-                    clonedVoiceRepository.saveVoice(
+                    val saved = clonedVoiceRepository.saveVoice(
                         rawName = draft.name,
                         samples = draft.samples,
                         sampleRate = draft.sampleRate,
@@ -1157,6 +1160,14 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                         referenceText = draft.referenceText,
                         timbreSettings = draft.timbreSettings
                     )
+                    if (draft.synthesizedPreview) {
+                        VoicePreviewCache.copyDraftPreviewToSavedVoice(
+                            context = getApplication(),
+                            draftWavPath = draft.previewWavPath,
+                            savedVoiceId = saved.id
+                        )
+                    }
+                    saved
                 }
                 val refreshed = withContext(Dispatchers.IO) { clonedVoiceRepository.loadAll() }
                 _clonedVoices.value = refreshed
@@ -1165,6 +1176,9 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 _readerPrefs.value = updatedPrefs
                 libraryManager.saveReaderPreferences(updatedPrefs)
                 BookAudioPlaybackService.syncSettings(getApplication())
+                if (!VoicePreviewCache.hasValidPreview(getApplication(), savedProfile.id)) {
+                    ensureClonedVoicePreviewCachedAsync(savedProfile)
+                }
                 _statusMessage.value = "Đã lưu giọng \"${savedProfile.name}\" và cập nhật tất cả giọng đọc"
                 onSaved()
             } catch (e: Exception) {
@@ -1175,9 +1189,101 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    /**
+     * Tạo sẵn (pre-render) tệp nghe thử `preview_<voice_id>.wav` ở luồng nền (Dispatchers.IO)
+     * cho các giọng mẫu `voices.json` và các giọng nhân bản chưa có cache để khi người dùng bấm
+     * "Nghe thử" sẽ phát tiếng NGAY LẬP TỨC (<50ms). Tự động nhường tài nguyên khi đang đọc sách hoặc tạo giọng.
+     */
+    fun preRenderPresetPreviewsIfNeeded() {
+        if (presetPreviewPreRenderJob?.isActive == true) return
+        presetPreviewPreRenderJob = viewModelScope.launch(Dispatchers.IO) {
+            val appCtx = getApplication<Application>()
+            val presets = _presetAiVoices.value.ifEmpty {
+                OnnxModelAssetHelper.inspectLightweightAiCatalog(appCtx).presetVoices
+            }
+            val clones = _clonedVoices.value.ifEmpty {
+                clonedVoiceRepository.loadAll()
+            }
+            val missingPresets = presets.filter { !VoicePreviewCache.hasValidPreview(appCtx, it.storageId) }
+            val missingClones = clones.filter { !VoicePreviewCache.hasValidPreview(appCtx, it.id) }
+            if (missingPresets.isEmpty() && missingClones.isEmpty()) return@launch
+
+            // Chờ nhẹ để hiệu ứng mở tab/sheet hoàn tất mượt mà trước khi nạp lười model trên IO
+            delay(500L)
+
+            fun shouldYield(): Boolean {
+                val playState = AudioPlaybackStateHolder.state.value
+                return playState.isPlaying ||
+                    playState.isPreviewingVoice ||
+                    _isExtractingVoiceClone.value ||
+                    _isRunningAiDiagnostics.value ||
+                    onnxVoiceEngine.isBusy
+            }
+
+            if (shouldYield()) return@launch
+            onnxVoiceEngine.ensureInitialized()
+            if (!onnxVoiceEngine.isFullOnnxSynthesisReady()) return@launch
+
+            for (clone in missingClones) {
+                coroutineContext.ensureActive()
+                if (shouldYield()) return@launch
+                if (VoicePreviewCache.hasValidPreview(appCtx, clone.id)) continue
+                val emb = clonedVoiceRepository.loadEmbedding(clone) ?: FloatArray(0)
+                val codes = clonedVoiceRepository.loadReferenceCodes(clone)
+                val timbre = clone.toTimbreSettings()
+                val synth = onnxVoiceEngine.synthesizeSentenceDetailed(
+                    sentence = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
+                    speakerEmbedding = emb,
+                    speed = timbre.speakingRateRatio,
+                    referenceCodes = codes,
+                    referenceText = clone.referenceText,
+                    matchedPresetId = clone.matchedPresetId.takeIf { it.isNotBlank() },
+                    timbreSettings = timbre
+                )
+                synth.audio?.let { audio ->
+                    VoicePreviewCache.savePreviewPcm(appCtx, clone.id, audio.pcmFloat, audio.sampleRate)
+                }
+                delay(150L)
+            }
+
+            for (preset in missingPresets) {
+                coroutineContext.ensureActive()
+                if (shouldYield()) return@launch
+                if (VoicePreviewCache.hasValidPreview(appCtx, preset.storageId)) continue
+                onnxVoiceEngine.ensurePresetPreviewCached(preset.id)
+                delay(150L)
+            }
+        }
+    }
+
+    private fun ensureClonedVoicePreviewCachedAsync(profile: ClonedVoiceProfile) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val appCtx = getApplication<Application>()
+            if (VoicePreviewCache.hasValidPreview(appCtx, profile.id)) return@launch
+            onnxVoiceEngine.ensureInitialized()
+            if (!onnxVoiceEngine.isFullOnnxSynthesisReady()) return@launch
+            val emb = clonedVoiceRepository.loadEmbedding(profile) ?: FloatArray(0)
+            val codes = clonedVoiceRepository.loadReferenceCodes(profile)
+            val timbre = profile.toTimbreSettings()
+            val synth = onnxVoiceEngine.synthesizeSentenceDetailed(
+                sentence = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
+                speakerEmbedding = emb,
+                speed = timbre.speakingRateRatio,
+                referenceCodes = codes,
+                referenceText = profile.referenceText,
+                matchedPresetId = profile.matchedPresetId.takeIf { it.isNotBlank() },
+                timbreSettings = timbre
+            )
+            synth.audio?.let { audio ->
+                VoicePreviewCache.savePreviewPcm(appCtx, profile.id, audio.pcmFloat, audio.sampleRate)
+            }
+        }
+    }
+
     fun deleteClonedVoice(voiceId: String) {
         viewModelScope.launch {
             val remaining = withContext(Dispatchers.IO) {
+                VoicePreviewCache.deletePreview(getApplication(), voiceId)
                 clonedVoiceRepository.deleteVoice(voiceId)
             }
             _clonedVoices.value = remaining
@@ -1504,6 +1610,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
 
     override fun onCleared() {
         super.onCleared()
+        presetPreviewPreRenderJob?.cancel()
         stopAiDiagnosticAudio()
         if (onnxVoiceEngineLazy.isInitialized()) {
             runCatching { onnxVoiceEngine.close() }
