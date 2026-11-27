@@ -202,9 +202,16 @@ class NeuCodecOnnxEngine {
     /**
      * Decodes a 1D sequence of discrete NeuCodec FSQ speech token IDs (`0..65535`) into a
      * Mono 24,000 Hz Float32 PCM waveform (`[-1.0f, 1.0f]`).
+     *
+     * Dynamically inspects `session.inputInfo` so it seamlessly handles:
+     * - Standard NeuCodec ONNX decoder (`codes` [1, 1, F] or [1, F], `INT32`/`INT64`).
+     * - Multi-input decoders (`content_ids` + `voice_embedding` / `voice` [1, D] `FLOAT`).
      */
     @Synchronized
-    fun decodeSpeechCodes(codes: IntArray): Result<FloatArray> {
+    fun decodeSpeechCodes(
+        codes: IntArray,
+        voiceEmbedding: FloatArray? = null
+    ): Result<FloatArray> {
         val ortEnv = env ?: return Result.failure(IllegalStateException("OrtEnvironment chưa được khởi tạo."))
         val session = decoderSession
             ?: return Result.failure(
@@ -219,30 +226,56 @@ class NeuCodecOnnxEngine {
 
         return runCatching {
             val inputs = LinkedHashMap<String, OnnxTensor>()
+            val feedTrace = mutableListOf<String>()
+            val hasIntInput = session.inputInfo.values.any { nodeInfo ->
+                val t = (nodeInfo.info as? TensorInfo)?.type
+                t == OnnxJavaType.INT32 || t == OnnxJavaType.INT64
+            }
+
             try {
                 for ((name, nodeInfo) in session.inputInfo) {
                     val tInfo = nodeInfo.info as? TensorInfo
                     val shape = tInfo?.shape
                     val type = tInfo?.type ?: OnnxJavaType.INT32
+                    val lower = name.lowercase(Locale.ROOT)
 
-                    val dims = when (shape?.size) {
-                        3 -> longArrayOf(1L, 1L, codes.size.toLong())
-                        2 -> longArrayOf(1L, codes.size.toLong())
-                        1 -> longArrayOf(codes.size.toLong())
-                        else -> longArrayOf(1L, 1L, codes.size.toLong())
-                    }
+                    val isVoiceEmbeddingInput = lower.contains("voice") ||
+                        lower.contains("embed") ||
+                        lower.contains("spk") ||
+                        lower.contains("speaker") ||
+                        (type == OnnxJavaType.FLOAT && hasIntInput)
 
-                    val tensor = when (type) {
-                        OnnxJavaType.INT64 -> {
-                            val longs = LongArray(codes.size) { codes[it].toLong() }
-                            OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(longs), dims)
+                    val tensor = if (isVoiceEmbeddingInput) {
+                        val embDim = resolveEmbeddingDim(shape, voiceEmbedding?.size ?: 256)
+                        val embVec = adaptVoiceEmbedding(voiceEmbedding, embDim)
+                        val dims = when (shape?.size) {
+                            3 -> longArrayOf(1L, 1L, embDim.toLong())
+                            2 -> longArrayOf(1L, embDim.toLong())
+                            1 -> longArrayOf(embDim.toLong())
+                            else -> longArrayOf(1L, embDim.toLong())
                         }
-                        OnnxJavaType.FLOAT -> {
-                            val floats = FloatArray(codes.size) { codes[it].toFloat() }
-                            OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(floats), dims)
+                        feedTrace.add("$name:FLOAT${dims.contentToString()}")
+                        OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(embVec), dims)
+                    } else {
+                        val dims = when (shape?.size) {
+                            3 -> longArrayOf(1L, 1L, codes.size.toLong())
+                            2 -> longArrayOf(1L, codes.size.toLong())
+                            1 -> longArrayOf(codes.size.toLong())
+                            else -> longArrayOf(1L, 1L, codes.size.toLong())
                         }
-                        else -> {
-                            OnnxTensor.createTensor(ortEnv, IntBuffer.wrap(codes), dims)
+                        feedTrace.add("$name:$type${dims.contentToString()}")
+                        when (type) {
+                            OnnxJavaType.INT64 -> {
+                                val longs = LongArray(codes.size) { codes[it].toLong() }
+                                OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(longs), dims)
+                            }
+                            OnnxJavaType.FLOAT -> {
+                                val floats = FloatArray(codes.size) { codes[it].toFloat() }
+                                OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(floats), dims)
+                            }
+                            else -> {
+                                OnnxTensor.createTensor(ortEnv, IntBuffer.wrap(codes), dims)
+                            }
                         }
                     }
                     inputs[name] = tensor
@@ -258,10 +291,55 @@ class NeuCodecOnnxEngine {
                     }
                     cleanAndNormalizeWaveform(raw)
                 }
+            } catch (e: Throwable) {
+                Log.e(TAG, "decodeSpeechCodes failed (feeds=${feedTrace.joinToString()}): ${e.message}", e)
+                throw IllegalStateException(
+                    "Giải mã ONNX thất bại [inputs=${feedTrace.joinToString(", ")}]: ${e.message}",
+                    e
+                )
             } finally {
                 inputs.values.forEach { runCatching { it.close() } }
             }
         }
+    }
+
+    private fun resolveEmbeddingDim(shape: LongArray?, fallbackDim: Int): Int {
+        if (shape != null) {
+            for (i in shape.lastIndex downTo 0) {
+                val d = shape[i].toInt()
+                if (d > 1) return d
+            }
+        }
+        return fallbackDim.coerceAtLeast(1)
+    }
+
+    private fun adaptVoiceEmbedding(source: FloatArray?, targetDim: Int): FloatArray {
+        val out = FloatArray(targetDim)
+        if (source != null && source.isNotEmpty()) {
+            if (source.size == targetDim) {
+                System.arraycopy(source, 0, out, 0, targetDim)
+            } else {
+                val maxIdx = (source.size - 1).coerceAtLeast(1)
+                val outMax = (targetDim - 1).coerceAtLeast(1)
+                for (i in 0 until targetDim) {
+                    val pos = i.toFloat() * maxIdx / outMax
+                    val lo = pos.toInt().coerceIn(0, source.lastIndex)
+                    val hi = (lo + 1).coerceIn(0, source.lastIndex)
+                    val frac = pos - lo
+                    out[i] = source[lo] * (1f - frac) + source[hi] * frac
+                }
+            }
+        } else {
+            val v = (1.0 / kotlin.math.sqrt(targetDim.toDouble())).toFloat()
+            out.fill(v)
+        }
+        var normSq = 0.0
+        for (v in out) normSq += v.toDouble() * v.toDouble()
+        if (normSq > 1e-12) {
+            val inv = (1.0 / kotlin.math.sqrt(normSq)).toFloat()
+            for (i in out.indices) out[i] *= inv
+        }
+        return out
     }
 
     private fun cleanAndNormalizeWaveform(raw: FloatArray): FloatArray {

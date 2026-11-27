@@ -270,11 +270,13 @@ class OfflineOnnxVoiceEngine(context: Context) {
         // Resolve reference voice: custom cloned voice (refCodes + refText) or preset fallback from voices.json
         val resolvedRefCodes: IntArray
         val resolvedRefText: String
+        val resolvedVoiceEmbedding: FloatArray?
         val voiceSourceLabel: String
 
         if (referenceCodes != null && referenceCodes.size >= 8) {
             resolvedRefCodes = referenceCodes
             resolvedRefText = referenceText?.trim().orEmpty()
+            resolvedVoiceEmbedding = speakerEmbedding.takeIf { it.isNotEmpty() }
             voiceSourceLabel = "Custom Cloned Voice (${resolvedRefCodes.size} NeuCodec codes)"
         } else {
             val preset = presetVoices.firstOrNull { it.referenceCodes.size >= 8 }
@@ -285,6 +287,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
             }
             resolvedRefCodes = preset.referenceCodes
             resolvedRefText = preset.referenceText
+            resolvedVoiceEmbedding = preset.voiceEmbedding ?: speakerEmbedding.takeIf { it.isNotEmpty() }
             voiceSourceLabel = "Preset voices.json '${preset.id}' (${resolvedRefCodes.size} codes)"
         }
 
@@ -322,7 +325,10 @@ class OfflineOnnxVoiceEngine(context: Context) {
         }
 
         val decodeStart = System.currentTimeMillis()
-        val decoded = neuCodec.decodeSpeechCodes(genRes.speechCodes)
+        val decoded = neuCodec.decodeSpeechCodes(
+            codes = genRes.speechCodes,
+            voiceEmbedding = resolvedVoiceEmbedding
+        )
         val decodeMs = System.currentTimeMillis() - decodeStart
 
         decoded.fold(

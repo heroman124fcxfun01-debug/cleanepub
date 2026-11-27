@@ -106,7 +106,23 @@ def phonemize_with_espeak_cli(text: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
-def load_preset_voice(voices_json_path: Optional[str]) -> Tuple[str, str, List[int]]:
+def _flatten_float_list(raw) -> Optional[List[float]]:
+    if not isinstance(raw, list) or not raw:
+        return None
+    out: List[float] = []
+
+    def walk(v):
+        if isinstance(v, (int, float)):
+            out.append(float(v))
+        elif isinstance(v, list):
+            for elem in v:
+                walk(elem)
+
+    walk(raw)
+    return out if out else None
+
+
+def load_preset_voice(voices_json_path: Optional[str]) -> Tuple[str, str, List[int], Optional[np.ndarray]]:
     if not voices_json_path or not os.path.isfile(voices_json_path):
         raise FileNotFoundError(f"Missing voices.json in models dir ({voices_json_path})")
     with open(voices_json_path, "r", encoding="utf-8") as f:
@@ -137,8 +153,16 @@ def load_preset_voice(voices_json_path: Optional[str]) -> Tuple[str, str, List[i
         raw_codes = entry.get("codes") or entry.get("ref_codes") or []
         codes = [int(c) for c in raw_codes if 0 <= int(c) <= 65535]
         ref_text = str(entry.get("text") or entry.get("ref_text") or "").strip()
+        raw_emb = (
+            entry.get("voice_embedding")
+            or entry.get("voice")
+            or entry.get("speaker_embedding")
+            or entry.get("embedding")
+        )
+        emb_list = _flatten_float_list(raw_emb)
+        voice_emb = np.asarray(emb_list, dtype=np.float32) if emb_list else None
         if len(codes) >= 8 and ref_text:
-            return key, ref_text, codes
+            return key, ref_text, codes, voice_emb
 
     raise ValueError("No preset in voices.json has >= 8 NeuCodec codes and non-empty reference text")
 
@@ -168,23 +192,106 @@ def write_pcm16_mono_wav(path: str, samples: np.ndarray, sample_rate: int) -> No
         f.write(data_bytes)
 
 
-def decode_neucodec(decoder_path: str, codes: List[int]) -> np.ndarray:
-    sess = ort.InferenceSession(decoder_path, providers=["CPUExecutionProvider"])
-    inp = sess.get_inputs()[0]
-    inp_name = inp.name
-    inp_type = inp.type
-    rank = len(inp.shape)
+def _resolve_embedding_dim(shape, fallback_dim: int = 256) -> int:
+    if shape:
+        for dim in reversed(shape):
+            if isinstance(dim, int) and dim > 1:
+                return int(dim)
+    return fallback_dim
 
-    dtype = np.int64 if "int64" in inp_type else np.int32
-    arr = np.asarray(codes, dtype=dtype)
-    if rank == 3:
-        arr = arr.reshape(1, 1, -1)
-    elif rank == 2:
-        arr = arr.reshape(1, -1)
+
+def _build_voice_embedding_tensor(
+    shape,
+    ort_type: str,
+    voice_embedding: Optional[np.ndarray],
+) -> np.ndarray:
+    dim = _resolve_embedding_dim(shape, fallback_dim=int(voice_embedding.size) if voice_embedding is not None and voice_embedding.size > 0 else 256)
+    vec = np.zeros(dim, dtype=np.float32)
+    if voice_embedding is not None and voice_embedding.size > 0:
+        src = voice_embedding.astype(np.float32).reshape(-1)
+        if src.size == dim:
+            vec[:] = src
+        else:
+            x_old = np.linspace(0.0, 1.0, num=src.size, endpoint=True)
+            x_new = np.linspace(0.0, 1.0, num=dim, endpoint=True)
+            vec[:] = np.interp(x_new, x_old, src).astype(np.float32)
     else:
-        arr = arr.reshape(1, 1, -1)
+        # Neutral unit-norm fallback if voices.json does not supply an embedding vector
+        vec.fill(1.0 / math.sqrt(float(dim)))
 
-    outputs = sess.run(None, {inp_name: arr})
+    norm = float(np.linalg.norm(vec))
+    if norm > 1e-6:
+        vec = vec / norm
+
+    rank = len(shape) if shape else 2
+    if rank == 3:
+        arr = vec.reshape(1, 1, dim)
+    elif rank == 2:
+        arr = vec.reshape(1, dim)
+    elif rank == 1:
+        arr = vec.reshape(dim)
+    else:
+        arr = vec.reshape(1, dim)
+
+    if "float16" in ort_type.lower():
+        return arr.astype(np.float16)
+    return arr.astype(np.float32)
+
+
+def decode_neucodec(
+    decoder_path: str,
+    codes: List[int],
+    voice_embedding: Optional[np.ndarray] = None,
+    log_fn=None,
+) -> np.ndarray:
+    sess = ort.InferenceSession(decoder_path, providers=["CPUExecutionProvider"])
+    inputs = sess.get_inputs()
+    outputs_meta = sess.get_outputs()
+
+    if log_fn is not None:
+        in_summary = [(i.name, i.type, list(i.shape)) for i in inputs]
+        out_summary = [(o.name, o.type, list(o.shape)) for o in outputs_meta]
+        log_fn(f"Decoder ONNX inputs:  {in_summary}")
+        log_fn(f"Decoder ONNX outputs: {out_summary}")
+
+    feed: Dict[str, np.ndarray] = {}
+    has_int_input = any("int" in i.type.lower() for i in inputs)
+
+    for inp in inputs:
+        name_low = inp.name.lower()
+        type_low = inp.type.lower()
+        rank = len(inp.shape)
+
+        is_voice_emb = (
+            "voice" in name_low
+            or "embed" in name_low
+            or "spk" in name_low
+            or "speaker" in name_low
+            or ("float" in type_low and has_int_input)
+        )
+
+        if is_voice_emb:
+            emb_tensor = _build_voice_embedding_tensor(inp.shape, inp.type, voice_embedding)
+            feed[inp.name] = emb_tensor
+            if log_fn is not None:
+                src_label = "voices.json" if (voice_embedding is not None and voice_embedding.size > 0) else "unit-norm fallback"
+                log_fn(f"  feed[{inp.name}]: shape={emb_tensor.shape}, dtype={emb_tensor.dtype} ({src_label})")
+        else:
+            dtype = np.int64 if "int64" in type_low else np.int32
+            arr = np.asarray(codes, dtype=dtype)
+            if rank == 3:
+                arr = arr.reshape(1, 1, -1)
+            elif rank == 2:
+                arr = arr.reshape(1, -1)
+            elif rank == 1:
+                arr = arr.reshape(-1)
+            else:
+                arr = arr.reshape(1, 1, -1)
+            feed[inp.name] = arr
+            if log_fn is not None:
+                log_fn(f"  feed[{inp.name}]: shape={arr.shape}, dtype={arr.dtype} (range={int(arr.min())}..{int(arr.max())})")
+
+    outputs = sess.run(None, feed)
     wav = np.asarray(outputs[0], dtype=np.float32).reshape(-1)
     wav = np.nan_to_num(wav, nan=0.0, posinf=0.0, neginf=0.0)
     peak = float(np.max(np.abs(wav))) if wav.size else 0.0
@@ -307,8 +414,9 @@ def main() -> int:
         if not encoder_path:
             raise FileNotFoundError("Missing neucodec_encoder.onnx in assets/models/")
 
-        preset_id, ref_text, ref_codes = load_preset_voice(voices_path)
-        log(f"Preset voice:     {preset_id} ({len(ref_codes)} NeuCodec codes)")
+        preset_id, ref_text, ref_codes, voice_emb = load_preset_voice(voices_path)
+        emb_label = f", voice_embedding={voice_emb.shape}" if voice_emb is not None else ""
+        log(f"Preset voice:     {preset_id} ({len(ref_codes)} NeuCodec codes{emb_label})")
         log(f"Preset ref_text:  {ref_text}")
 
         tsv_dict = load_tsv_dict(tsv_path)
@@ -385,7 +493,11 @@ def main() -> int:
 
         # Decode with official NeuCodec ONNX decoder (24 kHz)
         dec_t0 = time.time()
-        wav = decode_neucodec(decoder_path, speech_codes) if speech_codes else np.zeros(0, dtype=np.float32)
+        wav = (
+            decode_neucodec(decoder_path, speech_codes, voice_embedding=voice_emb, log_fn=log)
+            if speech_codes
+            else np.zeros(0, dtype=np.float32)
+        )
         dec_elapsed = time.time() - dec_t0
         write_pcm16_mono_wav(out_wav, wav, DECODER_SAMPLE_RATE)
 

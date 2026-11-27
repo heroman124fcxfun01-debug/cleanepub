@@ -17,7 +17,8 @@ data class VieNeuPresetVoice(
     val id: String,
     val description: String,
     val referenceText: String,
-    val referenceCodes: IntArray
+    val referenceCodes: IntArray,
+    val voiceEmbedding: FloatArray? = null
 )
 
 /**
@@ -443,13 +444,19 @@ object OnnxModelAssetHelper {
                     ?: continue
 
                 val codes = flattenJsonIntArray(codesArr)
+                val embArr = obj.optJSONArray("voice_embedding")
+                    ?: obj.optJSONArray("voice")
+                    ?: obj.optJSONArray("speaker_embedding")
+                    ?: obj.optJSONArray("embedding")
+                val voiceEmb = embArr?.let { flattenJsonFloatArray(it) }?.takeIf { it.isNotEmpty() }
                 if (codes.size >= 8) {
                     list.add(
                         VieNeuPresetVoice(
                             id = id,
                             description = desc,
                             referenceText = text,
-                            referenceCodes = codes
+                            referenceCodes = codes,
+                            voiceEmbedding = voiceEmb
                         )
                     )
                 }
@@ -473,6 +480,20 @@ object OnnxModelAssetHelper {
         }
         walk(arr)
         return out.toIntArray()
+    }
+
+    private fun flattenJsonFloatArray(arr: JSONArray): FloatArray {
+        val out = ArrayList<Float>(arr.length())
+        fun walk(a: JSONArray) {
+            for (i in 0 until a.length()) {
+                when (val elem = a.opt(i)) {
+                    is Number -> out.add(elem.toFloat())
+                    is JSONArray -> walk(elem)
+                }
+            }
+        }
+        walk(arr)
+        return out.toFloatArray()
     }
 
     /**
