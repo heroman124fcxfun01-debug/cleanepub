@@ -339,6 +339,40 @@ fun StudioVoiceCloneSection(
                     )
                 }
             }
+            NeoBrutalistPressBox(
+                onClick = onOpenAiDiagnostics,
+                isPill = true,
+                shadowOffset = 2.dp,
+                pressDepth = 1.5.dp,
+                borderWidth = 1.2.dp,
+                containerColor = trayBg,
+                borderColor = borderCol,
+                shadowColor = shadowCol,
+                modifier = Modifier
+                    .height(28.dp)
+                    .testTag("studio_ai_card_diagnostics_button")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.BugReport,
+                        contentDescription = "Kiểm tra hệ thống AI",
+                        tint = IosBlue,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Text(
+                        text = "Log AI",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = primaryInk,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
         }
 
         AnimatedVisibility(

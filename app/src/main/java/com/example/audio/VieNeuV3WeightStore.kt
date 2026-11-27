@@ -378,14 +378,16 @@ class VieNeuV3WeightStore(
                 val out = ArrayList<VieNeuPresetVoice>()
 
                 fun parseVoiceObj(id: String, item: JSONObject) {
-                    val embArr = item.optJSONArray("embedding")
+                    val embArr = item.optJSONArray("speakerEmbedding")
+                        ?: item.optJSONArray("embedding")
                         ?: item.optJSONArray("speaker_embedding")
                         ?: item.optJSONArray("xvector")
                         ?: item.optJSONArray("xvec")
                         ?: item.optJSONArray("spk_emb")
                     val emb = embArr?.let { a -> FloatArray(a.length()) { a.optDouble(it, 0.0).toFloat() } }
 
-                    val codesArr = item.optJSONArray("codes")
+                    val codesArr = item.optJSONArray("referenceCodes")
+                        ?: item.optJSONArray("codes")
                         ?: item.optJSONArray("ref_codes")
                         ?: item.optJSONArray("audio_codes")
                     val refCodes = parseCodesMatrix(codesArr)
@@ -399,7 +401,17 @@ class VieNeuV3WeightStore(
                         val sv = item.opt(sk)
                         subKeys.add(
                             when (sv) {
-                                is JSONArray -> "$sk[${sv.length()}]"
+                                is JSONArray -> {
+                                    if (sk == "referenceCodes" && refCodes != null && refCodes.isNotEmpty()) {
+                                        "$sk[${refCodes.size}x${refCodes[0].size}]"
+                                    } else if (sk == "speakerEmbedding" && emb != null) {
+                                        var sq = 0.0
+                                        for (v in emb) sq += v * v
+                                        "$sk[${emb.size},norm=${String.format(Locale.US, "%.2f", sqrt(sq))}]"
+                                    } else {
+                                        "$sk[${sv.length()}]"
+                                    }
+                                }
                                 is String -> "$sk(len=${sv.length})"
                                 else -> "$sk=$sv"
                             }

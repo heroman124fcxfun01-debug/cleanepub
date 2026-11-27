@@ -78,6 +78,7 @@ data class PendingDraftClonedVoice(
     val sampleRate: Int,
     val durationSeconds: Float,
     val embedding: FloatArray,
+    val referenceCodes: Array<IntArray>? = null,
     val usedOnnxEncoder: Boolean,
     val estimatedPitchRatio: Float,
     val previewWavPath: String? = null,
@@ -816,8 +817,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     samples
                 }
                 val extracted = onnxVoiceEngine.extractSpeakerEmbedding(
-                    samples = samples16k,
-                    sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
+                    samples = samples,
+                    sampleRate = sampleRate
                 )
                 _voiceCloneEngineMode.value = onnxVoiceEngine.engineMode
 
@@ -846,7 +847,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                         val synthRes = onnxVoiceEngine.synthesizeSentenceDetailed(
                             sentence = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
                             speakerEmbedding = extracted.embedding,
-                            speed = 1.0f
+                            speed = 1.0f,
+                            referenceCodes = extracted.referenceCodes
                         )
                         val synthAudio = synthRes.audio
                         if (synthAudio != null) {
@@ -873,6 +875,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE,
                     durationSeconds = durationSec,
                     embedding = extracted.embedding,
+                    referenceCodes = extracted.referenceCodes,
                     usedOnnxEncoder = extracted.usedOnnxEncoder,
                     estimatedPitchRatio = extracted.estimatedPitchRatio,
                     previewWavPath = draftWavPath,
@@ -1004,15 +1007,25 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
         _isRunningAiDiagnostics.value = true
         viewModelScope.launch {
             try {
-                val selectedEmb = withContext(Dispatchers.IO) {
-                    _draftClonedVoice.value?.embedding
-                        ?: _readerPrefs.value.selectedClonedVoiceId?.let { id ->
-                            clonedVoiceRepository.findById(id)?.let { clonedVoiceRepository.loadEmbedding(it) }
+                val (selectedEmb, selectedRefCodes) = withContext(Dispatchers.IO) {
+                    val draft = _draftClonedVoice.value
+                    if (draft != null) {
+                        draft.embedding to draft.referenceCodes
+                    } else {
+                        val prof = _readerPrefs.value.selectedClonedVoiceId?.let { id ->
+                            clonedVoiceRepository.findById(id)
                         }
+                        if (prof != null) {
+                            clonedVoiceRepository.loadEmbedding(prof) to clonedVoiceRepository.loadReferenceCodes(prof)
+                        } else {
+                            null to null
+                        }
+                    }
                 }
                 val (res, audio) = onnxVoiceEngine.runDiagnosticSentenceReadTest(
                     sentence = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
-                    speakerEmbedding = selectedEmb
+                    speakerEmbedding = selectedEmb,
+                    referenceCodes = selectedRefCodes
                 )
                 _aiDiagnosticTestResult.value = res
                 _aiDiagnosticReport.value = onnxVoiceEngine.runFullSystemDiagnostics(forceResync = false)
@@ -1061,7 +1074,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                         sampleRate = draft.sampleRate,
                         embedding = draft.embedding,
                         usedOnnxEncoder = draft.usedOnnxEncoder,
-                        estimatedPitchRatio = draft.estimatedPitchRatio
+                        estimatedPitchRatio = draft.estimatedPitchRatio,
+                        referenceCodes = draft.referenceCodes
                     )
                 }
                 val refreshed = withContext(Dispatchers.IO) { clonedVoiceRepository.loadAll() }

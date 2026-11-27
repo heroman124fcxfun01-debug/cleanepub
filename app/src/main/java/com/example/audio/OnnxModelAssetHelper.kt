@@ -81,6 +81,10 @@ data class DiscoveredOnnxModels(
 data class ParsedTokenizerData(
     val tokenToId: Map<String, Long>,
     val idToToken: Map<Long, String>,
+    val merges: List<Pair<String, String>> = emptyList(),
+    val isByteLevelBpe: Boolean = false,
+    val addPrefixSpace: Boolean = false,
+    val preTokenizerSummary: String = "",
     val bosTokenId: Long?,
     val eosTokenId: Long?,
     val speechStartTokenId: Long?,
@@ -743,9 +747,60 @@ object OnnxModelAssetHelper {
                 }
             }
 
+            val merges = ArrayList<Pair<String, String>>(1024)
+            val mergesArr = modelObj?.optJSONArray("merges")
+            if (mergesArr != null) {
+                for (i in 0 until mergesArr.length()) {
+                    when (val entry = mergesArr.opt(i)) {
+                        is String -> {
+                            val sp = entry.indexOf(' ')
+                            if (sp > 0 && sp < entry.length - 1) {
+                                merges.add(entry.substring(0, sp) to entry.substring(sp + 1))
+                            }
+                        }
+                        is JSONArray -> {
+                            if (entry.length() >= 2) {
+                                val a = entry.optString(0)
+                                val b = entry.optString(1)
+                                if (a.isNotEmpty() && b.isNotEmpty()) {
+                                    merges.add(a to b)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            var addPrefixSpace = false
+            var preTokSummary = ""
+            val preTokObj = root.optJSONObject("pre_tokenizer")
+            if (preTokObj != null) {
+                val ptType = preTokObj.optString("type")
+                addPrefixSpace = preTokObj.optBoolean("add_prefix_space", false)
+                val subList = preTokObj.optJSONArray("pretokenizers")
+                if (subList != null) {
+                    val types = ArrayList<String>()
+                    for (i in 0 until subList.length()) {
+                        val sub = subList.optJSONObject(i) ?: continue
+                        types.add(sub.optString("type"))
+                        if (sub.has("add_prefix_space") && sub.optBoolean("add_prefix_space", false)) {
+                            addPrefixSpace = true
+                        }
+                    }
+                    preTokSummary = "$ptType[${types.joinToString("+")}](prefixSpace=$addPrefixSpace)"
+                } else {
+                    preTokSummary = "$ptType(prefixSpace=$addPrefixSpace)"
+                }
+            }
+            val isByteLevelBpe = tokenToId.containsKey("Ā") && tokenToId.containsKey("Ġ")
+
             ParsedTokenizerData(
                 tokenToId = tokenToId,
                 idToToken = idToToken,
+                merges = merges,
+                isByteLevelBpe = isByteLevelBpe,
+                addPrefixSpace = addPrefixSpace,
+                preTokenizerSummary = preTokSummary,
                 bosTokenId = bosId,
                 eosTokenId = eosId,
                 speechStartTokenId = speechStart,
@@ -817,12 +872,13 @@ object OnnxModelAssetHelper {
         }
         val frameCount = (((padded.size - winLen) / hopLen) + 1).coerceIn(1, 800)
 
-        // Precompute Hann window
+        // Precompute Kaldi Povey window: (0.5 - 0.5 * cos(2*pi*i / (N-1)))^0.85
         val window = FloatArray(winLen) { i ->
-            (0.5 - 0.5 * cos(2.0 * PI * i / (winLen - 1).coerceAtLeast(1))).toFloat()
+            val hann = 0.5 - 0.5 * cos(2.0 * PI * i / (winLen - 1).coerceAtLeast(1))
+            hann.coerceAtLeast(0.0).pow(0.85).toFloat()
         }
 
-        // Precompute triangular mel filterbank (20 Hz .. sampleRate/2 - 400 Hz)
+        // Precompute Kaldi-compatible 80-bin triangular mel filterbank (20 Hz .. 7600 Hz @ 16kHz)
         val filterbank = buildMelFilterbank(
             melBins = melBins,
             nFft = nFft,
@@ -835,18 +891,28 @@ object OnnxModelAssetHelper {
         val im = DoubleArray(nFft)
         val powerSpec = DoubleArray(nFreqs)
         val rawMel = Array(frameCount) { FloatArray(melBins) }
+        val frameBuf = DoubleArray(winLen)
 
         for (f in 0 until frameCount) {
             val offset = f * hopLen
             re.fill(0.0)
             im.fill(0.0)
-            // Apply pre-emphasis (0.97) + Hann window
-            var prev = if (offset > 0) padded[offset - 1] else 0f
+            // Scale float [-1, 1] to Kaldi 16-bit PCM range [-32768, 32768] and remove per-frame DC offset
+            var dcMean = 0.0
             for (i in 0 until winLen) {
-                val cur = padded[offset + i]
-                val preEmph = cur - 0.97f * prev
-                prev = cur
-                re[i] = (preEmph * window[i]).toDouble()
+                val s = padded[offset + i].toDouble() * 32768.0
+                frameBuf[i] = s
+                dcMean += s
+            }
+            dcMean /= winLen
+            for (i in 0 until winLen) {
+                frameBuf[i] -= dcMean
+            }
+            // Kaldi pre-emphasis (0.97) + Povey window
+            for (i in 0 until winLen) {
+                val prev = if (i > 0) frameBuf[i - 1] else frameBuf[0]
+                val preEmph = frameBuf[i] - 0.97 * prev
+                re[i] = preEmph * window[i]
             }
             fftRadix2(re, im)
             for (k in 0 until nFreqs) {
@@ -860,11 +926,12 @@ object OnnxModelAssetHelper {
                     val w = weights[k]
                     if (w > 0.0) energy += powerSpec[k] * w
                 }
-                frameMel[m] = ln(energy + 1e-6).toFloat()
+                // Kaldi default energy_floor = 1.0 (in 16-bit PCM power scale)
+                frameMel[m] = ln(max(energy, 1.0)).toFloat()
             }
         }
 
-        // Cepstral Mean Normalization (CMVN) per mel bin (standard for speaker encoders)
+        // Utterance-level Cepstral Mean Normalization (CMN) per mel bin (standard for WeSpeaker / CAM++ / VieNeu)
         for (m in 0 until melBins) {
             var mean = 0.0
             for (f in 0 until frameCount) mean += rawMel[f][m]

@@ -10,7 +10,9 @@ import java.nio.IntBuffer
 import java.nio.LongBuffer
 import java.util.Locale
 import kotlin.math.exp
+import kotlin.math.ln
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 import kotlin.random.Random
 
 data class VieNeuV3SynthesisOutput(
@@ -21,30 +23,18 @@ data class VieNeuV3SynthesisOutput(
 )
 
 /**
- * Exact Dual-AR / RQ-Transformer ONNX inference runner for **VieNeu-TTS v3 Turbo (`VieNeuV3TurboForTTS`)**
- * + **MOSS-Audio-Tokenizer-Nano (48 kHz)** matching the exact on-device tensor signatures:
+ * Dual-AR / RQ-Transformer ONNX inference runner for **VieNeu-TTS v3 Turbo (`VieNeuV3TurboForTTS`)**
+ * + **MOSS-Audio-Tokenizer-Nano (48 kHz)**:
  *
- * - `heads.bin` (5 tensors):
- *     `text_emb[419x768]`, `xvec_w[768x192]`, `xvec_b[768]`, `xvec_ln_w[768]`, `xvec_ln_b[768]`
- * - Special tokens (`tokenizer.json` + `config.json`):
- *     `1=<|bos|>`, `2=<|eos|>`, `3=<|TEXT_PROMPT_START|>`, `4=<|TEXT_PROMPT_END|>`,
- *     `5=<|SPEECH_GENERATION_START|>`, `6=<|SPEECH_GENERATION_END|>`,
- *     `7=<|audio_ref_slot|>`, `16=<|style_0|>` (`default_style_token_id`)
- * - `vieneu_prefill.onnx`:
- *     `in=[inputs_embeds:FLOAT[1x-1x768]]` -> `out=[hidden, present_k_0..11, present_v_0..11]`
- * - `vieneu_decode_step.onnx`:
- *     `in=[inputs_embeds:FLOAT[1x1x768], position_ids:INT64[1x1], past_k_0..11, past_v_0..11]`
- *     -> `out=[hidden:FLOAT[1x1x768], present_k_0..11, present_v_0..11]`
- * - `vieneu_acoustic_cached.onnx`:
- *     `in=[token_emb:FLOAT[1x-1x768], position_ids:INT64[1x-1], past_k_0, past_v_0]`
- *     -> `out=[hidden:FLOAT[1x-1x768], present_k_0, present_v_0]`
- * - `text_head_gather.onnx`:
- *     `in=[vec:FLOAT[1x768], code:INT32[-1]]` -> `out=[logits:FLOAT[1x419], embT:FLOAT[768x-1]]`
- * - `audio_head_0..15.onnx`:
- *     `in=[vec:FLOAT[1x768], code:INT32[-1]]` -> `out=[logits:FLOAT[1x1024], embT:FLOAT[768x-1]]`
- * - `moss_audio_tokenizer_decode_full.onnx`:
- *     `in=[audio_codes:INT32[1, numFrames, 16], audio_code_lengths:INT32[1]]`
- *     -> `out=[audio:FLOAT[1, 1, N], audio_lengths:INT32[1]]` @ 48,000 Hz
+ * - ByteLevel BPE tokenization (`tokenizer.json`: 44 special + 256 ByteLevel + 119 BPE merges = 419 tokens)
+ * - Dual voice-cloning conditioning:
+ *     1. Global 192-d `speakerEmbedding` -> `LayerNorm(xvec_w @ spk + xvec_b, xvec_ln_w, xvec_ln_b)`
+ *     2. Reference acoustic frames `referenceCodes[T_ref][16]` -> embedded via batched `audio_head_0..15.onnx`
+ *        (`embT[768, T_ref]`, transposed row-major) into the `<|audio_ref_slot|>` prompt context
+ * - 12-layer Qwen3 backbone (`vieneu_prefill.onnx` + `vieneu_decode_step.onnx`)
+ * - 1-layer Acoustic Depth Transformer (`vieneu_acoustic_cached.onnx`) + 16 tied `audio_head_0..15.onnx`
+ *   with automatic `c_0` head calibration (`audio_head_0(h_t)` direct Dual-AR vs `audio_head_0(ac(h_t, pos=0))`)
+ * - 48 kHz waveform synthesis (`moss_audio_tokenizer_decode_full.onnx`)
  */
 class VieNeuV3OnnxRunner(
     private val env: OrtEnvironment,
@@ -63,7 +53,6 @@ class VieNeuV3OnnxRunner(
     private val numCodebooks: Int = audioHeadSessions.size.takeIf { it > 0 } ?: config.numCodebooks
     private val codebookSize: Int = config.codebookSize.coerceAtLeast(256)
     private val zeroHiddenVec = FloatArray(hiddenSize)
-    private val dummyCodeZero = intArrayOf(0)
 
     // Special token IDs from tokenizer.json + config.json
     private val bosTokenId: Long = config.bosTokenId ?: tokenizer?.tokenToId?.get("<|bos|>") ?: 1L
@@ -94,38 +83,65 @@ class VieNeuV3OnnxRunner(
     fun synthesize(
         cleanText: String,
         speakerEmbedding: FloatArray,
-        speed: Float
+        speed: Float,
+        referenceCodes: Array<IntArray>? = null
     ): VieNeuV3SynthesisOutput {
         val trace = StringBuilder()
         val startMs = System.currentTimeMillis()
         try {
-            // 1. Phonemize & encode Vietnamese text into IPA token IDs (without extra BOS/EOS wrappers)
+            // 1. Phonemize & ByteLevel-BPE encode Vietnamese text
             val (rawPhonemeIds, phonemeStr) = VietnameseIpaPhonemizer.encodeTextForVieNeuV3(
                 cleanText = cleanText,
                 tokenizer = tokenizer,
-                config = null // We wrap with exact VieNeuV3TurboForTTS special tokens below!
+                config = null // Exact VieNeuV3TurboForTTS special tokens are wrapped explicitly below
             )
-            // Strip any accidental leading BOS or trailing speech-start tokens from generic encoder
             val contentIds = rawPhonemeIds.filter {
                 it != bosTokenId && it != eosTokenId && it != speechStartTokenId && it != speechEndTokenId
             }
-            trace.appendLine("1. G2P/Tokens: ${contentIds.size} phoneme tok | IPA=\"${phonemeStr.take(85)}\"")
+            val tokPreview = contentIds.take(18).joinToString(",")
+            trace.appendLine(
+                "1. G2P/BPE: ${contentIds.size} tok (byteBpe=${tokenizer?.isByteLevelBpe == true}, merges=${tokenizer?.merges?.size ?: 0}) " +
+                    "| ids=[$tokPreview] | IPA=\"${phonemeStr.take(90)}\""
+            )
             if (contentIds.isEmpty()) {
                 return VieNeuV3SynthesisOutput(null, config.outputSampleRate, trace.toString(), "Chuỗi token văn bản rỗng.")
             }
 
-            // 2. Project 192-dim x-vector -> 768-dim via exact `LayerNorm(xvec_w @ spk + xvec_b, xvec_ln_w, xvec_ln_b)`
+            // 2. Project 192-dim speakerEmbedding -> 768-dim via exact LayerNorm(xvec_w @ spk + xvec_b)
+            val spkNorm = vectorNorm(speakerEmbedding)
             val xvecCond768 = buildSpeakerConditioningEmbedding(speakerEmbedding)
 
-            // 3. Build exact VieNeuV3TurboForTTS prompt embedding sequence:
-            //    [<|bos|>, <|style_0|>, <xvecCond @ audio_ref_slot>, <|TEXT_PROMPT_START|>, ...phonemes..., <|TEXT_PROMPT_END|>, <|SPEECH_GENERATION_START|>]
-            val promptVectors = ArrayList<FloatArray>(contentIds.size + 6)
+            // 3. Embed optional referenceCodes[T_ref][16] (from voices.json or moss_audio_tokenizer_encode.onnx)
+            val refFrameEmbeds = if (!referenceCodes.isNullOrEmpty()) {
+                embedReferenceAudioFramesBatched(referenceCodes)
+            } else {
+                emptyList()
+            }
+
+            // 4. Build VieNeuV3TurboForTTS prompt embedding sequence:
+            //    [<|bos|>, <|style_0|>, xvecCond, ...refFrameEmbeds (@ audio_ref_slot)...,
+            //     <|TEXT_PROMPT_START|>, ...ByteLevel BPE phoneme tokens..., <|TEXT_PROMPT_END|>,
+            //     <|SPEECH_GENERATION_START|>]
+            val promptVectors = ArrayList<FloatArray>(contentIds.size + refFrameEmbeds.size + 6)
             promptVectors.add(lookupSingleTextEmbedding(bosTokenId))
             promptVectors.add(lookupSingleTextEmbedding(defaultStyleTokenId))
             if (xvecCond768 != null) {
                 promptVectors.add(xvecCond768)
             } else {
                 promptVectors.add(lookupSingleTextEmbedding(audioRefSlotTokenId))
+            }
+            if (refFrameEmbeds.isNotEmpty()) {
+                val refSlotBias = lookupSingleTextEmbedding(audioRefSlotTokenId)
+                val refSlotNorm = vectorNorm(refSlotBias)
+                // Add learned audio_ref_slot embedding if non-zero (keeps norm aligned with backbone space)
+                for (rf in refFrameEmbeds) {
+                    if (refSlotNorm > 1e-4f) {
+                        val combined = FloatArray(hiddenSize) { d -> rf[d] + refSlotBias[d] }
+                        promptVectors.add(combined)
+                    } else {
+                        promptVectors.add(rf)
+                    }
+                }
             }
             promptVectors.add(lookupSingleTextEmbedding(textStartTokenId))
             for (tid in contentIds) {
@@ -139,17 +155,24 @@ class VieNeuV3OnnxRunner(
             for (i in 0 until promptLen) {
                 System.arraycopy(promptVectors[i], 0, promptEmbeds, i * hiddenSize, hiddenSize)
             }
-            trace.appendLine("2. Prompt: [1, $promptLen, $hiddenSize] (xvecCond=${xvecCond768 != null}, style=$defaultStyleTokenId)")
+            trace.appendLine(
+                "2. Prompt: [1, $promptLen, $hiddenSize] " +
+                    "(spkNorm=${String.format(Locale.US, "%.2f", spkNorm)}, refFrames=${refFrameEmbeds.size}, style=$defaultStyleTokenId)"
+            )
 
-            // 4. Backbone Prefill (`vieneu_prefill.onnx`)
+            // 5. Backbone Prefill (`vieneu_prefill.onnx`)
             var (backboneHidden, backboneKv) = runBackbonePrefill(promptEmbeds, promptLen)
-            trace.appendLine("3. Prefill OK: hidden[${backboneHidden.size}], kv=${backboneKv.size} tensors")
+            val th0Info = inspectTextHeadTop3(backboneHidden)
 
-            // 5. Autoregressive Frame Generation Loop (Backbone + text_head EOS check + 16-codebook Acoustic RQ-Transformer)
-            // MOSS-Audio-Tokenizer-Nano = 12.5 Hz (80ms/frame @ 48kHz).
+            // 6. Auto-calibrate whether `audio_head_0` expects `backboneHidden` directly (Dual-AR CSM/Qwen3 style)
+            //    or `vieneu_acoustic_cached(backboneHidden, pos=0)` by comparing logit entropy on frame 0!
+            val (useDirectC0FromBackbone, c0CalibNote) = calibrateC0Path(backboneHidden)
+            trace.appendLine("3. Prefill OK: textHead@0=[$th0Info] | $c0CalibNote")
+
+            // 7. Autoregressive Frame Generation Loop
             val wordCount = cleanText.split(Regex("\\s+")).count { it.isNotBlank() }.coerceAtLeast(1)
-            val minFrames = (wordCount * 1.2f).roundToInt().coerceIn(6, 28)
-            val maxFrames = ((wordCount * 5.2f) / speed.coerceIn(0.75f, 1.5f))
+            val minFrames = (wordCount * 1.1f).roundToInt().coerceIn(5, 24)
+            val maxFrames = ((wordCount * 5.0f) / speed.coerceIn(0.75f, 1.5f))
                 .roundToInt()
                 .coerceIn(36, 260)
 
@@ -168,9 +191,10 @@ class VieNeuV3OnnxRunner(
                     break
                 }
 
-                // Run 1-layer Acoustic Depth Transformer (`vieneu_acoustic_cached.onnx`) + `audio_head_0..15.onnx`
+                // Decode all 16 RVQ codebooks for frame `frameIdx`
                 val (frameCodes, frameEmbSum) = decodeSingleAcousticFrame(
                     backboneHidden = backboneHidden,
+                    useDirectC0 = useDirectC0FromBackbone,
                     recentC0 = recentC0,
                     rng = rng
                 )
@@ -179,7 +203,7 @@ class VieNeuV3OnnxRunner(
                 val c0 = frameCodes[0]
                 if (c0 == prevC0) {
                     repeatRun++
-                    if (repeatRun >= 16 && frameIdx >= minFrames) {
+                    if (repeatRun >= 14 && frameIdx >= minFrames) {
                         stopReason = "repeat_guard@$frameIdx"
                         break
                     }
@@ -201,9 +225,10 @@ class VieNeuV3OnnxRunner(
                 backbonePos++
             }
 
+            val thEndInfo = inspectTextHeadTop3(backboneHidden)
             trace.appendLine(
                 "4. Acoustic+Decode OK: ${generatedFrames.size} frames " +
-                    "(stop=$stopReason, ~${String.format(Locale.US, "%.2f", generatedFrames.size * 0.08f)}s)"
+                    "(stop=$stopReason, ~${String.format(Locale.US, "%.2f", generatedFrames.size * 0.08f)}s, textHead@end=[$thEndInfo])"
             )
             if (generatedFrames.isEmpty()) {
                 return VieNeuV3SynthesisOutput(
@@ -214,7 +239,7 @@ class VieNeuV3OnnxRunner(
                 )
             }
 
-            // 6. Decode `INT32[1, numFrames, 16]` -> 48 kHz PCM via `moss_audio_tokenizer_decode_full.onnx`
+            // 8. Decode `INT32[1, numFrames, 16]` -> 48 kHz PCM via `moss_audio_tokenizer_decode_full.onnx`
             val rawAudio = runMossCodecDecodeFull(generatedFrames)
             val elapsedMs = System.currentTimeMillis() - startMs
             trace.appendLine("5. MOSS 48kHz Decode OK: ${rawAudio.size} samples (${elapsedMs}ms)")
@@ -248,7 +273,7 @@ class VieNeuV3OnnxRunner(
     }
 
     // -------------------------------------------------------------------------
-    // Stage 1: Exact `text_emb` lookup & `xvec` LayerNorm projection from `heads.bin`
+    // Stage 1: Exact `text_emb`, `xvec` LayerNorm, and Batched `referenceCodes` Embedding
     // -------------------------------------------------------------------------
 
     private fun lookupSingleTextEmbedding(tokenId: Long): FloatArray {
@@ -265,14 +290,11 @@ class VieNeuV3OnnxRunner(
                 return out
             }
         }
-
-        // Fallback via `text_head_gather.onnx` (passing both `vec` and `code`)
         val th = textHeadGatherSession
         if (th != null) {
-            val (_, emb) = runHeadGatherDual(th, zeroHiddenVec, tokenId.toInt().coerceAtLeast(0))
+            val (_, emb) = runHeadGatherBatch(th, zeroHiddenVec, intArrayOf(tokenId.toInt().coerceAtLeast(0)))
             if (emb != null && emb.size >= hiddenSize) return emb.copyOf(hiddenSize)
         }
-
         return FloatArray(hiddenSize)
     }
 
@@ -294,29 +316,57 @@ class VieNeuV3OnnxRunner(
         val fitted = if (speakerEmbedding.size == inDim) speakerEmbedding else FloatArray(inDim) { i ->
             if (i < speakerEmbedding.size) speakerEmbedding[i] else 0f
         }
-        // 1. Linear projection: xvec_w[768x192] @ spk[192] + xvec_b[768]
         var proj = VieNeuV3WeightStore.linearProject(fitted, w, wMeta.shape, b)
 
-        // 2. Exact LayerNorm: xvec_ln_w[768], xvec_ln_b[768]
         val lnW = xvecLnWKey?.let { store.getFloats(it) }
         val lnB = xvecLnBKey?.let { store.getFloats(it) }
         if (lnW != null || lnB != null) {
             proj = VieNeuV3WeightStore.layerNorm(proj, lnW, lnB, eps = 1e-5f)
         }
-
         return if (proj.size == hiddenSize) proj else FloatArray(hiddenSize) { i ->
             if (i < proj.size) proj[i] else 0f
         }
     }
 
     /**
-     * Runs `text_head_gather.onnx` or `audio_head_q.onnx` with BOTH required inputs:
-     * `vec: FLOAT[1, 768]` and `code: INT32[1]` -> returns `(logits, emb768)`.
+     * Embeds `referenceCodes[T_ref][16]` into `T_ref` 768-dim vectors in only 16 batched calls
+     * to `audio_head_0..15.onnx`, accurately transposing `embT: FLOAT[768, T_ref]`.
      */
-    private fun runHeadGatherDual(
+    private fun embedReferenceAudioFramesBatched(referenceCodes: Array<IntArray>): List<FloatArray> {
+        val frameCount = referenceCodes.size.coerceAtMost(96)
+        if (frameCount <= 0 || audioHeadSessions.isEmpty()) return emptyList()
+
+        val summedFrames = Array(frameCount) { FloatArray(hiddenSize) }
+        val qLimit = minOf(numCodebooks, audioHeadSessions.size)
+        val colCodes = IntArray(frameCount)
+
+        for (q in 0 until qLimit) {
+            for (t in 0 until frameCount) {
+                val row = referenceCodes[t]
+                colCodes[t] = if (q < row.size) row[q].coerceIn(0, codebookSize - 1) else 0
+            }
+            val (_, embT) = runHeadGatherBatch(audioHeadSessions[q], zeroHiddenVec, colCodes)
+            if (embT != null && embT.size >= hiddenSize * frameCount) {
+                // `embT` shape is `[768, frameCount]` (row-major transposed!): element (d, t) = embT[d * frameCount + t]
+                for (d in 0 until hiddenSize) {
+                    val rowOff = d * frameCount
+                    for (t in 0 until frameCount) {
+                        summedFrames[t][d] += embT[rowOff + t]
+                    }
+                }
+            }
+        }
+        return summedFrames.toList()
+    }
+
+    /**
+     * Runs `text_head_gather.onnx` or `audio_head_q.onnx` with `vec: FLOAT[1, 768]` and `code: INT32[N]`.
+     * Returns `(logits, embT_flat)` where `embT` has shape `[768, N]`.
+     */
+    private fun runHeadGatherBatch(
         session: OrtSession,
         vec: FloatArray,
-        code: Int
+        codes: IntArray
     ): Pair<FloatArray, FloatArray?> {
         val inputs = LinkedHashMap<String, OnnxTensor>()
         try {
@@ -326,12 +376,21 @@ class VieNeuV3OnnxRunner(
                 val type = tInfo?.type ?: OnnxJavaType.FLOAT
                 val lower = name.lowercase(Locale.ROOT)
                 inputs[name] = when {
-                    type == OnnxJavaType.INT32 || lower.contains("code") || lower.contains("id") -> {
-                        val dims = if (shape != null && shape.size == 2) longArrayOf(1L, 1L) else longArrayOf(1L)
-                        if (type == OnnxJavaType.INT64) {
-                            OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(code.toLong())), dims)
+                    type == OnnxJavaType.INT32 || type == OnnxJavaType.INT64 ||
+                        lower.contains("code") || lower.contains("id") -> {
+                        val dims = if (shape != null && shape.size == 2) {
+                            longArrayOf(1L, codes.size.toLong())
                         } else {
-                            OnnxTensor.createTensor(env, IntBuffer.wrap(intArrayOf(code)), dims)
+                            longArrayOf(codes.size.toLong())
+                        }
+                        if (type == OnnxJavaType.INT64) {
+                            OnnxTensor.createTensor(
+                                env,
+                                LongBuffer.wrap(LongArray(codes.size) { codes[it].toLong() }),
+                                dims
+                            )
+                        } else {
+                            OnnxTensor.createTensor(env, IntBuffer.wrap(codes), dims)
                         }
                     }
                     else -> {
@@ -360,13 +419,9 @@ class VieNeuV3OnnxRunner(
         }
     }
 
-    /**
-     * Checks whether the backbone hidden state predicts `<|SPEECH_GENERATION_END|>` (6) or `<|eos|>` (2)
-     * through `text_head_gather.onnx`.
-     */
     private fun checkSpeechEndViaTextHead(backboneHidden: FloatArray): Boolean {
         val th = textHeadGatherSession ?: return false
-        val (logits, _) = runHeadGatherDual(th, backboneHidden, 0)
+        val (logits, _) = runHeadGatherBatch(th, backboneHidden, intArrayOf(0))
         if (logits.isEmpty()) return false
 
         val endIdx = speechEndTokenId.toInt()
@@ -391,6 +446,72 @@ class VieNeuV3OnnxRunner(
         val pEnd = if (endIdx in logits.indices) exp((logits[endIdx] - maxVal).toDouble()) / sumExp else 0.0
         val pEos = if (eosIdx in logits.indices) exp((logits[eosIdx] - maxVal).toDouble()) / sumExp else 0.0
         return (pEnd + pEos) >= 0.35
+    }
+
+    private fun inspectTextHeadTop3(backboneHidden: FloatArray): String {
+        val th = textHeadGatherSession ?: return "n/a"
+        val (logits, _) = runHeadGatherBatch(th, backboneHidden, intArrayOf(0))
+        if (logits.isEmpty()) return "empty"
+        var maxVal = Float.NEGATIVE_INFINITY
+        for (v in logits) if (v.isFinite() && v > maxVal) maxVal = v
+        var sumExp = 0.0
+        for (v in logits) if (v.isFinite()) sumExp += exp((v - maxVal).toDouble())
+        if (sumExp <= 0.0) return "nan"
+
+        val top = logits.indices
+            .sortedByDescending { if (logits[it].isFinite()) logits[it] else Float.NEGATIVE_INFINITY }
+            .take(3)
+        return top.joinToString(",") { idx ->
+            val p = exp((logits[idx] - maxVal).toDouble()) / sumExp
+            val lbl = tokenizer?.idToToken?.get(idx.toLong())?.take(12) ?: "$idx"
+            "$idx($lbl)=${String.format(Locale.US, "%.2f", p)}"
+        }
+    }
+
+    /**
+     * Compares `audio_head_0(backboneHidden)` (direct Dual-AR `c_0`) vs `audio_head_0(ac(backboneHidden, pos=0))`
+     * on frame 0 by Shannon entropy & top-1 probability. Whichever representation `audio_head_0` was trained on
+     * produces a much sharper (lower entropy, higher confidence) distribution.
+     */
+    private fun calibrateC0Path(backboneHidden: FloatArray): Pair<Boolean, String> {
+        val head0 = audioHeadSessions.firstOrNull() ?: return false to "c0=acoustic(no_head0)"
+        val (directLogits, _) = runHeadGatherBatch(head0, backboneHidden, intArrayOf(0))
+        val (directEnt, directMaxP) = computeEntropyAndMaxProb(directLogits)
+
+        val (ac0Hidden, _) = runAcousticStepMulti(
+            tokenEmbeds = backboneHidden,
+            seqLen = 1,
+            positions = longArrayOf(0L),
+            pastKv = emptyMap()
+        )
+        val (acLogits, _) = runHeadGatherBatch(head0, ac0Hidden, intArrayOf(0))
+        val (acEnt, acMaxP) = computeEntropyAndMaxProb(acLogits)
+
+        // Pick direct Dual-AR c_0 if significantly sharper (lower entropy or higher peak prob)
+        val useDirect = (directEnt + 0.25 < acEnt) || (directMaxP > acMaxP * 1.35 && directEnt <= acEnt + 0.1)
+        val note = "c0Path=${if (useDirect) "DIRECT(h_t)" else "ACOUSTIC(pos=0)"} " +
+            "[dir:H=${String.format(Locale.US, "%.2f", directEnt)},p=${String.format(Locale.US, "%.3f", directMaxP)} | " +
+            "ac0:H=${String.format(Locale.US, "%.2f", acEnt)},p=${String.format(Locale.US, "%.3f", acMaxP)}]"
+        return useDirect to note
+    }
+
+    private fun computeEntropyAndMaxProb(logits: FloatArray): Pair<Double, Double> {
+        if (logits.isEmpty()) return 99.0 to 0.0
+        var maxV = Float.NEGATIVE_INFINITY
+        for (v in logits) if (v.isFinite() && v > maxV) maxV = v
+        if (!maxV.isFinite()) return 99.0 to 0.0
+        var sumExp = 0.0
+        for (v in logits) if (v.isFinite()) sumExp += exp((v - maxV).toDouble())
+        if (sumExp <= 0.0) return 99.0 to 0.0
+        var entropy = 0.0
+        var maxP = 0.0
+        for (v in logits) {
+            if (!v.isFinite()) continue
+            val p = exp((v - maxV).toDouble()) / sumExp
+            if (p > maxP) maxP = p
+            if (p > 1e-12) entropy -= p * ln(p)
+        }
+        return entropy to maxP
     }
 
     // -------------------------------------------------------------------------
@@ -510,27 +631,99 @@ class VieNeuV3OnnxRunner(
 
     private fun decodeSingleAcousticFrame(
         backboneHidden: FloatArray,
+        useDirectC0: Boolean,
         recentC0: List<Int>,
         rng: Random
     ): Pair<IntArray, FloatArray> {
         val codes = IntArray(numCodebooks)
         val summedEmb = FloatArray(hiddenSize)
         var acousticKv = LinkedHashMap<String, SafeTensorPayload>()
-        var currentInputEmb = backboneHidden
 
+        if (useDirectC0 && audioHeadSessions.isNotEmpty()) {
+            // Dual-AR CSM / Qwen3-TTS path:
+            //   c_0 predicted directly from `backboneHidden` via `audio_head_0`
+            //   c_1 predicted from `vieneu_acoustic_cached([backboneHidden, emb_0], pos=[0, 1])` via `audio_head_1`
+            //   c_q (q=2..15) predicted from `vieneu_acoustic_cached([emb_{q-1}], pos=[q])` via `audio_head_q`
+            val head0 = audioHeadSessions[0]
+            val (logits0, _) = runHeadGatherBatch(head0, backboneHidden, intArrayOf(0))
+            val c0 = VieNeuV3WeightStore.sampleLogits(
+                logits = logits0,
+                temperature = 0.72f,
+                topK = 40,
+                topP = 0.88f,
+                maxValidIndex = (codebookSize - 1).coerceAtMost(logits0.size - 1),
+                recentTokens = if (recentC0.isNotEmpty()) recentC0.toIntArray() else null,
+                repetitionPenalty = 1.14f,
+                rng = rng
+            ).coerceIn(0, codebookSize - 1)
+            codes[0] = c0
+
+            val (_, emb0Raw) = runHeadGatherBatch(head0, zeroHiddenVec, intArrayOf(c0))
+            var prevEmb = if (emb0Raw != null && emb0Raw.size >= hiddenSize) {
+                emb0Raw.copyOf(hiddenSize)
+            } else {
+                FloatArray(hiddenSize)
+            }
+            for (d in 0 until hiddenSize) summedEmb[d] += prevEmb[d]
+
+            for (q in 1 until numCodebooks) {
+                val (acHidden, nextKv) = if (q == 1) {
+                    val pairEmbeds = FloatArray(hiddenSize * 2)
+                    System.arraycopy(backboneHidden, 0, pairEmbeds, 0, hiddenSize)
+                    System.arraycopy(prevEmb, 0, pairEmbeds, hiddenSize, hiddenSize)
+                    runAcousticStepMulti(
+                        tokenEmbeds = pairEmbeds,
+                        seqLen = 2,
+                        positions = longArrayOf(0L, 1L),
+                        pastKv = acousticKv
+                    )
+                } else {
+                    runAcousticStepMulti(
+                        tokenEmbeds = prevEmb,
+                        seqLen = 1,
+                        positions = longArrayOf(q.toLong()),
+                        pastKv = acousticKv
+                    )
+                }
+                acousticKv = nextKv
+
+                val headSession = audioHeadSessions.getOrNull(q) ?: continue
+                val (logits, _) = runHeadGatherBatch(headSession, acHidden, intArrayOf(0))
+                val sampled = VieNeuV3WeightStore.sampleLogits(
+                    logits = logits,
+                    temperature = 0.55f,
+                    topK = 24,
+                    topP = 0.88f,
+                    maxValidIndex = (codebookSize - 1).coerceAtMost(logits.size - 1),
+                    recentTokens = null,
+                    repetitionPenalty = 1.0f,
+                    rng = rng
+                ).coerceIn(0, codebookSize - 1)
+                codes[q] = sampled
+
+                val (_, gatheredEmb) = runHeadGatherBatch(headSession, zeroHiddenVec, intArrayOf(sampled))
+                if (gatheredEmb != null && gatheredEmb.size >= hiddenSize) {
+                    prevEmb = if (gatheredEmb.size == hiddenSize) gatheredEmb else gatheredEmb.copyOf(hiddenSize)
+                    for (d in 0 until hiddenSize) summedEmb[d] += prevEmb[d]
+                }
+            }
+            return codes to summedEmb
+        }
+
+        // Standard RQ-Transformer path: `vieneu_acoustic_cached` runs for q = 0..15 starting from `backboneHidden`
+        var currentInputEmb = backboneHidden
         for (q in 0 until numCodebooks) {
-            // 1. Run 1-layer acoustic depth transformer at depth position `q`
-            val (acHidden, nextKv) = runAcousticStep(
-                tokenEmb = currentInputEmb,
-                depthPos = q,
+            val (acHidden, nextKv) = runAcousticStepMulti(
+                tokenEmbeds = currentInputEmb,
+                seqLen = 1,
+                positions = longArrayOf(q.toLong()),
                 pastKv = acousticKv
             )
             acousticKv = nextKv
 
             val headSession = audioHeadSessions.getOrNull(q)
             if (headSession != null) {
-                // 2. Predict codebook `q` logits[1024] from `acHidden`
-                val (logits, _) = runHeadGatherDual(headSession, acHidden, 0)
+                val (logits, _) = runHeadGatherBatch(headSession, acHidden, intArrayOf(0))
                 val sampled = VieNeuV3WeightStore.sampleLogits(
                     logits = logits,
                     temperature = if (q == 0) 0.72f else 0.55f,
@@ -543,8 +736,7 @@ class VieNeuV3OnnxRunner(
                 ).coerceIn(0, codebookSize - 1)
                 codes[q] = sampled
 
-                // 3. Gather exact tied embedding `embT[768x1]` for the sampled codebook token `sampled`
-                val (_, gatheredEmb) = runHeadGatherDual(headSession, zeroHiddenVec, sampled)
+                val (_, gatheredEmb) = runHeadGatherBatch(headSession, zeroHiddenVec, intArrayOf(sampled))
                 if (gatheredEmb != null && gatheredEmb.size >= hiddenSize) {
                     currentInputEmb = if (gatheredEmb.size == hiddenSize) gatheredEmb else gatheredEmb.copyOf(hiddenSize)
                     for (d in 0 until hiddenSize) {
@@ -556,9 +748,10 @@ class VieNeuV3OnnxRunner(
         return codes to summedEmb
     }
 
-    private fun runAcousticStep(
-        tokenEmb: FloatArray,
-        depthPos: Int,
+    private fun runAcousticStepMulti(
+        tokenEmbeds: FloatArray,
+        seqLen: Int,
+        positions: LongArray,
         pastKv: Map<String, SafeTensorPayload>
     ): Pair<FloatArray, LinkedHashMap<String, SafeTensorPayload>> {
         val inputs = LinkedHashMap<String, OnnxTensor>()
@@ -580,19 +773,27 @@ class VieNeuV3OnnxRunner(
                         }
                     }
                     lower.contains("position") || lower == "pos" -> {
-                        val dims = if (shape != null && shape.size == 1) longArrayOf(1L) else longArrayOf(1L, 1L)
-                        if (type == OnnxJavaType.INT32) {
-                            OnnxTensor.createTensor(env, IntBuffer.wrap(intArrayOf(depthPos)), dims)
+                        val dims = if (shape != null && shape.size == 1) {
+                            longArrayOf(seqLen.toLong())
                         } else {
-                            OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(depthPos.toLong())), dims)
+                            longArrayOf(1L, seqLen.toLong())
+                        }
+                        if (type == OnnxJavaType.INT32) {
+                            OnnxTensor.createTensor(
+                                env,
+                                IntBuffer.wrap(IntArray(seqLen) { positions[it].toInt() }),
+                                dims
+                            )
+                        } else {
+                            OnnxTensor.createTensor(env, LongBuffer.wrap(positions), dims)
                         }
                     }
                     lower.contains("emb") || lower.contains("hidden") || lower.contains("input") -> {
                         val dims = when (shape?.size) {
-                            2 -> longArrayOf(1L, hiddenSize.toLong())
-                            else -> longArrayOf(1L, 1L, hiddenSize.toLong())
+                            2 -> longArrayOf(seqLen.toLong(), hiddenSize.toLong())
+                            else -> longArrayOf(1L, seqLen.toLong(), hiddenSize.toLong())
                         }
-                        VieNeuV3WeightStore.createFloatOrFp16Tensor(env, tokenEmb, dims, type)
+                        VieNeuV3WeightStore.createFloatOrFp16Tensor(env, tokenEmbeds, dims, type)
                     }
                     else -> {
                         val dims = shape?.map { if (it > 0L) it else 1L }?.toLongArray() ?: longArrayOf(1L)
@@ -638,7 +839,6 @@ class VieNeuV3OnnxRunner(
                         }
                     }
                     else -> {
-                        // Verified device signature: `audio_codes:INT32[-1x-1x16]` -> [1, numFrames, 16]
                         val codebooksLast = shape != null && shape.size == 3 && (shape[2] == nq.toLong() || shape[2] == 16L)
                         val dims = if (codebooksLast) {
                             longArrayOf(1L, numFrames.toLong(), nq.toLong())
@@ -707,6 +907,12 @@ class VieNeuV3OnnxRunner(
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    private fun vectorNorm(v: FloatArray): Float {
+        var sq = 0.0
+        for (x in v) if (x.isFinite()) sq += x * x
+        return sqrt(sq).toFloat()
+    }
 
     private fun extractLastHiddenVector(flat: FloatArray, dim: Int): FloatArray {
         if (flat.size <= dim) {

@@ -30,6 +30,7 @@ data class SpeakerEmbeddingResult(
     val embedding: FloatArray,
     val usedOnnxEncoder: Boolean,
     val estimatedPitchRatio: Float,
+    val referenceCodes: Array<IntArray>? = null,
     val errorMessage: String? = null
 )
 
@@ -340,20 +341,16 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 ?.take(24)
                 ?.joinToString(" ") { "${it.key}:${it.value}" }
                 ?: "(trống)"
-            val phonemeToks = tokenizerData?.idToToken?.entries
-                ?.sortedBy { it.key }
-                ?.drop(24)
-                ?.take(48)
-                ?.joinToString(" ") { "${it.key}:${it.value}" }
-                ?: "(trống)"
+            val decodedMerges = VietnameseIpaPhonemizer.describeDecodedBpeMerges(tokenizerData, limit = 120)
             val voicesDetail = if (richPresetVoices.isEmpty()) "(trống)" else {
                 richPresetVoices.take(3).joinToString(" | ") { "${it.id}(${it.keysSummary})" }
             }
             val metadata = linkedMapOf(
                 "config.json" to vieNeuConfig.rawSummary.ifBlank { "(trống)" },
                 "heads.json" to (headWeightStore?.describeAll() ?: "(trống)"),
+                "tokenizer_info" to "byteBpe=${tokenizerData?.isByteLevelBpe == true}, merges=${tokenizerData?.merges?.size ?: 0}, pre=${tokenizerData?.preTokenizerSummary.orEmpty()}",
                 "tokenizer[0..23]" to sampleToks,
-                "tokenizer[24..71]" to phonemeToks,
+                "tokenizer[300..418] (decoded UTF-8)" to decodedMerges,
                 "voices.json" to voicesDetail
             )
 
@@ -430,20 +427,25 @@ class OfflineOnnxVoiceEngine(context: Context) {
      */
     suspend fun runDiagnosticSentenceReadTest(
         sentence: String = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
-        speakerEmbedding: FloatArray? = null
+        speakerEmbedding: FloatArray? = null,
+        referenceCodes: Array<IntArray>? = null
     ): Pair<AiDiagnosticTestResult, SynthesizedSentenceAudio?> = withContext(workerDispatcher) {
         val startMs = System.currentTimeMillis()
         try {
             ensureInitialized()
+            val firstPreset = richPresetVoices.firstOrNull { it.speakerEmbedding?.isNotEmpty() == true }
             val emb = speakerEmbedding?.takeIf { it.isNotEmpty() }
-                ?: richPresetVoices.firstOrNull { it.speakerEmbedding?.isNotEmpty() == true }?.speakerEmbedding
+                ?: firstPreset?.speakerEmbedding
                 ?: presetVoices.values.firstOrNull()
                 ?: OnnxModelAssetHelper.l2Normalize(FloatArray(192) { i -> ((i % 17) - 8) / 16f })
+            val refCodes = referenceCodes?.takeIf { it.isNotEmpty() }
+                ?: if (speakerEmbedding == null) firstPreset?.refCodes else null
 
             val synth = synthesizeSentenceDetailed(
                 sentence = sentence,
                 speakerEmbedding = emb,
-                speed = 1.0f
+                speed = 1.0f,
+                referenceCodes = refCodes
             )
             val elapsed = System.currentTimeMillis() - startMs
             val audio = synth.audio
@@ -452,7 +454,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 appendLine("Câu mẫu: \"$sentence\"")
                 appendLine("Trạng thái: ${if (ok) "THÀNH CÔNG (đang phát âm thanh ONNX)" else "THẤT BẠI"}")
                 appendLine("Thời gian tổng hợp: ${elapsed} ms")
-                appendLine("Embedding đầu vào: ${emb.size} chiều")
+                appendLine("Embedding đầu vào: ${emb.size} chiều | refCodes=${refCodes?.size ?: 0} frames")
                 if (audio != null) {
                     val durSec = audio.pcmFloat.size.toFloat() / audio.sampleRate.toFloat()
                     appendLine("Sóng âm đầu ra: ${audio.pcmFloat.size} mẫu @ ${audio.sampleRate} Hz (${String.format(Locale.US, "%.2f", durSec)} giây)")
@@ -569,10 +571,16 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 val sanitized = FloatArray(onnxEmbedding.size) { i ->
                     if (onnxEmbedding[i].isFinite()) onnxEmbedding[i] else 0f
                 }
+                val targetNorm = resolveReferenceSpeakerEmbeddingNorm()
+                val scaledEmbedding = scaleEmbeddingToTargetNorm(sanitized, targetNorm)
+                val refCodes = runCatching {
+                    encodeReferenceAudioCodesTransient(env, samples, sampleRate)
+                }.getOrNull()
                 return@withContext SpeakerEmbeddingResult(
-                    embedding = OnnxModelAssetHelper.l2Normalize(sanitized),
+                    embedding = scaledEmbedding,
                     usedOnnxEncoder = true,
                     estimatedPitchRatio = estimatedPitchRatio,
+                    referenceCodes = refCodes,
                     errorMessage = null
                 )
             } catch (e: Throwable) {
@@ -751,7 +759,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
     suspend fun synthesizeSentenceDetailed(
         sentence: String,
         speakerEmbedding: FloatArray,
-        speed: Float
+        speed: Float,
+        referenceCodes: Array<IntArray>? = null
     ): OnnxSynthesisResult = withContext(workerDispatcher) {
         ensureInitialized()
         val env = ortEnv
@@ -773,7 +782,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
             val v3Out = v3Runner.synthesize(
                 cleanText = cleanText,
                 speakerEmbedding = speakerEmbedding,
-                speed = clampedSpeed
+                speed = clampedSpeed,
+                referenceCodes = referenceCodes
             )
             val rawWave = v3Out.waveform
             return@withContext if (rawWave != null && v3Out.errorMessage == null) {
@@ -1530,6 +1540,137 @@ class OfflineOnnxVoiceEngine(context: Context) {
             val ti = v.info as? TensorInfo
             val shapeStr = ti?.shape?.joinToString("x") ?: "?"
             "$k:${ti?.type ?: "?"}[$shapeStr]"
+        }
+    }
+
+    private fun resolveReferenceSpeakerEmbeddingNorm(): Float {
+        val norms = richPresetVoices.mapNotNull { preset ->
+            val vec = preset.speakerEmbedding ?: return@mapNotNull null
+            if (vec.isEmpty()) return@mapNotNull null
+            var sq = 0.0
+            for (v in vec) if (v.isFinite()) sq += v * v
+            kotlin.math.sqrt(sq).toFloat().takeIf { it > 0.05f }
+        }.sorted()
+        if (norms.isEmpty()) return 1.0f
+        return norms[norms.size / 2]
+    }
+
+    private fun scaleEmbeddingToTargetNorm(raw: FloatArray, targetNorm: Float): FloatArray {
+        var sq = 0.0
+        for (v in raw) if (v.isFinite()) sq += v * v
+        val curNorm = kotlin.math.sqrt(sq).toFloat()
+        if (curNorm <= 1e-7f) return raw
+        val scale = targetNorm / curNorm
+        return FloatArray(raw.size) { i ->
+            val v = raw[i]
+            if (v.isFinite()) v * scale else 0f
+        }
+    }
+
+    /**
+     * Lazily loads `moss_audio_tokenizer_encode.onnx`, encodes the user's 3–8s reference clip into
+     * `[numFrames][16]` RVQ `referenceCodes` (matching `voices.json`), and immediately closes the session
+     * so the 42MB encoder weights hold 0 MB persistent RAM during normal synthesis.
+     */
+    private fun encodeReferenceAudioCodesTransient(
+        env: OrtEnvironment,
+        samples: FloatArray,
+        sampleRate: Int
+    ): Array<IntArray>? {
+        val encFile = discoveredModels?.codecEncoderFile ?: return null
+        if (!encFile.exists() || encFile.length() <= 64L || samples.isEmpty()) return null
+
+        val targetRate = vieNeuConfig.outputSampleRate.coerceIn(16_000, 48_000)
+        val resampled = if (sampleRate != targetRate) {
+            AudioFileDecoder.normalizeAndResampleMonoFloat(samples, sampleRate, targetRate)
+        } else {
+            samples
+        }
+        // Cap reference audio to 6.5s (~81 frames @ 12.5 Hz, matching voices.json 53..91 frames)
+        val maxSamples = (targetRate * 6.5f).toInt().coerceAtLeast(targetRate)
+        val clipped = if (resampled.size > maxSamples) resampled.copyOf(maxSamples) else resampled
+
+        val opts = OrtSession.SessionOptions().apply {
+            setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 4))
+            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
+        }
+        var encSession: OrtSession? = null
+        val inputs = LinkedHashMap<String, OnnxTensor>()
+        try {
+            encSession = env.createSession(encFile.absolutePath, opts)
+            for ((name, nodeInfo) in encSession.inputInfo) {
+                val tInfo = nodeInfo.info as? TensorInfo
+                val shape = tInfo?.shape
+                val type = tInfo?.type ?: OnnxJavaType.FLOAT
+                val lower = name.lowercase(Locale.ROOT)
+                inputs[name] = when {
+                    lower.contains("len") || type == OnnxJavaType.INT32 || type == OnnxJavaType.INT64 -> {
+                        if (type == OnnxJavaType.INT64) {
+                            OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(clipped.size.toLong())), longArrayOf(1L))
+                        } else {
+                            OnnxTensor.createTensor(env, IntBuffer.wrap(intArrayOf(clipped.size)), longArrayOf(1L))
+                        }
+                    }
+                    shape != null && shape.size == 3 && shape[1] == 2L -> {
+                        // Stereo [1, 2, T] (duplicate mono channel into L & R)
+                        val stereo = FloatArray(clipped.size * 2)
+                        System.arraycopy(clipped, 0, stereo, 0, clipped.size)
+                        System.arraycopy(clipped, 0, stereo, clipped.size, clipped.size)
+                        VieNeuV3WeightStore.createFloatOrFp16Tensor(
+                            env,
+                            stereo,
+                            longArrayOf(1L, 2L, clipped.size.toLong()),
+                            type
+                        )
+                    }
+                    shape != null && shape.size == 3 -> {
+                        VieNeuV3WeightStore.createFloatOrFp16Tensor(
+                            env,
+                            clipped,
+                            longArrayOf(1L, 1L, clipped.size.toLong()),
+                            type
+                        )
+                    }
+                    else -> {
+                        VieNeuV3WeightStore.createFloatOrFp16Tensor(
+                            env,
+                            clipped,
+                            longArrayOf(1L, clipped.size.toLong()),
+                            type
+                        )
+                    }
+                }
+            }
+
+            encSession.run(inputs).use { res ->
+                val outTensor = res[0] as? OnnxTensor ?: return null
+                val outShape = outTensor.info.shape
+                val flatInts = VieNeuV3WeightStore.readTensorAsIntsSafe(outTensor)
+                val nq = vieNeuConfig.numCodebooks.coerceIn(1, 32)
+                if (flatInts.size < nq) return null
+
+                // Output may be [1, T, 16] or [1, 16, T] or [T, 16] or [16, T]
+                val codebooksLast = outShape.lastOrNull() == nq.toLong()
+                val frames = (flatInts.size / nq).coerceIn(1, 128)
+                val matrix = Array(frames) { f ->
+                    IntArray(nq) { q ->
+                        val raw = if (codebooksLast) {
+                            flatInts[f * nq + q]
+                        } else {
+                            flatInts[q * frames + f]
+                        }
+                        raw.coerceIn(0, vieNeuConfig.codebookSize - 1)
+                    }
+                }
+                Log.i(TAG, "Encoded reference audio via ${encFile.name}: ${matrix.size}x$nq frames")
+                return matrix
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Transient moss_audio_tokenizer_encode skipped: ${e.message}")
+            return null
+        } finally {
+            inputs.values.forEach { runCatching { it.close() } }
+            runCatching { encSession?.close() }
         }
     }
 

@@ -22,6 +22,7 @@ data class ClonedVoiceProfile(
     val embeddingPath: String,
     val referenceAudioPath: String,
     val referenceWavPath: String = "",
+    val referenceCodesPath: String = "",
     val usedOnnxEncoder: Boolean,
     val estimatedPitchRatio: Float
 )
@@ -65,6 +66,7 @@ class ClonedVoiceRepository(private val rootDir: File) {
                         embeddingPath = embPath,
                         referenceAudioPath = obj.optString("referenceAudioPath").trim(),
                         referenceWavPath = obj.optString("referenceWavPath").trim(),
+                        referenceCodesPath = obj.optString("referenceCodesPath").trim(),
                         usedOnnxEncoder = obj.optBoolean("usedOnnxEncoder", false),
                         estimatedPitchRatio = obj.optDouble("estimatedPitchRatio", 1.0)
                             .toFloat()
@@ -89,7 +91,8 @@ class ClonedVoiceRepository(private val rootDir: File) {
         sampleRate: Int,
         embedding: FloatArray,
         usedOnnxEncoder: Boolean,
-        estimatedPitchRatio: Float
+        estimatedPitchRatio: Float,
+        referenceCodes: Array<IntArray>? = null
     ): ClonedVoiceProfile {
         rootDir.mkdirs()
         val id = "clone_${UUID.randomUUID().toString().take(8)}"
@@ -97,10 +100,17 @@ class ClonedVoiceRepository(private val rootDir: File) {
         val embFile = File(rootDir, "$id.emb")
         val refAudioFile = File(rootDir, "$id.f32")
         val refWavFile = File(rootDir, "$id.wav")
+        val refCodesFile = File(rootDir, "$id.codes")
 
         writeFloatArrayBinary(embFile, embedding)
         writeFloatArrayBinary(refAudioFile, samples)
         AudioFileDecoder.writePcm16MonoWav(refWavFile, samples, sampleRate.coerceAtLeast(8_000))
+        val savedCodesPath = if (!referenceCodes.isNullOrEmpty()) {
+            writeCodesMatrixBinary(refCodesFile, referenceCodes)
+            refCodesFile.absolutePath
+        } else {
+            ""
+        }
 
         val durationSec = if (sampleRate > 0) {
             (samples.size.toFloat() / sampleRate.toFloat()).coerceIn(2.0f, 8.5f)
@@ -118,6 +128,7 @@ class ClonedVoiceRepository(private val rootDir: File) {
             embeddingPath = embFile.absolutePath,
             referenceAudioPath = refAudioFile.absolutePath,
             referenceWavPath = refWavFile.absolutePath,
+            referenceCodesPath = savedCodesPath,
             usedOnnxEncoder = usedOnnxEncoder,
             estimatedPitchRatio = estimatedPitchRatio.coerceIn(0.75f, 1.28f)
         )
@@ -139,7 +150,11 @@ class ClonedVoiceRepository(private val rootDir: File) {
             if (target.referenceWavPath.isNotBlank()) {
                 runCatching { File(target.referenceWavPath).delete() }
             }
+            if (target.referenceCodesPath.isNotBlank()) {
+                runCatching { File(target.referenceCodesPath).delete() }
+            }
             runCatching { File(rootDir, "${target.id}.wav").delete() }
+            runCatching { File(rootDir, "${target.id}.codes").delete() }
         }
         val remaining = current.filterNot { it.id == voiceId }
         saveIndex(remaining)
@@ -150,6 +165,13 @@ class ClonedVoiceRepository(private val rootDir: File) {
         val file = File(profile.embeddingPath)
         if (!file.exists()) return null
         return readFloatArrayBinary(file)
+    }
+
+    fun loadReferenceCodes(profile: ClonedVoiceProfile): Array<IntArray>? {
+        val file = profile.referenceCodesPath.takeIf { it.isNotBlank() }?.let { File(it) }
+            ?: File(rootDir, "${profile.id}.codes")
+        if (!file.exists()) return null
+        return readCodesMatrixBinary(file)
     }
 
     fun loadReferenceAudio(profile: ClonedVoiceProfile): FloatArray? {
@@ -193,6 +215,7 @@ class ClonedVoiceRepository(private val rootDir: File) {
                     put("embeddingPath", p.embeddingPath)
                     put("referenceAudioPath", p.referenceAudioPath)
                     put("referenceWavPath", p.referenceWavPath)
+                    put("referenceCodesPath", p.referenceCodesPath)
                     put("usedOnnxEncoder", p.usedOnnxEncoder)
                     put("estimatedPitchRatio", p.estimatedPitchRatio.toDouble())
                 }
@@ -225,6 +248,35 @@ class ClonedVoiceRepository(private val rootDir: File) {
                 val count = bytes.size / 4
                 val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
                 FloatArray(count) { buffer.getFloat() }
+            }.getOrNull()
+        }
+
+        fun writeCodesMatrixBinary(file: File, codes: Array<IntArray>) {
+            if (codes.isEmpty()) return
+            val frames = codes.size
+            val nq = codes[0].size.coerceAtLeast(1)
+            val bb = ByteBuffer.allocate((2 + frames * nq) * 4).order(ByteOrder.LITTLE_ENDIAN)
+            bb.putInt(frames)
+            bb.putInt(nq)
+            for (f in 0 until frames) {
+                val row = codes[f]
+                for (q in 0 until nq) {
+                    bb.putInt(if (q < row.size) row[q] else 0)
+                }
+            }
+            file.writeBytes(bb.array())
+        }
+
+        fun readCodesMatrixBinary(file: File): Array<IntArray>? {
+            return runCatching {
+                val bytes = file.readBytes()
+                if (bytes.size < 12) return null
+                val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+                val frames = bb.int
+                val nq = bb.int
+                if (frames <= 0 || frames > 2000 || nq <= 0 || nq > 64) return null
+                if (bytes.size < (2 + frames * nq) * 4) return null
+                Array(frames) { IntArray(nq) { bb.int } }
             }.getOrNull()
         }
     }

@@ -643,10 +643,12 @@ class BookAudioPlaybackService : Service() {
                 playing = true
             )
 
+            val clonedRefCodes = clonedVoiceRepo.loadReferenceCodes(selectedClone)
             launchPipelinedOnnxSentences(
                 sentences = sentences,
                 startSentenceIndex = safeSentenceStart,
                 embedding = clonedEmbedding,
+                referenceCodes = clonedRefCodes,
                 generation = generation
             )
             return
@@ -714,6 +716,7 @@ class BookAudioPlaybackService : Service() {
         sentences: List<String>,
         startSentenceIndex: Int,
         embedding: FloatArray,
+        referenceCodes: Array<IntArray>?,
         generation: Long
     ) {
         onnxStreamJob = serviceScope.launch {
@@ -742,7 +745,7 @@ class BookAudioPlaybackService : Service() {
             ).toLong()
 
             var nextDeferred = async {
-                onnxEngine.synthesizeSentenceDetailed(sentences[startSentenceIndex], embedding, speed)
+                onnxEngine.synthesizeSentenceDetailed(sentences[startSentenceIndex], embedding, speed, referenceCodes)
             }
 
             for (idx in startSentenceIndex until sentences.size) {
@@ -767,7 +770,7 @@ class BookAudioPlaybackService : Service() {
                 if (idx + 1 < sentences.size) {
                     val lookaheadSentence = sentences[idx + 1]
                     nextDeferred = async {
-                        onnxEngine.synthesizeSentenceDetailed(lookaheadSentence, embedding, speed)
+                        onnxEngine.synthesizeSentenceDetailed(lookaheadSentence, embedding, speed, referenceCodes)
                     }
                 }
 
@@ -1080,11 +1083,13 @@ class BookAudioPlaybackService : Service() {
             try {
                 onnxEngine.ensureInitialized()
                 val embedding = clonedVoiceRepo.loadEmbedding(targetVoice)
+                val refCodes = clonedVoiceRepo.loadReferenceCodes(targetVoice)
                 val synthResult = if (embedding != null && onnxEngine.isFullOnnxSynthesisReady()) {
                     onnxEngine.synthesizeSentenceDetailed(
                         sentence = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
                         speakerEmbedding = embedding,
-                        speed = activePrefs.speechRate.coerceIn(0.8f, 1.5f)
+                        speed = activePrefs.speechRate.coerceIn(0.8f, 1.5f),
+                        referenceCodes = refCodes
                     )
                 } else {
                     null
