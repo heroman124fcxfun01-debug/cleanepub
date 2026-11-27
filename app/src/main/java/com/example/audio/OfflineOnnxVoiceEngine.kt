@@ -2,10 +2,11 @@ package com.example.audio
 
 import android.content.Context
 import android.util.Log
-import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.Locale
-import java.util.concurrent.Executors
 
 enum class OnnxVoiceEngineMode {
     UNINITIALIZED,
@@ -37,27 +38,21 @@ data class OnnxSynthesisResult(
 /**
  * 100% Offline Official `pnnbao97/VieNeu-TTS` Engine (GGUF via `llama.cpp` + NeuCodec ONNX 24kHz).
  *
- * Pipeline:
- * 1. Syncs `assets/models/` -> `context.filesDir/models/` (removing legacy 21-file web ONNX files).
- * 2. Loads GGUF backbone (`pnnbao-ump/VieNeu-TTS-0.3B-q4-gguf`) via `org.nehuatl.llamacpp.LlamaContext`.
- * 3. Loads `neucodec_encoder.onnx` (16kHz -> FSQ speech codes for instant offline voice cloning) and
- *    `neucodec_decoder.onnx` (FSQ speech codes -> 24kHz Mono PCM WAV) via ONNX Runtime Android.
- * 4. Loads `vi_espeak_ipa.tsv` (real eSpeak-NG Vietnamese IPA dictionary) and official `voices.json`.
- * 5. Synthesizes Vietnamese speech using the official `pnnbao97/VieNeu-TTS` prompt:
- *    `user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} {target_phones}<|TEXT_PROMPT_END|>\n`
- *    `assistant:<|SPEECH_GENERATION_START|>{ref_codes}`
+ * Strictly LAZY-LOADED on [Dispatchers.IO]:
+ * - Constructing this class performs ZERO file I/O, ZERO `assets/models/` copying, and ZERO native
+ *   library loading (`llama.cpp` / `onnxruntime`).
+ * - Models are only unpacked & loaded when the user actually plays AI audio, creates a voice, or
+ *   runs AI diagnostics.
  */
 class OfflineOnnxVoiceEngine(context: Context) {
 
     private val appContext = context.applicationContext
 
-    private val workerExecutor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "vieneu-gguf-worker").apply { isDaemon = true }
-    }
-    private val workerDispatcher = workerExecutor.asCoroutineDispatcher()
-
-    private val ggufRunner = VieNeuGgufRunner()
-    private val neuCodec = NeuCodecOnnxEngine()
+    private val ioMutex = Mutex()
+    private val ggufRunnerLazy = lazy { VieNeuGgufRunner() }
+    private val neuCodecLazy = lazy { NeuCodecOnnxEngine() }
+    private val ggufRunner: VieNeuGgufRunner get() = ggufRunnerLazy.value
+    private val neuCodec: NeuCodecOnnxEngine get() = neuCodecLazy.value
 
     @Volatile
     var engineMode: OnnxVoiceEngineMode = OnnxVoiceEngineMode.UNINITIALIZED
@@ -84,71 +79,84 @@ class OfflineOnnxVoiceEngine(context: Context) {
     private val initErrors = LinkedHashMap<String, String>()
 
     suspend fun ensureInitialized(forceResync: Boolean = false): OnnxVoiceEngineMode =
-        withContext(workerDispatcher) {
-            if (!forceResync && engineMode != OnnxVoiceEngineMode.UNINITIALIZED) {
-                return@withContext engineMode
+        withContext(Dispatchers.IO) {
+            ioMutex.withLock {
+                if (!forceResync && engineMode != OnnxVoiceEngineMode.UNINITIALIZED) {
+                    return@withLock engineMode
+                }
+
+                try {
+                    if (forceResync) {
+                        if (ggufRunnerLazy.isInitialized()) ggufRunner.release()
+                        if (neuCodecLazy.isInitialized()) neuCodec.closeSessions()
+                        engineMode = OnnxVoiceEngineMode.UNINITIALIZED
+                    }
+
+                    initErrors.clear()
+                    lastInitError = null
+
+                    val discovered = OnnxModelAssetHelper.syncAssetsModelsToFilesDir(appContext)
+                    discoveredModels = discovered
+                    if (discovered.copyErrors.isNotEmpty()) {
+                        initErrors["assets_copy"] = discovered.copyErrors.joinToString("\n")
+                    }
+
+                    targetSampleRate = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE
+                    outputSampleRate = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE
+
+                    espeakG2p = VietnameseEspeakG2p.loadFromFile(discovered.espeakDictFile)
+                    presetVoices = OnnxModelAssetHelper.parseOfficialVoicesJson(discovered.voicesJsonFile)
+
+                    if (!discovered.hasAnyModel) {
+                        lastInitError = "Chưa tìm thấy model VieNeu-TTS GGUF hoặc NeuCodec ONNX trong assets/models/."
+                        engineMode = OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
+                        return@withLock engineMode
+                    }
+
+                    // 1. Initialize NeuCodec ONNX Encoder (optional) & Decoder (24kHz)
+                    neuCodec.initialize(
+                        encoderFile = discovered.codecEncoderFile,
+                        decoderFile = discovered.codecDecoderFile
+                    )
+                    neuCodec.loadErrors.forEach { (role, err) -> initErrors[role] = err }
+
+                    // 2. Initialize VieNeu-TTS GGUF Backbone via llama.cpp (safely wrapped in try-catch Throwable)
+                    val ggufOk = ggufRunner.loadModel(discovered.ggufBackboneFile)
+                    if (!ggufOk) {
+                        ggufRunner.lastLoadError?.let { initErrors["gguf_backbone"] = it }
+                    }
+
+                    if (initErrors.isNotEmpty()) {
+                        lastInitError = initErrors.entries.joinToString("\n") { "[${it.key}] ${it.value}" }
+                    }
+
+                    val ready = ggufRunner.isLoaded || neuCodec.hasEncoder || neuCodec.hasDecoder
+                    engineMode = if (ready) {
+                        OnnxVoiceEngineMode.ONNX_READY
+                    } else {
+                        OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
+                    }
+                    Log.i(
+                        TAG,
+                        "Lazy init done on IO: mode=$engineMode | gguf=${ggufRunner.isLoaded} | enc=${neuCodec.hasEncoder} | " +
+                            "dec=${neuCodec.hasDecoder} | g2p=${espeakG2p.entryCount} | presets=${presetVoices.size}"
+                    )
+                    engineMode
+                } catch (t: Throwable) {
+                    val fullErr = "Lỗi khởi tạo hệ thống AI Offline:\n${OnnxModelAssetHelper.formatFullThrowable(t)}"
+                    initErrors["init_fatal"] = fullErr
+                    lastInitError = fullErr
+                    engineMode = OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
+                    Log.e(TAG, fullErr, t)
+                    engineMode
+                }
             }
-
-            if (forceResync) {
-                ggufRunner.release()
-                neuCodec.closeSessions()
-                engineMode = OnnxVoiceEngineMode.UNINITIALIZED
-            }
-
-            initErrors.clear()
-            lastInitError = null
-
-            val discovered = OnnxModelAssetHelper.syncAssetsModelsToFilesDir(appContext)
-            discoveredModels = discovered
-            if (discovered.copyErrors.isNotEmpty()) {
-                initErrors["assets_copy"] = discovered.copyErrors.joinToString("\n")
-            }
-
-            targetSampleRate = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE
-            outputSampleRate = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE
-
-            espeakG2p = VietnameseEspeakG2p.loadFromFile(discovered.espeakDictFile)
-            presetVoices = OnnxModelAssetHelper.parseOfficialVoicesJson(discovered.voicesJsonFile)
-
-            if (!discovered.hasAnyModel) {
-                lastInitError = "Chưa tìm thấy model VieNeu-TTS GGUF hoặc NeuCodec ONNX trong assets/models/."
-                engineMode = OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
-                return@withContext engineMode
-            }
-
-            // 1. Initialize NeuCodec ONNX Encoder & Decoder
-            neuCodec.initialize(
-                encoderFile = discovered.codecEncoderFile,
-                decoderFile = discovered.codecDecoderFile
-            )
-            neuCodec.loadErrors.forEach { (role, err) -> initErrors[role] = err }
-
-            // 2. Initialize VieNeu-TTS GGUF Backbone via llama.cpp
-            val ggufOk = ggufRunner.loadModel(discovered.ggufBackboneFile)
-            if (!ggufOk) {
-                ggufRunner.lastLoadError?.let { initErrors["gguf_backbone"] = it }
-            }
-
-            if (initErrors.isNotEmpty()) {
-                lastInitError = initErrors.entries.joinToString("\n") { "[${it.key}] ${it.value}" }
-            }
-
-            val ready = ggufRunner.isLoaded || neuCodec.hasEncoder || neuCodec.hasDecoder
-            engineMode = if (ready) {
-                OnnxVoiceEngineMode.ONNX_READY
-            } else {
-                OnnxVoiceEngineMode.SAFE_TTS_FALLBACK
-            }
-            Log.i(
-                TAG,
-                "Init done: mode=$engineMode | gguf=${ggufRunner.isLoaded} | enc=${neuCodec.hasEncoder} | " +
-                    "dec=${neuCodec.hasDecoder} | g2p=${espeakG2p.entryCount} | presets=${presetVoices.size}"
-            )
-            engineMode
         }
 
     fun isFullOnnxSynthesisReady(): Boolean =
         engineMode == OnnxVoiceEngineMode.ONNX_READY &&
+            ggufRunnerLazy.isInitialized() &&
+            neuCodecLazy.isInitialized() &&
             ggufRunner.isLoaded &&
             neuCodec.hasDecoder
 
@@ -220,7 +228,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
     suspend fun extractSpeakerEmbedding(
         samples: FloatArray,
         sampleRate: Int
-    ): SpeakerEmbeddingResult = withContext(workerDispatcher) {
+    ): SpeakerEmbeddingResult = withContext(Dispatchers.IO) {
         ensureInitialized()
         if (samples.isEmpty()) {
             return@withContext SpeakerEmbeddingResult(
@@ -301,7 +309,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
         speed: Float = 1.0f,
         referenceCodes: IntArray? = null,
         referenceText: String? = null
-    ): OnnxSynthesisResult = withContext(workerDispatcher) {
+    ): OnnxSynthesisResult = withContext(Dispatchers.IO) {
         ensureInitialized()
 
         if (!ggufRunner.isLoaded) {
@@ -418,7 +426,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
     }
 
     suspend fun runFullSystemDiagnostics(forceResync: Boolean = false): AiSystemDiagnosticReport =
-        withContext(workerDispatcher) {
+        withContext(Dispatchers.IO) {
             ensureInitialized(forceResync = forceResync)
             val (assetsFiles, totalAssetsBytes) = OnnxModelAssetHelper.inspectAssetsModelsFiles(appContext)
             val (filesDirPath, filesDirFiles, totalFilesDirBytes) =
@@ -478,7 +486,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
     suspend fun runDiagnosticVoiceCreateTest(
         sampleFloat16k: FloatArray? = null,
         sampleRate: Int = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE
-    ): AiDiagnosticTestResult = withContext(workerDispatcher) {
+    ): AiDiagnosticTestResult = withContext(Dispatchers.IO) {
         val startMs = System.currentTimeMillis()
         try {
             ensureInitialized()
@@ -532,7 +540,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
         speakerEmbedding: FloatArray? = null,
         referenceCodes: IntArray? = null,
         referenceText: String? = null
-    ): Pair<AiDiagnosticTestResult, SynthesizedSentenceAudio?> = withContext(workerDispatcher) {
+    ): Pair<AiDiagnosticTestResult, SynthesizedSentenceAudio?> = withContext(Dispatchers.IO) {
         val startMs = System.currentTimeMillis()
         try {
             ensureInitialized()
@@ -589,12 +597,13 @@ class OfflineOnnxVoiceEngine(context: Context) {
     fun close() = release()
 
     fun release() {
-        ggufRunner.cancelActiveGeneration()
-        workerExecutor.execute {
-            ggufRunner.release()
-            neuCodec.closeSessions()
+        if (ggufRunnerLazy.isInitialized()) {
+            runCatching { ggufRunner.cancelActiveGeneration() }
+            runCatching { ggufRunner.release() }
         }
-        workerExecutor.shutdown()
+        if (neuCodecLazy.isInitialized()) {
+            runCatching { neuCodec.closeSessions() }
+        }
     }
 
     companion object {

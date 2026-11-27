@@ -64,6 +64,11 @@ android {
   androidResources {
     noCompress += listOf("gguf", "onnx", "bin", "data", "onnx_data", "json", "txt", "tsv", "ort", "npz")
   }
+  packaging {
+    jniLibs {
+      useLegacyPackaging = true
+    }
+  }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {
     includeInApk = false

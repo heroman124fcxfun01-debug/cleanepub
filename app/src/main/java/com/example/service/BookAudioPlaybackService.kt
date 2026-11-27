@@ -72,7 +72,8 @@ class BookAudioPlaybackService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var libraryManager: LibraryManager
     private lateinit var clonedVoiceRepo: ClonedVoiceRepository
-    private lateinit var onnxEngine: OfflineOnnxVoiceEngine
+    private val onnxEngineLazy = lazy { OfflineOnnxVoiceEngine(applicationContext) }
+    private val onnxEngine: OfflineOnnxVoiceEngine get() = onnxEngineLazy.value
     private val onnxPlayer = OnnxAudioTrackPlayer()
     private val ambientEngine = AmbientSoundEngine()
 
@@ -164,15 +165,12 @@ class BookAudioPlaybackService : Service() {
         super.onCreate()
         libraryManager = LibraryManager(applicationContext)
         clonedVoiceRepo = ClonedVoiceRepository(applicationContext)
-        onnxEngine = OfflineOnnxVoiceEngine(applicationContext)
         activePrefs = libraryManager.getReaderPreferences()
         activeClonedVoice = clonedVoiceRepo.findById(activePrefs.selectedClonedVoiceId)
         createNotificationChannel()
         initTtsEngine()
-        // Khởi nạp model ONNX / sea_g2p.bin trên luồng Worker ngầm (chế độ dự phòng an toàn nếu chưa có model)
-        serviceScope.launch {
-            onnxEngine.ensureInitialized()
-        }
+        // Không nạp model GGUF/ONNX ngay khi Service khởi động — chỉ nạp lười trên Dispatchers.IO
+        // khi người dùng thực sự bấm phát hoặc nghe thử giọng AI Nhân bản.
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -1493,7 +1491,9 @@ class BookAudioPlaybackService : Service() {
             ttsEngine?.shutdown()
         }
         ttsEngine = null
-        runCatching { onnxEngine.close() }
+        if (onnxEngineLazy.isInitialized()) {
+            runCatching { onnxEngine.close() }
+        }
         serviceScope.cancel()
         super.onDestroy()
     }

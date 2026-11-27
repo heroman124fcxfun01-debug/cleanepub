@@ -29,9 +29,12 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -78,6 +81,11 @@ import com.example.ui.screens.StudioScreen
 import com.example.ui.theme.EpubCleanAITheme
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
 const val ROUTE_HOME = "home"
 const val ROUTE_BOOK_LIBRARY = "book_library"
 const val ROUTE_BOOK_READER = "book_reader"
@@ -88,10 +96,14 @@ const val ROUTE_MANUAL_EDITOR = "manual_editor"
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Cài đặt trình bắt lỗi toàn cục ngay từ đầu để lưu stacktrace & hiển thị hộp thoại thay vì văng im lặng
+        CrashReportStore.installUncaughtExceptionHandler(applicationContext)
         super.onCreate(savedInstanceState)
 
-        // Initialize PDFBox-Android resource loader (100% on-device)
-        PDFBoxResourceLoader.init(applicationContext)
+        // Khởi tạo tài nguyên PDFBox bất đồng bộ trên Dispatchers.IO (không chặn Main Thread lúc mở app)
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching { PDFBoxResourceLoader.init(applicationContext) }
+        }
 
         // Request highest supported display refresh rate (90Hz/120Hz) for ultra-smooth transitions
         enableHighRefreshRate()
@@ -255,6 +267,16 @@ private fun EpubCleanNavHost(
     var showAiDiagnosticsDialog by remember { mutableStateOf(false) }
     var showReviewMetadataDialog by remember { mutableStateOf(false) }
     var coverPickerForReview by remember { mutableStateOf(false) }
+    var pendingCrashReport by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        val savedCrash = withContext(Dispatchers.IO) {
+            CrashReportStore.readPendingCrashReport(context)
+        }
+        if (!savedCrash.isNullOrBlank()) {
+            pendingCrashReport = savedCrash
+        }
+    }
 
     LaunchedEffect(activeMainTab) {
         if (activeMainTab == AppMainTab.BOOK_LIBRARY) {
@@ -1050,6 +1072,64 @@ private fun EpubCleanNavHost(
                 showReviewMetadataDialog = false
             },
             onDismiss = { showReviewMetadataDialog = false }
+        )
+    }
+
+    // Hộp thoại hiển thị chi tiết stacktrace nếu lần mở trước gặp lỗi chưa bắt được
+    val crashLogText = pendingCrashReport
+    if (!crashLogText.isNullOrBlank()) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = {
+                CrashReportStore.clearCrashReport(context)
+                pendingCrashReport = null
+            },
+            title = {
+                androidx.compose.material3.Text(
+                    text = "Chi tiết lỗi từ lần chạy trước",
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                )
+            },
+            text = {
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 360.dp)
+                            .padding(vertical = 4.dp)
+                            .verticalScroll(androidx.compose.foundation.rememberScrollState())
+                    ) {
+                        androidx.compose.material3.Text(
+                            text = crashLogText,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                            as? android.content.ClipboardManager
+                        cm?.setPrimaryClip(
+                            android.content.ClipData.newPlainText("Cleanbook Crash Log", crashLogText)
+                        )
+                        Toast.makeText(context, "Đã sao chép nhật ký lỗi.", Toast.LENGTH_SHORT).show()
+                    }
+                ) {
+                    androidx.compose.material3.Text("Sao chép log")
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        CrashReportStore.clearCrashReport(context)
+                        pendingCrashReport = null
+                    }
+                ) {
+                    androidx.compose.material3.Text("Đóng & xóa log")
+                }
+            }
         )
     }
 }

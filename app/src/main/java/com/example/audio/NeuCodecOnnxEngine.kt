@@ -50,6 +50,18 @@ class NeuCodecOnnxEngine {
         loadedSignatures.clear()
         loadErrors.clear()
 
+        // Safely pre-probe ONNX Runtime native libraries so missing .so never crashes the process
+        try {
+            System.loadLibrary("onnxruntime")
+            runCatching { System.loadLibrary("onnxruntime4j_jni") }
+        } catch (t: Throwable) {
+            val err = "Không thể nạp thư viện native libonnxruntime.so:\n${OnnxModelAssetHelper.formatFullThrowable(t)}"
+            ortEnvironmentStatus = "THIẾU THƯ VIỆN NATIVE ONNX"
+            loadErrors["OrtNativeLib"] = err
+            Log.e(TAG, err, t)
+            return
+        }
+
         val ortEnv = try {
             OrtEnvironment.getEnvironment().also {
                 ortEnvironmentStatus = "OK (OrtEnvironment sẵn sàng)"
@@ -63,9 +75,16 @@ class NeuCodecOnnxEngine {
         }
         env = ortEnv
 
-        val opts = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 4))
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
+        val opts = try {
+            OrtSession.SessionOptions().apply {
+                setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 4))
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
+            }
+        } catch (e: Throwable) {
+            val err = "OrtSession.SessionOptions thất bại:\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
+            loadErrors["OrtSessionOptions"] = err
+            Log.e(TAG, err, e)
+            return
         }
 
         encoderSession = loadSession(ortEnv, opts, "neucodec_encoder", encoderFile)

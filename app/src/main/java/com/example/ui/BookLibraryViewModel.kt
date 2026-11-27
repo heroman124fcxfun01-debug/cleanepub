@@ -119,7 +119,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
 
     private val libraryManager = LibraryManager(application.applicationContext)
     private val clonedVoiceRepository = ClonedVoiceRepository(application.applicationContext)
-    private val onnxVoiceEngine = OfflineOnnxVoiceEngine(application.applicationContext)
+    private val onnxVoiceEngineLazy = lazy { OfflineOnnxVoiceEngine(application.applicationContext) }
+    private val onnxVoiceEngine: OfflineOnnxVoiceEngine get() = onnxVoiceEngineLazy.value
 
     private val _books = MutableStateFlow<List<LibraryBook>>(emptyList())
     val books: StateFlow<List<LibraryBook>> = _books.asStateFlow()
@@ -179,7 +180,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     private var diagnosticAudioJob: Job? = null
 
     val voiceCloneTargetSampleRate: Int
-        get() = onnxVoiceEngine.targetSampleRate
+        get() = com.example.audio.NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE
 
     private val _readerState = MutableStateFlow(ActiveBookReaderState())
     val readerState: StateFlow<ActiveBookReaderState> = _readerState.asStateFlow()
@@ -189,11 +190,10 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     private var batchImportJob: Job? = null
 
     init {
+        // Chỉ nạp danh mục sách nhẹ trên Dispatchers.IO.
+        // Tuyệt đối KHÔNG giải nén hay nạp model AI (~300MB) lúc mở app — chỉ nạp lười khi người dùng
+        // bấm tạo giọng AI, phát sách nói AI hoặc mở hộp thoại Kiểm tra hệ thống AI.
         refreshLibrary()
-        viewModelScope.launch {
-            val mode = onnxVoiceEngine.ensureInitialized()
-            _voiceCloneEngineMode.value = mode
-        }
     }
 
     fun refreshLibrary() {
@@ -1434,7 +1434,9 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     override fun onCleared() {
         super.onCleared()
         stopAiDiagnosticAudio()
-        onnxVoiceEngine.close()
+        if (onnxVoiceEngineLazy.isInitialized()) {
+            runCatching { onnxVoiceEngine.close() }
+        }
     }
 
     private data class BookOpenBundle(

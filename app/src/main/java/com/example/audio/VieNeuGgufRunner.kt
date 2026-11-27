@@ -30,6 +30,7 @@ data class GgufGenerationResult(
 class VieNeuGgufRunner {
 
     private var llamaContext: LlamaContext? = null
+    private var activeModelPfd: ParcelFileDescriptor? = null
     private var loadedModelPath: String? = null
 
     @Volatile
@@ -47,6 +48,71 @@ class VieNeuGgufRunner {
     val isLoaded: Boolean
         get() = llamaContext != null
 
+    /**
+     * Safely probes native `llama.cpp` shared libraries inside `try-catch (Throwable)` BEFORE touching
+     * `LlamaContext` so a missing `.so` or unsupported 32-bit ABI never throws an uncaught
+     * `UnsatisfiedLinkError` / `ExceptionInInitializerError`.
+     */
+    private fun ensureLlamaNativeLibraryReady(): Boolean {
+        val supportedAbis = runCatching { android.os.Build.SUPPORTED_ABIS.toList() }.getOrDefault(emptyList())
+        val is64Bit = supportedAbis.any { it.equals("arm64-v8a", ignoreCase = true) || it.equals("x86_64", ignoreCase = true) }
+        if (!is64Bit) {
+            val msg = "Thiết bị 32-bit (${supportedAbis.joinToString()}) không hỗ trợ thư viện native llama.cpp 64-bit."
+            lastLoadError = msg
+            statusSummary = "KHÔNG HỖ TRỢ CPU"
+            Log.w(TAG, msg)
+            return false
+        }
+
+        // Probe native library load safely (try-catch Throwable)
+        val probeCandidates = if (supportedAbis.firstOrNull().equals("x86_64", ignoreCase = true)) {
+            listOf("rnllama_x86_64", "rnllama")
+        } else {
+            listOf(
+                "rnllama_v8_2_dotprod_i8mm",
+                "rnllama_v8_2_dotprod",
+                "rnllama_v8_2_i8mm",
+                "rnllama_v8_2",
+                "rnllama_v8",
+                "rnllama"
+            )
+        }
+
+        var anyLoaded = false
+        val probeErrors = mutableListOf<String>()
+        for (lib in probeCandidates) {
+            try {
+                System.loadLibrary(lib)
+                anyLoaded = true
+                Log.i(TAG, "Pre-loaded native library lib$lib.so successfully")
+                break
+            } catch (t: Throwable) {
+                probeErrors.add("lib$lib.so: ${t.javaClass.simpleName}: ${t.message}")
+            }
+        }
+
+        if (!anyLoaded) {
+            val msg = "Không thể nạp thư viện native llama.cpp (ABIs=${supportedAbis.joinToString()}):\n" +
+                probeErrors.joinToString("\n")
+            lastLoadError = msg
+            statusSummary = "THIẾU THƯ VIỆN NATIVE GGUF"
+            Log.e(TAG, msg)
+            return false
+        }
+
+        // Safely trigger LlamaContext class initialization inside try-catch(Throwable)
+        return try {
+            Class.forName("org.nehuatl.llamacpp.LlamaContext")
+            true
+        } catch (t: Throwable) {
+            val msg = "Khởi tạo lớp LlamaContext thất bại:\n${OnnxModelAssetHelper.formatFullThrowable(t)}"
+            lastLoadError = msg
+            statusSummary = "LỖI KHỞI TẠO NATIVE GGUF"
+            Log.e(TAG, msg, t)
+            false
+        }
+    }
+
     @Synchronized
     fun loadModel(ggufFile: File?): Boolean {
         release()
@@ -61,6 +127,10 @@ class VieNeuGgufRunner {
             }
             lastLoadError = msg
             statusSummary = "LỖI: $msg"
+            return false
+        }
+
+        if (!ensureLlamaNativeLibraryReady()) {
             return false
         }
 
@@ -82,6 +152,8 @@ class VieNeuGgufRunner {
             )
             val ctx = LlamaContext(1, params)
             llamaContext = ctx
+            // Keep ParcelFileDescriptor open for the lifetime of LlamaContext so mmap/fd never invalidates!
+            activeModelPfd = pfd
             loadedModelPath = ggufFile.absolutePath
 
             // Verify special tokens are recognized by the GGUF tokenizer
@@ -100,13 +172,12 @@ class VieNeuGgufRunner {
             Log.i(TAG, "Loaded GGUF backbone: $statusSummary | $specialTokenCheckSummary")
             true
         } catch (e: Throwable) {
+            runCatching { pfd?.close() }
             val fullErr = "LlamaContext(${ggufFile.name}) thất bại:\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
             lastLoadError = fullErr
             statusSummary = "LỖI NẠP GGUF"
             Log.e(TAG, fullErr, e)
             false
-        } finally {
-            runCatching { pfd?.close() }
         }
     }
 
@@ -256,6 +327,8 @@ class VieNeuGgufRunner {
         runCatching { llamaContext?.stopCompletion() }
         runCatching { llamaContext?.release() }
         llamaContext = null
+        runCatching { activeModelPfd?.close() }
+        activeModelPfd = null
         loadedModelPath = null
         statusSummary = "Đã giải phóng GGUF"
     }
