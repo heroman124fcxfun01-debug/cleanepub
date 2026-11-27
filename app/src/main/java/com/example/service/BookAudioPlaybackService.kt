@@ -101,6 +101,7 @@ class BookAudioPlaybackService : Service() {
     private var speakingSentenceText = ""
     private val utteranceSentenceMap = ConcurrentHashMap<String, Pair<Int, String>>()
     private var activeClonedVoice: ClonedVoiceProfile? = null
+    private var activePresetVoiceId: String? = null
     private var activeUsingOnnxVoice = false
     private var onnxStreamJob: Job? = null
 
@@ -595,30 +596,44 @@ class BookAudioPlaybackService : Service() {
 
         // =====================================================================
         // CHẾ ĐỘ AI NHÂN BẢN (TUYỆT ĐỐI TẮT HOÀN TOÀN GIỌNG HỆ THỐNG!)
+        // Hỗ trợ cả giọng mẫu chính thức trong voices.json (preset:<id>) lẫn giọng nhân bản người dùng tạo
         // =====================================================================
         if (isAiMode) {
             runCatching { ttsEngine?.stop() }
-            val selectedClone = clonedVoiceRepo.findById(activePrefs.selectedClonedVoiceId)
-                ?: clonedVoiceRepo.loadAll().firstOrNull()
-            activeClonedVoice = selectedClone
-
-            if (selectedClone == null) {
-                activeUsingOnnxVoice = false
-                isPlaying = false
-                lastPlaybackNotice = "Chế độ AI Nhân bản đang bật (giọng hệ thống đã tắt). Hãy tạo & lưu giọng AI trong Studio."
-                publishState()
-                syncAmbientPlayback()
-                return
+            val selectedId = activePrefs.selectedClonedVoiceId
+            val requestedPresetId = OnnxModelAssetHelper.extractPresetId(selectedId)
+            val selectedClone = if (requestedPresetId == null) {
+                clonedVoiceRepo.findById(selectedId)
+            } else {
+                null
             }
 
-            val clonedEmbedding = clonedVoiceRepo.loadEmbedding(selectedClone)
-            if (clonedEmbedding == null || clonedEmbedding.isEmpty()) {
-                activeUsingOnnxVoice = false
-                isPlaying = false
-                lastPlaybackNotice = "Không tìm thấy vector đặc trưng (.emb) của giọng \"${selectedClone.name}\". Hãy tạo lại trong Studio."
-                publishState()
-                syncAmbientPlayback()
-                return
+            activeClonedVoice = selectedClone
+            activePresetVoiceId = requestedPresetId
+
+            val clonedEmbedding: FloatArray
+            val clonedRefCodes: IntArray?
+            val resolvedRefText: String
+            val pitchRatio: Float
+            val displayVoiceName: String
+            val usePresetLookup: Boolean
+
+            if (selectedClone != null) {
+                val loadedEmb = clonedVoiceRepo.loadEmbedding(selectedClone)
+                clonedEmbedding = loadedEmb ?: FloatArray(0)
+                clonedRefCodes = clonedVoiceRepo.loadReferenceCodes(selectedClone)
+                resolvedRefText = selectedClone.referenceText
+                pitchRatio = selectedClone.estimatedPitchRatio.coerceIn(0.85f, 1.18f)
+                displayVoiceName = selectedClone.name
+                usePresetLookup = false
+            } else {
+                // Sử dụng giọng mẫu từ voices.json (đúng preset người dùng chọn hoặc default_voice)
+                clonedEmbedding = FloatArray(0)
+                clonedRefCodes = null
+                resolvedRefText = ""
+                pitchRatio = 1.0f
+                displayVoiceName = requestedPresetId?.let { "VieNeu $it" } ?: "VieNeu AI"
+                usePresetLookup = true
             }
 
             activeParagraphGeneration += 1L
@@ -627,7 +642,7 @@ class BookAudioPlaybackService : Service() {
             currentParagraphSentences = sentences
             speakingSentenceIndex = safeSentenceStart
             speakingSentenceText = sentences[safeSentenceStart]
-            activeSpeakerName = selectedClone.name
+            activeSpeakerName = displayVoiceName
             activeUsingOnnxVoice = true
             isPlaying = true
 
@@ -637,18 +652,18 @@ class BookAudioPlaybackService : Service() {
 
             ensureForegroundNotification(
                 title = activeBookTitle.ifBlank { "Đang đọc sách" },
-                subtitle = "${activeChapterTitle.ifBlank { "Chương ${activeChapterIndex + 1}" }} • ${selectedClone.name}",
+                subtitle = "${activeChapterTitle.ifBlank { "Chương ${activeChapterIndex + 1}" }} • $displayVoiceName",
                 playing = true
             )
 
-            val clonedRefCodes = clonedVoiceRepo.loadReferenceCodes(selectedClone)
-            val pitchRatio = if (selectedClone.usedOnnxEncoder) 1.0f else selectedClone.estimatedPitchRatio.coerceIn(0.85f, 1.18f)
             launchPipelinedOnnxSentences(
                 sentences = sentences,
                 startSentenceIndex = safeSentenceStart,
                 embedding = clonedEmbedding,
                 referenceCodes = clonedRefCodes,
-                referenceText = selectedClone.referenceText,
+                referenceText = resolvedRefText,
+                presetVoiceId = if (usePresetLookup) requestedPresetId else null,
+                usePresetFromVoicesJson = usePresetLookup,
                 pitchRatio = pitchRatio,
                 generation = generation
             )
@@ -719,6 +734,8 @@ class BookAudioPlaybackService : Service() {
         embedding: FloatArray,
         referenceCodes: IntArray?,
         referenceText: String,
+        presetVoiceId: String? = null,
+        usePresetFromVoicesJson: Boolean = false,
         pitchRatio: Float = 1.0f,
         generation: Long
     ) {
@@ -737,6 +754,36 @@ class BookAudioPlaybackService : Service() {
                 return@launch
             }
 
+            val resolvedEmb: FloatArray
+            val resolvedCodes: IntArray?
+            val resolvedRefText: String
+            if (usePresetFromVoicesJson) {
+                val preset = onnxEngine.findPresetVoiceById(presetVoiceId)
+                if (preset == null) {
+                    withContext(Dispatchers.Main) {
+                        if (isPlaying && generation == activeParagraphGeneration) {
+                            activeUsingOnnxVoice = false
+                            lastPlaybackNotice = "Không tìm thấy giọng mẫu hợp lệ trong voices.json."
+                            pausePlayback()
+                        }
+                    }
+                    return@launch
+                }
+                resolvedEmb = preset.voiceEmbedding ?: FloatArray(0)
+                resolvedCodes = preset.referenceCodes
+                resolvedRefText = preset.referenceText
+                withContext(Dispatchers.Main) {
+                    if (isPlaying && generation == activeParagraphGeneration) {
+                        activeSpeakerName = "VieNeu ${preset.id}"
+                        publishState()
+                    }
+                }
+            } else {
+                resolvedEmb = embedding
+                resolvedCodes = referenceCodes
+                resolvedRefText = referenceText
+            }
+
             val speed = (if (activePrefs.advancedCustomEnabled) {
                 activePrefs.customSpeechRate
             } else {
@@ -750,10 +797,10 @@ class BookAudioPlaybackService : Service() {
             var nextDeferred = async {
                 onnxEngine.synthesizeSentenceDetailed(
                     sentence = sentences[startSentenceIndex],
-                    speakerEmbedding = embedding,
+                    speakerEmbedding = resolvedEmb,
                     speed = speed,
-                    referenceCodes = referenceCodes,
-                    referenceText = referenceText
+                    referenceCodes = resolvedCodes,
+                    referenceText = resolvedRefText
                 )
             }
 
@@ -781,10 +828,10 @@ class BookAudioPlaybackService : Service() {
                     nextDeferred = async {
                         onnxEngine.synthesizeSentenceDetailed(
                             sentence = lookaheadSentence,
-                            speakerEmbedding = embedding,
+                            speakerEmbedding = resolvedEmb,
                             speed = speed,
-                            referenceCodes = referenceCodes,
-                            referenceText = referenceText
+                            referenceCodes = resolvedCodes,
+                            referenceText = resolvedRefText
                         )
                     }
                 }
@@ -1069,7 +1116,8 @@ class BookAudioPlaybackService : Service() {
     }
 
     /**
-     * Nghe thử giọng AI Nhân bản (dùng ONNX hoặc phát trực tiếp mẫu âm thanh gốc của giọng nhân bản qua AudioTrack).
+     * Nghe thử giọng AI (hỗ trợ cả giọng mẫu chính thức `preset:<id>` từ `voices.json` lẫn giọng nhân bản đã lưu).
+     * Chạy chuẩn pipeline VieNeu-TTS GGUF + NeuCodec ONNX 24kHz -> phát qua AudioTrack.
      * Tuyệt đối KHÔNG gọi giọng hệ thống Android TTS!
      */
     private fun previewClonedVoiceSample(voiceId: String?, previewTag: String?) {
@@ -1080,17 +1128,19 @@ class BookAudioPlaybackService : Service() {
         runCatching { ttsEngine?.stop() }
         lastPlaybackNotice = null
 
-        val targetVoice = clonedVoiceRepo.findById(voiceId)
-            ?: clonedVoiceRepo.findById(activePrefs.selectedClonedVoiceId)
-            ?: clonedVoiceRepo.loadAll().firstOrNull()
-
-        if (targetVoice == null) {
-            lastPlaybackNotice = "Chưa có giọng AI nhân bản nào để nghe thử."
-            publishState()
-            return
+        val effectiveId = voiceId ?: activePrefs.selectedClonedVoiceId
+        val requestedPresetId = OnnxModelAssetHelper.extractPresetId(effectiveId)
+        val targetClone = if (requestedPresetId == null) {
+            clonedVoiceRepo.findById(effectiveId)
+        } else {
+            null
         }
 
-        val tag = previewTag ?: "cloned_${targetVoice.id}"
+        val tag = previewTag ?: when {
+            requestedPresetId != null -> "preset_$requestedPresetId"
+            targetClone != null -> "cloned_${targetClone.id}"
+            else -> "preset_default"
+        }
         isPreviewingVoice = true
         activePreviewTag = tag
         publishState()
@@ -1098,23 +1148,50 @@ class BookAudioPlaybackService : Service() {
         previewAudioJob = serviceScope.launch {
             try {
                 onnxEngine.ensureInitialized()
-                val embedding = clonedVoiceRepo.loadEmbedding(targetVoice)
-                val refCodes = clonedVoiceRepo.loadReferenceCodes(targetVoice)
-                val synthResult = if (embedding != null && onnxEngine.isFullOnnxSynthesisReady()) {
-                    onnxEngine.synthesizeSentenceDetailed(
-                        sentence = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
-                        speakerEmbedding = embedding,
-                        speed = activePrefs.speechRate.coerceIn(0.8f, 1.5f),
-                        referenceCodes = refCodes,
-                        referenceText = targetVoice.referenceText
-                    )
-                } else {
-                    null
+                if (!onnxEngine.isFullOnnxSynthesisReady()) {
+                    val diag = onnxEngine.getReadinessDiagnostic()
+                    withContext(Dispatchers.Main) {
+                        lastPlaybackNotice = "Chưa nạp được VieNeu-TTS GGUF + NeuCodec: $diag"
+                        publishState()
+                    }
+                    return@launch
                 }
 
-                val synthesized = synthResult?.audio
+                val embedding: FloatArray
+                val refCodes: IntArray?
+                val refText: String
+                val pitchRatio: Float
+
+                if (targetClone != null) {
+                    embedding = clonedVoiceRepo.loadEmbedding(targetClone) ?: FloatArray(0)
+                    refCodes = clonedVoiceRepo.loadReferenceCodes(targetClone)
+                    refText = targetClone.referenceText
+                    pitchRatio = targetClone.estimatedPitchRatio.coerceIn(0.85f, 1.18f)
+                } else {
+                    val preset = onnxEngine.findPresetVoiceById(requestedPresetId)
+                    if (preset == null) {
+                        withContext(Dispatchers.Main) {
+                            lastPlaybackNotice = "Không tìm thấy giọng mẫu hợp lệ trong voices.json để nghe thử."
+                            publishState()
+                        }
+                        return@launch
+                    }
+                    embedding = preset.voiceEmbedding ?: FloatArray(0)
+                    refCodes = preset.referenceCodes
+                    refText = preset.referenceText
+                    pitchRatio = 1.0f
+                }
+
+                val synthResult = onnxEngine.synthesizeSentenceDetailed(
+                    sentence = OnnxModelAssetHelper.AI_VOICE_QUICK_PREVIEW_SENTENCE,
+                    speakerEmbedding = embedding,
+                    speed = activePrefs.speechRate.coerceIn(0.8f, 1.5f),
+                    referenceCodes = refCodes,
+                    referenceText = refText
+                )
+
+                val synthesized = synthResult.audio
                 if (synthesized != null) {
-                    val pitchRatio = if (targetVoice.usedOnnxEncoder) 1.0f else targetVoice.estimatedPitchRatio.coerceIn(0.85f, 1.18f)
                     onnxPlayer.playBlocking(
                         samples = synthesized.pcmFloat,
                         sampleRate = synthesized.sampleRate,
@@ -1122,30 +1199,10 @@ class BookAudioPlaybackService : Service() {
                         pitch = pitchRatio
                     )
                 } else {
-                    // Nếu tổng hợp ONNX báo lỗi chi tiết, hiển thị rõ lý do đồng thời phát bản WAV gốc chuẩn 44-byte
-                    val errDetail = synthResult?.errorMessage
-                    if (!errDetail.isNullOrBlank()) {
-                        withContext(Dispatchers.Main) {
-                            lastPlaybackNotice = "Lỗi tổng hợp ONNX nghe thử: $errDetail"
-                            publishState()
-                        }
-                    }
-                    val wavFile = clonedVoiceRepo.ensureReferenceWavFile(targetVoice)
-                    if (wavFile != null && onnxPlayer.playWavFileBlocking(wavFile)) {
-                        // Played crisp 16-bit PCM WAV via MediaPlayer
-                    } else {
-                        val refAudio = clonedVoiceRepo.loadReferenceAudio(targetVoice)
-                        if (refAudio != null && refAudio.isNotEmpty()) {
-                            onnxPlayer.playBlocking(
-                                samples = refAudio,
-                                sampleRate = targetVoice.sampleRate,
-                                speed = 1.0f
-                            )
-                        } else {
-                            withContext(Dispatchers.Main) {
-                                lastPlaybackNotice = "Không tìm thấy dữ liệu mẫu giọng của \"${targetVoice.name}\"."
-                            }
-                        }
+                    val errDetail = synthResult.errorMessage ?: "Không thể sinh sóng âm 24kHz từ GGUF + NeuCodec."
+                    withContext(Dispatchers.Main) {
+                        lastPlaybackNotice = "Lỗi tổng hợp VieNeu nghe thử: $errDetail"
+                        publishState()
                     }
                 }
             } finally {
@@ -1345,8 +1402,10 @@ class BookAudioPlaybackService : Service() {
                 activePreviewTag = activePreviewTag,
                 playbackNotice = lastPlaybackNotice,
                 activeSpeakerName = activeSpeakerName,
-                activeClonedVoiceId = activeClonedVoice?.id,
-                activeClonedVoiceName = activeClonedVoice?.name,
+                activeClonedVoiceId = activeClonedVoice?.id
+                    ?: activePresetVoiceId?.let { OnnxModelAssetHelper.presetStorageId(it) },
+                activeClonedVoiceName = activeClonedVoice?.name
+                    ?: activePresetVoiceId?.let { "VieNeu $it" },
                 isUsingOnnxVoice = activeUsingOnnxVoice,
                 speechRate = activeRate,
                 voiceProfile = activePrefs.voiceProfile,

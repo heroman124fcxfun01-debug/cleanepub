@@ -73,6 +73,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.audio.ClonedVoiceProfile
 import com.example.audio.ImportedVoiceSample
 import com.example.audio.OnnxVoiceEngineMode
+import com.example.audio.VieNeuPresetVoice
 import com.example.audio.VoiceSampleRecorder
 import com.example.service.BookAudioPlaybackService
 import com.example.ui.PendingDraftClonedVoice
@@ -94,6 +95,8 @@ import java.util.Locale
 fun StudioVoiceCloneSection(
     sectionEnabled: Boolean,
     clonedVoices: List<ClonedVoiceProfile>,
+    presetAiVoices: List<VieNeuPresetVoice> = emptyList(),
+    aiModelStatusBadge: String = "",
     selectedClonedVoiceId: String?,
     engineMode: OnnxVoiceEngineMode,
     targetSampleRate: Int,
@@ -109,6 +112,7 @@ fun StudioVoiceCloneSection(
     onSaveAllVoices: (onSaved: () -> Unit) -> Unit,
     onSelectClonedVoice: (String?) -> Unit,
     onTogglePreviewSavedVoice: (ClonedVoiceProfile) -> Unit,
+    onTogglePreviewPresetVoice: (VieNeuPresetVoice) -> Unit = {},
     onDeleteClonedVoice: (String) -> Unit
 ) {
     val context = LocalContext.current
@@ -208,7 +212,13 @@ fun StudioVoiceCloneSection(
     val isPreviewingDraftVoice = recState.isPlayingPreview && localPreviewTarget == "draft_voice"
     val hasCreatedDraft = draftClonedVoice != null
 
-    fun toggleLocalPreview(tag: String, samples: FloatArray, sampleRate: Int, wavPath: String? = null) {
+    fun toggleLocalPreview(
+        tag: String,
+        samples: FloatArray,
+        sampleRate: Int,
+        wavPath: String? = null,
+        pitchOverride: Float = 1.0f
+    ) {
         BookAudioPlaybackService.stopPreview(context)
         if (recState.isPlayingPreview && localPreviewTarget == tag) {
             recorder.stopPreview()
@@ -218,7 +228,8 @@ fun StudioVoiceCloneSection(
             recorder.togglePreviewRecordedSample(
                 samplesOverride = samples,
                 sampleRateOverride = sampleRate,
-                wavPathOverride = wavPath
+                wavPathOverride = wavPath,
+                pitchOverride = pitchOverride
             )
         }
     }
@@ -328,17 +339,42 @@ fun StudioVoiceCloneSection(
                             )
                         }
                     }
-                    Text(
-                        text = when {
+                    val resolvedStatusLine = aiModelStatusBadge.ifBlank {
+                        when {
                             !sectionEnabled -> "Đang khóa & thu gọn (chọn AI Nhân bản ở trên)"
-                            engineMode == OnnxVoiceEngineMode.ONNX_READY -> "VieNeu-TTS GGUF + NeuCodec 24kHz sẵn sàng"
-                            else -> "100% Offline • Chỉ đọc bằng giọng AI (đã tắt tiếng hệ thống)"
-                        },
-                        fontSize = 10.sp,
-                        color = secondaryInk,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                            engineMode == OnnxVoiceEngineMode.ONNX_READY -> "Model: OK | Voices: ${presetAiVoices.size}"
+                            else -> "Model: Chờ nạp | Voices: ${presetAiVoices.size}"
+                        }
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        val isModelOk = resolvedStatusLine.contains("Model: OK", ignoreCase = true)
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(
+                                    if (isModelOk) IosGreen.copy(alpha = 0.16f) else trayBg
+                                )
+                                .border(
+                                    width = 1.dp,
+                                    color = if (isModelOk) IosGreen else borderCol.copy(alpha = 0.5f),
+                                    shape = RoundedCornerShape(6.dp)
+                                )
+                                .padding(horizontal = 6.dp, vertical = 1.5.dp)
+                                .testTag("studio_ai_model_status_badge")
+                        ) {
+                            Text(
+                                text = resolvedStatusLine,
+                                fontSize = 9.5.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (isModelOk) IosGreen else secondaryInk,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                 }
             }
             NeoBrutalistPressBox(
@@ -474,7 +510,7 @@ fun StudioVoiceCloneSection(
                                     "Đang ghi (${remain}s)"
                                 }
                                 recState.isRecording -> "Dừng (${String.format(Locale.US, "%.1fs", recState.elapsedSeconds)})"
-                                else -> "Ghi âm (5–8s)"
+                                else -> "Ghi âm (3–12s)"
                             },
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
@@ -560,7 +596,7 @@ fun StudioVoiceCloneSection(
                     }
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = String.format(Locale.US, "%.1fs / 8.0s", recState.elapsedSeconds),
+                        text = String.format(Locale.US, "%.1fs / 12.0s", recState.elapsedSeconds),
                         fontSize = 10.5.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = IosRed
@@ -809,7 +845,12 @@ fun StudioVoiceCloneSection(
                             tag = "draft_voice",
                             samples = draft.samples,
                             sampleRate = draft.sampleRate,
-                            wavPath = draft.previewWavPath
+                            wavPath = draft.previewWavPath,
+                            pitchOverride = if (draft.synthesizedPreview) {
+                                draft.estimatedPitchRatio.coerceIn(0.85f, 1.18f)
+                            } else {
+                                1.0f
+                            }
                         )
                     },
                     enabled = draftCanPreview,
@@ -1022,12 +1063,116 @@ fun StudioVoiceCloneSection(
             }
         }
 
-        // 4. Danh sách giọng AI Nhân bản đã lưu (chọn dùng / nghe thử bật-tắt / xóa)
+        // 4. Danh sách giọng mẫu chính thức VieNeu-TTS từ voices.json (chọn dùng ngay / nghe thử bật-tắt)
+        if (presetAiVoices.isNotEmpty()) {
+            HorizontalDivider(thickness = 0.8.dp, color = borderCol.copy(alpha = 0.2f))
+
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "Giọng mẫu VieNeu-TTS sẵn có (${presetAiVoices.size})",
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = primaryInk
+                )
+
+                presetAiVoices.forEachIndexed { idx, preset ->
+                    val isSelected = selectedClonedVoiceId == preset.storageId ||
+                        (selectedClonedVoiceId == null && clonedVoices.isEmpty() && idx == 0)
+                    val presetPreviewTag = "studio_preset_${preset.id}"
+                    val isThisPreviewing = activeServicePreviewTag == presetPreviewTag
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(11.dp))
+                            .background(if (isSelected) IosBlue.copy(alpha = 0.13f) else trayBg)
+                            .border(
+                                width = if (isSelected) 1.5.dp else 1.dp,
+                                color = if (isSelected) IosBlue else borderCol,
+                                shape = RoundedCornerShape(11.dp)
+                            )
+                            .clickable(enabled = sectionEnabled) { onSelectClonedVoice(preset.storageId) }
+                            .padding(horizontal = 10.dp, vertical = 8.dp)
+                            .testTag("studio_preset_voice_item_${preset.id}"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isSelected) IosBlue else paperBg)
+                                    .border(1.dp, borderCol, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (isSelected) Icons.Rounded.Check else Icons.Rounded.GraphicEq,
+                                    contentDescription = null,
+                                    tint = if (isSelected) Color.White else IosBlue,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = preset.displayLabel,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSelected) IosBlue else primaryInk,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "${preset.referenceCodes.size} mã NeuCodec • voices.json${
+                                        if (isSelected) " • Đang chọn" else ""
+                                    }",
+                                    fontSize = 9.5.sp,
+                                    color = secondaryInk,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        NeoBrutalistPressBox(
+                            onClick = {
+                                recorder.stopPreview()
+                                onTogglePreviewPresetVoice(preset)
+                            },
+                            enabled = sectionEnabled,
+                            isCircle = true,
+                            shadowOffset = 2.dp,
+                            pressDepth = 1.5.dp,
+                            borderWidth = 1.2.dp,
+                            containerColor = if (isThisPreviewing) IosBlue else paperBg,
+                            borderColor = borderCol,
+                            shadowColor = if (sectionEnabled) shadowCol else Color.Transparent,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .testTag("studio_preset_voice_preview_${preset.id}")
+                        ) {
+                            Icon(
+                                imageVector = if (isThisPreviewing) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
+                                contentDescription = if (isThisPreviewing) "Dừng nghe thử ${preset.id}" else "Nghe thử ${preset.id}",
+                                tint = if (isThisPreviewing) Color.White else primaryInk,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Danh sách giọng AI Nhân bản đã lưu (chọn dùng / nghe thử bật-tắt / xóa)
         HorizontalDivider(thickness = 0.8.dp, color = borderCol.copy(alpha = 0.2f))
 
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
-                text = "Danh sách giọng AI đã lưu (${clonedVoices.size})",
+                text = "Danh sách giọng AI nhân bản của bạn (${clonedVoices.size})",
                 fontSize = 11.5.sp,
                 fontWeight = FontWeight.Bold,
                 color = primaryInk
@@ -1035,7 +1180,7 @@ fun StudioVoiceCloneSection(
 
             if (clonedVoices.isEmpty()) {
                 Text(
-                    text = "Chưa có giọng AI nào. Ghi âm hoặc Import giọng mẫu, bấm Tạo -> Nghe thử -> Lưu.",
+                    text = "Chưa có giọng nhân bản riêng. Bạn có thể chọn ngay giọng mẫu VieNeu-TTS ở trên, hoặc Ghi âm/Import rồi bấm Tạo -> Nghe thử -> Lưu.",
                     fontSize = 10.5.sp,
                     color = secondaryInk
                 )

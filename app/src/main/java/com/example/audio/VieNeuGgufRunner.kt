@@ -2,12 +2,15 @@ package com.example.audio
 
 import android.content.Context
 import android.os.Build
-import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.example.CrashReportStore
-import org.nehuatl.llamacpp.LlamaContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
+import org.codeshipping.llamakotlin.LlamaConfig
+import org.codeshipping.llamakotlin.LlamaModel
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class GgufGenerationResult(
     val speechCodes: IntArray = IntArray(0),
@@ -18,31 +21,34 @@ data class GgufGenerationResult(
 )
 
 /**
- * Official `pnnbao97/VieNeu-TTS` GGUF Backbone Inference Engine powered by `llama.cpp` (`LlamaContext`).
+ * Official `pnnbao97/VieNeu-TTS` GGUF Backbone Inference Engine powered by `llama.cpp`
+ * (`org.codeshipping:llama-kotlin-android` -> `libllama-android.so`, baseline ARMv8-A, 16KB aligned).
  *
- * Implements the exact NeuTTS / VieNeu-TTS prompt structure:
+ * Implements 100% parity with `scripts/test_tts_gguf.py`:
  * ```
  * user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} {target_phones}<|TEXT_PROMPT_END|>
  * assistant:<|SPEECH_GENERATION_START|>{ref_codes_str}
  * ```
- * where `{ref_codes_str}` is the concatenation of `<|speech_N|>` tokens extracted from the reference
- * voice sample by NeuCodec (or loaded from `voices.json`).
  *
- * Native safety guarantees:
- * - NEVER pre-loads an arbitrary `librnllama_v8_2_dotprod_i8mm.so` blindly (which causes fatal `SIGILL`
- *   on ARM64 CPUs without `i8mm` or double-JNI library conflicts with `LlamaContext.<clinit>`).
- * - Matches `LlamaContext.<clinit>`'s exact primary ABI + `/proc/cpuinfo` library selection, verifies
- *   the `.so` exists, and triggers `Class.forName("org.nehuatl.llamacpp.LlamaContext")` inside
- *   `try-catch (Throwable)` with native crash breadcrumbs.
- * - Disables re-entrant JNI token callbacks (`emit_partial_completion = false`) and lets native `stop`
- *   tokens terminate generation cleanly in C++.
+ * Native crash hardening for Samsung SM-S928U1 (Android 17, arm64-v8a):
+ * - Loads strictly via physical file path (`LlamaModel.load(ggufFile.absolutePath, config)`),
+ *   NEVER via `initContextWithFd` / `ParcelFileDescriptor`.
+ * - Disables `mmap` and `mlock` (`useMmap = false`, `useMlock = false`) to avoid SIGSEGV/SIGBUS
+ *   page faults on Android 16/17 16KB-page kernels.
+ * - Uses baseline `-march=armv8-a+fp+simd` (`GGML_NATIVE=OFF`) with lightweight `n_batch = 128`
+ *   and `n_ctx = 1024` (automatic fallback to `512` if RAM is tight).
+ * - Uses streaming generation (`LlamaModel.generateStream`) with `stopSequences` + immediate
+ *   `cancelGeneration()` the instant `<|SPEECH_GENERATION_END|>` (or EOG marker) is emitted.
  */
 class VieNeuGgufRunner(context: Context? = null) {
 
     private val appContext: Context? = context?.applicationContext
-    private var llamaContext: LlamaContext? = null
-    private var activeModelPfd: ParcelFileDescriptor? = null
+    @Volatile
+    private var loadedModel: LlamaModel? = null
     private var loadedModelPath: String? = null
+    private var activeContextSize: Int = PREFERRED_CONTEXT_SIZE
+    private var activeBatchSize: Int = DEFAULT_BATCH_SIZE
+    private var activeThreads: Int = 4
 
     @Volatile
     var statusSummary: String = "Chưa nạp model GGUF"
@@ -57,80 +63,33 @@ class VieNeuGgufRunner(context: Context? = null) {
         private set
 
     val isLoaded: Boolean
-        get() = llamaContext != null
+        get() = loadedModel?.let { runCatching { it.isLoaded }.getOrDefault(false) } == true
 
-    /**
-     * Resolves the EXACT single `librnllama*.so` name that `LlamaContext.<clinit>` will load based
-     * on `Build.SUPPORTED_ABIS[0]` and `/proc/cpuinfo` `Features`.
-     */
-    private fun resolveExpectedNativeLibName(): Pair<String?, String> {
-        val primaryAbi = runCatching { Build.SUPPORTED_ABIS.firstOrNull().orEmpty() }.getOrDefault("")
-        if (primaryAbi == "x86_64") {
-            return "rnllama_x86_64" to "ABI=x86_64"
-        }
-        if (primaryAbi != "arm64-v8a") {
-            return null to "ABI chính '$primaryAbi' (SUPPORTED_ABIS=${Build.SUPPORTED_ABIS.joinToString()}) không phải 64-bit arm64-v8a/x86_64"
-        }
-        val features = CrashReportStore.readCpuFeaturesLine()
-        val hasDotProd = features.contains("dotprod") || features.contains("asimddp")
-        val hasV82 = features.contains("asimd") && features.contains("crc32") && features.contains("aes")
-        val hasI8mm = features.contains("i8mm")
-        val libName = when {
-            hasV82 && hasDotProd && hasI8mm -> "rnllama_v8_2_dotprod_i8mm"
-            hasV82 && hasDotProd -> "rnllama_v8_2_dotprod"
-            hasV82 && hasI8mm -> "rnllama_v8_2_i8mm"
-            hasV82 -> "rnllama_v8_2"
-            else -> "rnllama_v8"
-        }
-        return libName to "ABI=arm64-v8a | lib=lib$libName.so | v82=$hasV82 dotprod=$hasDotProd i8mm=$hasI8mm"
-    }
-
-    /**
-     * Safely initializes `org.nehuatl.llamacpp.LlamaContext` (which loads the single matching
-     * `librnllama*.so` for this CPU) inside `try-catch (Throwable)`.
-     *
-     * CRITICAL: Do NOT pre-call `System.loadLibrary("rnllama_v8_2_dotprod_i8mm")` before
-     * `Class.forName` — loading a mismatched ISA variant causes immediate native `SIGILL` on
-     * ARM64 devices without `i8mm`!
-     */
     private fun ensureLlamaNativeLibraryReady(): Boolean {
-        val (expectedLib, cpuDesc) = resolveExpectedNativeLibName()
-        if (expectedLib == null) {
-            val msg = "Thiết bị không hỗ trợ thư viện native llama.cpp 64-bit ($cpuDesc)."
+        val supportedAbis = runCatching { Build.SUPPORTED_ABIS.toList() }.getOrDefault(emptyList())
+        val primaryAbi = supportedAbis.firstOrNull().orEmpty()
+        val has64BitAbi = supportedAbis.any { it == "arm64-v8a" || it == "x86_64" }
+        if (!has64BitAbi) {
+            val msg = "Thiết bị không hỗ trợ ABI 64-bit cho llama.cpp (SUPPORTED_ABIS=${supportedAbis.joinToString()})."
             lastLoadError = msg
             statusSummary = "KHÔNG HỖ TRỢ CPU"
             Log.w(TAG, msg)
             return false
         }
 
-        // Check whether the native library directory contains the expected .so (when extracted)
-        val nativeDir = runCatching { appContext?.applicationInfo?.nativeLibraryDir }.getOrNull()
-        if (!nativeDir.isNullOrBlank()) {
-            val expectedSo = File(nativeDir, "lib$expectedLib.so")
-            val dirEntries = runCatching { File(nativeDir).list()?.toList().orEmpty() }.getOrDefault(emptyList())
-            if (dirEntries.isNotEmpty() && !expectedSo.exists()) {
-                val msg = "Thiếu thư viện native lib$expectedLib.so trong $nativeDir ($cpuDesc).\n" +
-                    "Các file .so hiện có: ${dirEntries.joinToString(", ")}"
-                lastLoadError = msg
-                statusSummary = "THIẾU THƯ VIỆN NATIVE GGUF"
-                Log.e(TAG, msg)
-                return false
-            }
-        }
-
-        // Trigger LlamaContext.<clinit> once inside try-catch(Throwable) so ONLY the exact CPU-matched
-        // library is loaded into the process.
+        val cpuDesc = "primaryAbi=$primaryAbi | abis=${supportedAbis.joinToString()} | lib=libllama-android.so (baseline armv8-a)"
         CrashReportStore.markNativeOperationStart(
             context = appContext,
-            operation = "LlamaContext.<clinit> (nạp lib$expectedLib.so)",
+            operation = "LlamaModel.getVersion (libllama-android.so)",
             detail = cpuDesc
         )
         return try {
-            Class.forName("org.nehuatl.llamacpp.LlamaContext", true, javaClass.classLoader)
-            Log.i(TAG, "LlamaContext native library initialized cleanly ($cpuDesc)")
+            val ver = LlamaModel.getVersion().ifBlank { "llama.cpp" }
+            specialTokenCheckSummary = "libllama-android.so ($ver) • parse_special=true • use_mmap=false"
+            Log.i(TAG, "LlamaModel native ready: $ver ($cpuDesc)")
             true
         } catch (t: Throwable) {
-            val msg = "Khởi tạo thư viện native llama.cpp (lib$expectedLib.so) thất bại ($cpuDesc):\n" +
+            val msg = "Khởi tạo thư viện native libllama-android.so thất bại ($cpuDesc):\n" +
                 OnnxModelAssetHelper.formatFullThrowable(t)
             lastLoadError = msg
             statusSummary = "LỖI KHỞI TẠO NATIVE GGUF"
@@ -151,7 +110,7 @@ class VieNeuGgufRunner(context: Context? = null) {
             val msg = if (ggufFile == null) {
                 "Không tìm thấy file backbone .gguf trong assets/models/ hoặc filesDir/models/."
             } else {
-                "File GGUF không hợp lệ hoặc quá nhỏ: ${ggufFile.name} (${ggufFile.length()} bytes)"
+                "File GGUF không hợp lệ hoặc bị rỗng: ${ggufFile.name} (${ggufFile.length()} bytes tại ${ggufFile.absolutePath})"
             }
             lastLoadError = msg
             statusSummary = "LỖI: $msg"
@@ -162,58 +121,68 @@ class VieNeuGgufRunner(context: Context? = null) {
             return false
         }
 
-        var pfd: ParcelFileDescriptor? = null
         val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
-        CrashReportStore.markNativeOperationStart(
-            context = appContext,
-            operation = "LlamaContext.initContextWithFd (${ggufFile.name})",
-            detail = "size=${AiSystemDiagnosticReport.formatMb(ggufFile.length())}, n_ctx=$DEFAULT_CONTEXT_SIZE, n_batch=$DEFAULT_BATCH_SIZE, threads=$threads"
-        )
-        return try {
-            pfd = ParcelFileDescriptor.open(ggufFile, ParcelFileDescriptor.MODE_READ_ONLY)
-            val params = mapOf<String, Any>(
-                "model" to ggufFile.absolutePath,
-                "model_fd" to pfd.fd,
-                "embedding" to false,
-                "n_ctx" to DEFAULT_CONTEXT_SIZE,
-                "n_batch" to DEFAULT_BATCH_SIZE,
-                "n_threads" to threads,
-                "n_gpu_layers" to 0,
-                "use_mlock" to false,
-                "use_mmap" to true,
-                "vocab_only" to false
+        val candidateContexts = intArrayOf(PREFERRED_CONTEXT_SIZE, FALLBACK_CONTEXT_SIZE)
+        val loadFailures = mutableListOf<String>()
+
+        for (ctxSize in candidateContexts) {
+            CrashReportStore.markNativeOperationStart(
+                context = appContext,
+                operation = "LlamaModel.load (${ggufFile.name})",
+                detail = "path=${ggufFile.absolutePath}, size=${AiSystemDiagnosticReport.formatMb(ggufFile.length())}, " +
+                    "n_ctx=$ctxSize, n_batch=$DEFAULT_BATCH_SIZE, threads=$threads, use_mmap=false, use_mlock=false"
             )
-            val ctx = LlamaContext(1, params)
-            llamaContext = ctx
-            // Keep ParcelFileDescriptor open for the lifetime of LlamaContext so mmap/fd never invalidates!
-            activeModelPfd = pfd
-            loadedModelPath = ggufFile.absolutePath
+            try {
+                val cfg = LlamaConfig(
+                    contextSize = ctxSize,
+                    batchSize = DEFAULT_BATCH_SIZE,
+                    threads = threads,
+                    threadsBatch = threads,
+                    temperature = 0.8f,
+                    topP = 0.95f,
+                    topK = 50,
+                    repeatPenalty = 1.1f,
+                    frequencyPenalty = 0.0f,
+                    presencePenalty = 0.0f,
+                    maxTokens = 384,
+                    stopSequences = STOP_MARKERS,
+                    useMmap = false,
+                    useMlock = false,
+                    gpuLayers = 0,
+                    seed = -1
+                )
 
-            // Verify special tokens are recognized by the GGUF tokenizer
-            val probeTokens = runCatching {
-                ctx.tokenize("<|TEXT_PROMPT_START|><|SPEECH_GENERATION_START|><|speech_0|><|SPEECH_GENERATION_END|>")
-            }.getOrNull()
-            specialTokenCheckSummary = if (probeTokens != null) {
-                "probe4Specials -> ${probeTokens.size} tokens: ${probeTokens.take(8)}"
-            } else {
-                "probe failed"
+                val model = runBlocking {
+                    LlamaModel.load(ggufFile.absolutePath, cfg)
+                }
+                if (model.isLoaded) {
+                    loadedModel = model
+                    loadedModelPath = ggufFile.absolutePath
+                    activeContextSize = ctxSize
+                    activeBatchSize = DEFAULT_BATCH_SIZE
+                    activeThreads = threads
+                    statusSummary = "OK (${ggufFile.name} • ${AiSystemDiagnosticReport.formatMb(ggufFile.length())} • " +
+                        "n_ctx=$ctxSize • n_batch=$DEFAULT_BATCH_SIZE • threads=$threads • mmap=off)"
+                    Log.i(TAG, "Loaded GGUF backbone via file path: $statusSummary")
+                    return true
+                } else {
+                    loadFailures.add("n_ctx=$ctxSize: LlamaModel.load hoàn tất nhưng isLoaded() == false")
+                    runCatching { model.close() }
+                }
+            } catch (e: Throwable) {
+                loadFailures.add("n_ctx=$ctxSize: ${OnnxModelAssetHelper.formatFullThrowable(e)}")
+                Log.e(TAG, "LlamaModel.load failed at n_ctx=$ctxSize", e)
+            } finally {
+                CrashReportStore.clearNativeOperation(appContext)
             }
-
-            val details = runCatching { ctx.modelDetails }.getOrNull()
-            val desc = details?.get("desc")?.toString()?.takeIf { it.isNotBlank() } ?: ggufFile.name
-            statusSummary = "OK ($desc • ${AiSystemDiagnosticReport.formatMb(ggufFile.length())} • n_ctx=$DEFAULT_CONTEXT_SIZE • threads=$threads)"
-            Log.i(TAG, "Loaded GGUF backbone: $statusSummary | $specialTokenCheckSummary")
-            true
-        } catch (e: Throwable) {
-            runCatching { pfd?.close() }
-            val fullErr = "LlamaContext(${ggufFile.name}) thất bại:\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
-            lastLoadError = fullErr
-            statusSummary = "LỖI NẠP GGUF"
-            Log.e(TAG, fullErr, e)
-            false
-        } finally {
-            CrashReportStore.clearNativeOperation(appContext)
         }
+
+        val fullErr = "Không thể nạp file GGUF (${ggufFile.absolutePath}) qua LlamaModel.load:\n" +
+            loadFailures.joinToString("\n")
+        lastLoadError = fullErr
+        statusSummary = "LỖI NẠP GGUF"
+        Log.e(TAG, fullErr)
+        return false
     }
 
     @Synchronized
@@ -223,26 +192,35 @@ class VieNeuGgufRunner(context: Context? = null) {
         refCodes: IntArray,
         temperature: Double = 0.8,
         topK: Int = 50,
-        maxNewTokens: Int = 900
+        maxNewTokens: Int = 600
     ): GgufGenerationResult {
-        val ctx = llamaContext ?: return GgufGenerationResult(
-            errorMessage = lastLoadError ?: "Chưa nạp được model VieNeu-TTS GGUF."
-        )
+        val model = loadedModel
+        if (model == null || !isLoaded) {
+            return GgufGenerationResult(
+                errorMessage = lastLoadError ?: "Chưa nạp được model VieNeu-TTS GGUF."
+            )
+        }
         if (targetPhones.isBlank()) {
             return GgufGenerationResult(errorMessage = "Chuỗi âm vị mục tiêu trống.")
-        }
-
-        // Cap reference codes to leave ample room inside n_ctx=1536
-        val cappedRefCodes = if (refCodes.size > MAX_REF_CODES) {
-            refCodes.copyOfRange(0, MAX_REF_CODES)
-        } else {
-            refCodes
         }
 
         val combinedPhones = if (refPhones.isNotBlank()) {
             "$refPhones $targetPhones".trim()
         } else {
             targetPhones.trim()
+        }
+
+        // Guard against native wrapper's `safePromptLimit = min(n_ctx - maxTokens - 16, batchSize * 3)`:
+        // Keep prompt well inside `batchSize * 3` (384 tokens) AND leave generous room for speech generation.
+        val estTextTokens = (combinedPhones.length + 34).coerceAtLeast(48)
+        val maxPromptBudget = (activeBatchSize * 3 - 14).coerceAtMost(activeContextSize - 160)
+        val maxAllowedRefCodes = (maxPromptBudget - estTextTokens)
+            .coerceIn(48, if (activeContextSize <= 512) 180 else MAX_REF_CODES)
+
+        val cappedRefCodes = if (refCodes.size > maxAllowedRefCodes) {
+            refCodes.copyOfRange(0, maxAllowedRefCodes)
+        } else {
+            refCodes
         }
 
         val refCodesStr = buildString(cappedRefCodes.size * 14) {
@@ -253,60 +231,91 @@ class VieNeuGgufRunner(context: Context? = null) {
             }
         }
 
-        // Exact official pnnbao97/VieNeu-TTS & neuphonic/neutts-air prompt format
+        // Exact official pnnbao97/VieNeu-TTS & scripts/test_tts_gguf.py prompt format
         val prompt = "user: Convert the text to speech:<|TEXT_PROMPT_START|>$combinedPhones<|TEXT_PROMPT_END|>\n" +
             "assistant:<|SPEECH_GENERATION_START|>$refCodesStr"
 
-        val safeMaxTokens = maxNewTokens.coerceIn(96, 960)
-        val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        val estPromptTokens = estTextTokens + cappedRefCodes.size + 8
+        val availableGenRoom = (activeContextSize - estPromptTokens - 24).coerceIn(96, 680)
+        val safeMaxTokens = maxNewTokens.coerceIn(96, availableGenRoom)
         val startMs = System.currentTimeMillis()
+
+        val genCfg = LlamaConfig(
+            contextSize = activeContextSize,
+            batchSize = activeBatchSize,
+            threads = activeThreads,
+            threadsBatch = activeThreads,
+            temperature = temperature.toFloat().coerceIn(0.1f, 1.3f),
+            topP = 0.95f,
+            topK = topK.coerceIn(1, 200),
+            repeatPenalty = 1.1f,
+            frequencyPenalty = 0.0f,
+            presencePenalty = 0.0f,
+            maxTokens = safeMaxTokens,
+            stopSequences = STOP_MARKERS,
+            useMmap = false,
+            useMlock = false,
+            gpuLayers = 0,
+            seed = -1
+        )
 
         CrashReportStore.markNativeOperationStart(
             context = appContext,
-            operation = "LlamaContext.completion (sinh speech tokens)",
-            detail = "refCodes=${cappedRefCodes.size}, targetIpaLen=${targetPhones.length}, n_predict=$safeMaxTokens, threads=$threads"
+            operation = "LlamaModel.generateStream (sinh speech tokens)",
+            detail = "refCodes=${cappedRefCodes.size}, targetIpaLen=${targetPhones.length}, " +
+                "n_ctx=$activeContextSize, maxTokens=$safeMaxTokens, threads=$activeThreads"
         )
         return try {
-            // Keep emit_partial_completion=false to avoid per-token JNI callback overhead and
-            // unsafe re-entrant stopCompletion() calls from inside native C++ callbacks.
-            val params = mapOf<String, Any>(
-                "prompt" to prompt,
-                "temperature" to temperature.coerceIn(0.1, 1.3),
-                "top_k" to topK.coerceIn(1, 200),
-                "top_p" to 0.95,
-                "min_p" to 0.05,
-                "penalty_repeat" to 1.05,
-                "penalty_last_n" to 64,
-                "n_threads" to threads,
-                "n_predict" to safeMaxTokens,
-                "ignore_eos" to false,
-                "emit_partial_completion" to false,
-                "stop" to listOf(
-                    SPEECH_END_TOKEN,
-                    "<|im_end|>",
-                    "<|endoftext|>",
-                    "</s>"
-                )
-            )
+            val rawOut = StringBuilder(safeMaxTokens * 14)
+            val stopTriggered = AtomicBoolean(false)
+            var emittedPieces = 0
 
-            val resultMap = ctx.completion(params)
+            try {
+                runBlocking {
+                    model.generateStream(prompt, genCfg).collect { piece ->
+                        if (stopTriggered.get()) return@collect
+                        if (piece.isNotEmpty()) {
+                            rawOut.append(piece)
+                            emittedPieces++
+                            // Check recent tail for <|SPEECH_GENERATION_END|> or EOG markers
+                            val tailStart = (rawOut.length - 48).coerceAtLeast(0)
+                            val tail = rawOut.substring(tailStart)
+                            val hitStop = STOP_MARKERS.any { marker -> tail.contains(marker) }
+                            if (hitStop || emittedPieces >= safeMaxTokens) {
+                                if (stopTriggered.compareAndSet(false, true)) {
+                                    runCatching { model.cancelGeneration() }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (ce: CancellationException) {
+                if (!stopTriggered.get()) {
+                    throw ce
+                }
+            }
+
             val elapsed = System.currentTimeMillis() - startMs
+            val combinedRaw = rawOut.toString()
 
-            val combinedRaw = (resultMap["text"] as? String)
-                ?: (resultMap["content"] as? String)
-                ?: ""
-
-            // Cut cleanly at <|SPEECH_GENERATION_END|> if present
-            val endIdx = combinedRaw.indexOf(SPEECH_END_TOKEN)
-            val cleanSegment = if (endIdx >= 0) combinedRaw.substring(0, endIdx) else combinedRaw
-
+            // Cut cleanly at the earliest stop marker if present
+            var cutIdx = combinedRaw.length
+            for (marker in STOP_MARKERS) {
+                val idx = combinedRaw.indexOf(marker)
+                if (idx in 0 until cutIdx) {
+                    cutIdx = idx
+                }
+            }
+            val cleanSegment = combinedRaw.substring(0, cutIdx)
             val codes = extractSpeechIds(cleanSegment)
             val promptPreview = "refPhones='${refPhones.take(80)}' | targetPhones='${targetPhones.take(100)}' | refCodes=${cappedRefCodes.size}"
 
             if (codes.size < 4) {
-                val err = "GGUF sinh ra quá ít mã âm thanh (${codes.size} tokens trong ${elapsed}ms).\n" +
-                    "Prompt: $promptPreview\n" +
-                    "Raw output (${combinedRaw.length} chars): ${combinedRaw.take(280)}"
+                val err = buildString {
+                    appendLine("GGUF sinh ra quá ít mã âm thanh (${codes.size} tokens trong ${elapsed}ms).")
+                    appendLine("Prompt: $promptPreview")
+                    append("Raw output (${combinedRaw.length} chars): ${combinedRaw.take(280)}")
+                }
                 Log.w(TAG, err)
                 GgufGenerationResult(
                     speechCodes = codes,
@@ -336,7 +345,7 @@ class VieNeuGgufRunner(context: Context? = null) {
             }
         } catch (e: Throwable) {
             val elapsed = System.currentTimeMillis() - startMs
-            val err = "Lỗi suy luận LlamaContext.completion():\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
+            val err = "Lỗi suy luận LlamaModel.generateStream():\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
             Log.e(TAG, err, e)
             GgufGenerationResult(
                 elapsedMs = elapsed,
@@ -348,26 +357,36 @@ class VieNeuGgufRunner(context: Context? = null) {
     }
 
     fun cancelActiveGeneration() {
-        runCatching { llamaContext?.stopCompletion() }
+        loadedModel?.let { model ->
+            runCatching { model.cancelGeneration() }
+        }
     }
 
     @Synchronized
     fun release() {
-        runCatching { llamaContext?.stopCompletion() }
-        runCatching { llamaContext?.release() }
-        llamaContext = null
-        runCatching { activeModelPfd?.close() }
-        activeModelPfd = null
+        val model = loadedModel
+        loadedModel = null
+        if (model != null) {
+            runCatching { model.cancelGeneration() }
+            runCatching { model.close() }
+        }
         loadedModelPath = null
         statusSummary = "Đã giải phóng GGUF"
     }
 
     companion object {
         private const val TAG = "VieNeuGgufRunner"
-        private const val DEFAULT_CONTEXT_SIZE = 1536
-        private const val DEFAULT_BATCH_SIZE = 256
-        private const val MAX_REF_CODES = 450
+        private const val PREFERRED_CONTEXT_SIZE = 1024
+        private const val FALLBACK_CONTEXT_SIZE = 512
+        private const val DEFAULT_BATCH_SIZE = 128
+        private const val MAX_REF_CODES = 260
         const val SPEECH_END_TOKEN = "<|SPEECH_GENERATION_END|>"
+        private val STOP_MARKERS = listOf(
+            SPEECH_END_TOKEN,
+            "<|im_end|>",
+            "<|endoftext|>",
+            "</s>"
+        )
         private val SPEECH_TOKEN_REGEX = Regex("<\\|speech_(\\d+)\\|>")
 
         fun extractSpeechIds(text: String): IntArray {

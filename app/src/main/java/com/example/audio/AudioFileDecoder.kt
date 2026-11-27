@@ -39,7 +39,7 @@ data class ImportedVoiceSample(
 object AudioFileDecoder {
 
     const val SPEAKER_ENCODER_SAMPLE_RATE = 16_000
-    private const val MAX_DECODE_SECONDS = 8.0
+    private const val MAX_DECODE_SECONDS = 12.0
     private const val MIN_DECODE_SECONDS = 2.0
 
     private data class DecodedRawMono(

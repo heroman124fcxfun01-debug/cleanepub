@@ -221,6 +221,8 @@ private fun EpubCleanNavHost(
     val customAmbientTracks by libraryViewModel.customAmbientTracks.collectAsStateWithLifecycle()
     val isImportingAmbient by libraryViewModel.isImportingAmbient.collectAsStateWithLifecycle()
     val clonedVoices by libraryViewModel.clonedVoices.collectAsStateWithLifecycle()
+    val presetAiVoices by libraryViewModel.presetAiVoices.collectAsStateWithLifecycle()
+    val aiModelStatusBadge by libraryViewModel.aiModelStatusBadge.collectAsStateWithLifecycle()
     val voiceCloneEngineMode by libraryViewModel.voiceCloneEngineMode.collectAsStateWithLifecycle()
     val isExtractingVoiceClone by libraryViewModel.isExtractingVoiceClone.collectAsStateWithLifecycle()
     val isImportingVoiceFile by libraryViewModel.isImportingVoiceFile.collectAsStateWithLifecycle()
@@ -279,7 +281,7 @@ private fun EpubCleanNavHost(
     }
 
     LaunchedEffect(activeMainTab) {
-        if (activeMainTab == AppMainTab.BOOK_LIBRARY) {
+        if (activeMainTab == AppMainTab.BOOK_LIBRARY || activeMainTab == AppMainTab.STUDIO) {
             libraryViewModel.refreshLibrary()
         }
     }
@@ -696,6 +698,8 @@ private fun EpubCleanNavHost(
                             readerPrefs = bookReaderPrefs,
                             audioPlaybackState = audioPlaybackState,
                             clonedVoices = clonedVoices,
+                            presetAiVoices = presetAiVoices,
+                            aiModelStatusBadge = aiModelStatusBadge,
                             voiceCloneEngineMode = voiceCloneEngineMode,
                             voiceCloneTargetSampleRate = libraryViewModel.voiceCloneTargetSampleRate,
                             isExtractingVoiceClone = isExtractingVoiceClone,
@@ -791,6 +795,7 @@ private fun EpubCleanNavHost(
                 onSelectCustomAmbient = { id -> libraryViewModel.selectCustomAmbientTrack(id) },
                 onDeleteCustomAmbient = { id -> libraryViewModel.deleteCustomAmbientTrack(id) },
                 clonedVoices = clonedVoices,
+                presetAiVoices = presetAiVoices,
                 onSelectClonedVoice = { id -> libraryViewModel.selectClonedVoice(id) },
                 onOpenAiDiagnostics = {
                     showAiDiagnosticsDialog = true
@@ -1017,6 +1022,7 @@ private fun EpubCleanNavHost(
             onSelectTtsEngine = { engine -> libraryViewModel.selectTtsEngineType(engine) },
             onSelectNarratorVoice = { profile -> libraryViewModel.selectNarratorVoice(profile) },
             clonedVoices = clonedVoices,
+            presetAiVoices = presetAiVoices,
             onSelectClonedVoice = { id -> libraryViewModel.selectClonedVoice(id) },
             customAmbientTracks = customAmbientTracks,
             onImportCustomAmbientClick = { ambientImportLauncher.launch(arrayOf("audio/*")) },

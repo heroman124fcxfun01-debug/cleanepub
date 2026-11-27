@@ -79,6 +79,7 @@ import androidx.compose.ui.unit.sp
 import com.example.audio.AmbientSoundTrack
 import com.example.audio.ClonedVoiceProfile
 import com.example.audio.DetectedCharacter
+import com.example.audio.VieNeuPresetVoice
 import com.example.data.CustomAmbientTrack
 import com.example.data.LibraryManager
 import com.example.data.ReaderPreferences
@@ -128,6 +129,7 @@ fun ReaderAudioSettingsSheetContent(
     onSelectCustomAmbient: (String) -> Unit = {},
     onDeleteCustomAmbient: (String) -> Unit = {},
     clonedVoices: List<ClonedVoiceProfile> = emptyList(),
+    presetAiVoices: List<VieNeuPresetVoice> = emptyList(),
     onSelectClonedVoice: (String?) -> Unit = {},
     onOpenAiDiagnostics: () -> Unit = {},
     onClose: () -> Unit
@@ -136,8 +138,19 @@ fun ReaderAudioSettingsSheetContent(
     val isAiMode = readerPrefs.ttsEngineType == TtsEngineType.AI_TTS
     val activeClonedVoice = remember(readerPrefs.selectedClonedVoiceId, clonedVoices) {
         clonedVoices.firstOrNull { it.id == readerPrefs.selectedClonedVoiceId }
-            ?: clonedVoices.firstOrNull()
     }
+    val activePresetVoice = remember(readerPrefs.selectedClonedVoiceId, presetAiVoices, activeClonedVoice, clonedVoices) {
+        presetAiVoices.firstOrNull { it.storageId == readerPrefs.selectedClonedVoiceId }
+            ?: if (activeClonedVoice == null && clonedVoices.isEmpty()) presetAiVoices.firstOrNull() else null
+    }
+    val effectiveAiVoiceId = activeClonedVoice?.id
+        ?: activePresetVoice?.storageId
+        ?: clonedVoices.firstOrNull()?.id
+        ?: presetAiVoices.firstOrNull()?.storageId
+    val effectiveAiVoiceLabel = activeClonedVoice?.name
+        ?: activePresetVoice?.displayLabel
+        ?: clonedVoices.firstOrNull()?.name
+        ?: presetAiVoices.firstOrNull()?.displayLabel
 
     // Draft character -> voice map while the scanned character picker is open
     val draftCharVoices = remember { mutableStateMapOf<String, ReaderVoiceProfile?>() }
@@ -313,8 +326,8 @@ fun ReaderAudioSettingsSheetContent(
                             ) {
                                 Text(
                                     text = if (isAiMode) {
-                                        activeClonedVoice?.let { "✦ ${it.name}" }
-                                            ?: "Chưa có giọng AI (tạo ở Studio)"
+                                        effectiveAiVoiceLabel?.let { "✦ $it" }
+                                            ?: "Chưa có giọng AI (kiểm tra Studio)"
                                     } else {
                                         readerPrefs.voiceProfile.displayName
                                     },
@@ -340,11 +353,11 @@ fun ReaderAudioSettingsSheetContent(
                             containerColor = itemBg
                         ) {
                             if (isAiMode) {
-                                if (clonedVoices.isEmpty()) {
+                                if (clonedVoices.isEmpty() && presetAiVoices.isEmpty()) {
                                     DropdownMenuItem(
                                         text = {
                                             Text(
-                                                text = "Chưa có giọng nhân bản — Tạo & lưu trong Studio",
+                                                text = "Chưa có giọng AI — Kiểm tra voices.json hoặc tạo ở Studio",
                                                 fontSize = 11.5.sp,
                                                 color = secondaryInk
                                             )
@@ -353,7 +366,7 @@ fun ReaderAudioSettingsSheetContent(
                                     )
                                 } else {
                                     clonedVoices.forEach { cloned ->
-                                        val selected = activeClonedVoice?.id == cloned.id
+                                        val selected = effectiveAiVoiceId == cloned.id
                                         DropdownMenuItem(
                                             text = {
                                                 Row(
@@ -384,6 +397,42 @@ fun ReaderAudioSettingsSheetContent(
                                             },
                                             onClick = {
                                                 onSelectClonedVoice(cloned.id)
+                                                narratorDropdownExpanded = false
+                                            }
+                                        )
+                                    }
+                                    presetAiVoices.forEach { preset ->
+                                        val selected = effectiveAiVoiceId == preset.storageId
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(7.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.GraphicEq,
+                                                        contentDescription = null,
+                                                        tint = IosBlue,
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
+                                                    Text(
+                                                        text = preset.displayLabel,
+                                                        fontSize = 12.sp,
+                                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                                        color = if (selected) IosBlue else primaryInk
+                                                    )
+                                                    if (selected) {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.Check,
+                                                            contentDescription = null,
+                                                            tint = IosBlue,
+                                                            modifier = Modifier.size(14.dp)
+                                                        )
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                onSelectClonedVoice(preset.storageId)
                                                 narratorDropdownExpanded = false
                                             }
                                         )
@@ -427,11 +476,11 @@ fun ReaderAudioSettingsSheetContent(
                     // Nút nghe thử dạng công tắc (bấm lần 1 phát, bấm lần 2 tắt ngay)
                     val narratorPreviewTag = if (isAiMode) "reader_narrator_ai" else "reader_narrator_sys"
                     val isPreviewingNarrator = activePreviewTag == narratorPreviewTag
-                    val canPreviewNarrator = !isAiMode || activeClonedVoice != null
+                    val canPreviewNarrator = !isAiMode || effectiveAiVoiceId != null
                     NeoBrutalistPressBox(
                         onClick = {
                             if (isAiMode) {
-                                onPreviewClonedVoice(activeClonedVoice?.id)
+                                onPreviewClonedVoice(effectiveAiVoiceId)
                             } else {
                                 val pitch = readerPrefs.resolvePlaybackPitch(readerPrefs.voiceProfile)
                                 onPreviewVoice(readerPrefs.voiceProfile, pitch)

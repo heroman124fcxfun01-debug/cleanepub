@@ -78,6 +78,7 @@ import com.example.audio.AmbientSoundTrack
 import com.example.audio.ClonedVoiceProfile
 import com.example.audio.ImportedVoiceSample
 import com.example.audio.OnnxVoiceEngineMode
+import com.example.audio.VieNeuPresetVoice
 import com.example.data.CustomAmbientTrack
 import com.example.data.LibraryManager
 import com.example.data.ReaderPreferences
@@ -114,6 +115,8 @@ fun StudioScreen(
     readerPrefs: ReaderPreferences,
     audioPlaybackState: BookAudioPlaybackState,
     clonedVoices: List<ClonedVoiceProfile>,
+    presetAiVoices: List<VieNeuPresetVoice> = emptyList(),
+    aiModelStatusBadge: String = "",
     voiceCloneEngineMode: OnnxVoiceEngineMode,
     voiceCloneTargetSampleRate: Int,
     isExtractingVoiceClone: Boolean,
@@ -666,6 +669,8 @@ fun StudioScreen(
             StudioVoiceCloneSection(
                 sectionEnabled = isAiMode,
                 clonedVoices = clonedVoices,
+                presetAiVoices = presetAiVoices,
+                aiModelStatusBadge = aiModelStatusBadge,
                 selectedClonedVoiceId = readerPrefs.selectedClonedVoiceId,
                 engineMode = voiceCloneEngineMode,
                 targetSampleRate = voiceCloneTargetSampleRate,
@@ -685,6 +690,13 @@ fun StudioScreen(
                         context = context,
                         voiceId = voice.id,
                         previewTag = "studio_cloned_${voice.id}"
+                    )
+                },
+                onTogglePreviewPresetVoice = { preset ->
+                    BookAudioPlaybackService.previewClonedVoice(
+                        context = context,
+                        voiceId = preset.storageId,
+                        previewTag = "studio_preset_${preset.id}"
                     )
                 },
                 onDeleteClonedVoice = onDeleteClonedVoice

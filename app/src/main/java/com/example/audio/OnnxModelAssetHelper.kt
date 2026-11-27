@@ -19,7 +19,33 @@ data class VieNeuPresetVoice(
     val referenceText: String,
     val referenceCodes: IntArray,
     val voiceEmbedding: FloatArray? = null
-)
+) {
+    val storageId: String
+        get() = OnnxModelAssetHelper.presetStorageId(id)
+
+    val displayLabel: String
+        get() = if (description.isNotBlank() && !description.equals(id, ignoreCase = true)) {
+            "$id ($description)"
+        } else {
+            id
+        }
+}
+
+data class LightweightAiModelCatalog(
+    val hasGgufModel: Boolean,
+    val hasDecoderModel: Boolean,
+    val presetVoices: List<VieNeuPresetVoice>
+) {
+    val modelsPresent: Boolean
+        get() = hasGgufModel && hasDecoderModel
+
+    val statusBadgeText: String
+        get() = if (modelsPresent) {
+            "Model: OK | Voices: ${presetVoices.size}"
+        } else {
+            "Model: Thiếu | Voices: ${presetVoices.size}"
+        }
+}
 
 /**
  * Discovered official `pnnbao97/VieNeu-TTS` GGUF + NeuCodec ONNX files inside `context.filesDir/models/`.
@@ -157,6 +183,58 @@ object OnnxModelAssetHelper {
     private const val TAG = "VieNeuModelAssets"
     const val ASSETS_MODELS_DIR = "models"
     const val FILES_MODELS_DIR = "models"
+    const val PRESET_VOICE_ID_PREFIX = "preset:"
+
+    fun presetStorageId(presetId: String): String = "$PRESET_VOICE_ID_PREFIX$presetId"
+
+    fun extractPresetId(storageId: String?): String? =
+        storageId?.takeIf { it.startsWith(PRESET_VOICE_ID_PREFIX) }
+            ?.removePrefix(PRESET_VOICE_ID_PREFIX)
+            ?.takeIf { it.isNotBlank() }
+
+    /**
+     * Lightweight, fast IO-only inspection of `assets/models/` and `filesDir/models/` that reads
+     * `voices.json` and checks whether the `.gguf` backbone and NeuCodec `.onnx` decoder are present,
+     * WITHOUT unpacking the ~200MB `.gguf` file or loading any native libraries at app startup.
+     */
+    fun inspectLightweightAiCatalog(context: Context): LightweightAiModelCatalog {
+        val appCtx = context.applicationContext
+        val (assetEntries, _) = inspectAssetsModelsFiles(appCtx)
+        val (_, filesEntries, _) = inspectFilesDirModelsFiles(appCtx)
+        val allNames = (assetEntries.map { it.relativePath } + filesEntries.map { it.relativePath })
+            .map { it.lowercase(Locale.ROOT) }
+
+        val hasGguf = allNames.any { it.endsWith(".gguf") }
+        val hasDecoder = allNames.any { n ->
+            n.endsWith(".onnx") && (n.contains("dec") || n.contains("neucodec") || n.endsWith("/model.onnx") || n == "model.onnx")
+        }
+
+        val filesVoices = File(File(appCtx.filesDir, FILES_MODELS_DIR), "voices.json")
+        val presets = when {
+            filesVoices.exists() && filesVoices.length() > 16L -> parseOfficialVoicesJson(filesVoices)
+            else -> {
+                val assetVoiceRel = assetEntries.firstOrNull { entry ->
+                    val n = entry.relativePath.lowercase(Locale.ROOT)
+                    n == "voices.json" || n.endsWith("/voices.json") || (n.contains("voice") && n.endsWith(".json"))
+                }?.relativePath
+                if (assetVoiceRel != null) {
+                    runCatching {
+                        appCtx.assets.open("$ASSETS_MODELS_DIR/$assetVoiceRel").bufferedReader(Charsets.UTF_8).use {
+                            parseOfficialVoicesJsonString(it.readText())
+                        }
+                    }.getOrDefault(emptyList())
+                } else {
+                    emptyList()
+                }
+            }
+        }
+
+        return LightweightAiModelCatalog(
+            hasGgufModel = hasGguf,
+            hasDecoderModel = hasDecoder,
+            presetVoices = presets
+        )
+    }
 
     /**
      * Sample Vietnamese sentence used when running full AI diagnostics.
@@ -426,7 +504,14 @@ object OnnxModelAssetHelper {
     fun parseOfficialVoicesJson(voicesFile: File?): List<VieNeuPresetVoice> {
         if (voicesFile == null || !voicesFile.exists()) return emptyList()
         return runCatching {
-            val root = JSONObject(voicesFile.readText(Charsets.UTF_8))
+            parseOfficialVoicesJsonString(voicesFile.readText(Charsets.UTF_8))
+        }.getOrDefault(emptyList())
+    }
+
+    fun parseOfficialVoicesJsonString(rawJson: String): List<VieNeuPresetVoice> {
+        if (rawJson.isBlank()) return emptyList()
+        return runCatching {
+            val root = JSONObject(rawJson)
             val defaultVoiceId = root.optString("default_voice").trim()
             val presetsObj = root.optJSONObject("presets")
                 ?: root.optJSONObject("voices")

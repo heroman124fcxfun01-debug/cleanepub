@@ -208,6 +208,7 @@ fun BookReaderScreen(
     onSelectCustomAmbient: (String) -> Unit = {},
     onDeleteCustomAmbient: (String) -> Unit = {},
     clonedVoices: List<ClonedVoiceProfile> = emptyList(),
+    presetAiVoices: List<com.example.audio.VieNeuPresetVoice> = emptyList(),
     onSelectClonedVoice: (String?) -> Unit = {},
     onOpenAiDiagnostics: () -> Unit = {}
 ) {
@@ -257,9 +258,26 @@ fun BookReaderScreen(
     }
     val activeSpeakerName = if (isThisBookActiveInService) audioPlaybackState.activeSpeakerName else null
     val isAiVoiceMode = readerPrefs.ttsEngineType == TtsEngineType.AI_TTS
-    val activeClonedVoice = remember(readerPrefs.selectedClonedVoiceId, clonedVoices) {
-        clonedVoices.firstOrNull { it.id == readerPrefs.selectedClonedVoiceId }
-            ?: clonedVoices.firstOrNull()
+    val activeAiVoiceLabel = remember(readerPrefs.selectedClonedVoiceId, clonedVoices, presetAiVoices) {
+        val selectedId = readerPrefs.selectedClonedVoiceId
+        val presetId = com.example.audio.OnnxModelAssetHelper.extractPresetId(selectedId)
+        val matchedPreset = if (presetId != null) {
+            presetAiVoices.firstOrNull { it.id == presetId }
+        } else {
+            null
+        }
+        val matchedCloned = if (selectedId != null && presetId == null) {
+            clonedVoices.firstOrNull { it.id == selectedId }
+        } else {
+            null
+        }
+        when {
+            matchedCloned != null -> "✦ ${matchedCloned.name}"
+            matchedPreset != null -> "★ ${matchedPreset.displayLabel}"
+            clonedVoices.isNotEmpty() -> "✦ ${clonedVoices.first().name}"
+            presetAiVoices.isNotEmpty() -> "★ ${presetAiVoices.first().displayLabel}"
+            else -> "Chưa có AI"
+        }
     }
 
     val latestState by rememberUpdatedState(readerState)
@@ -1007,7 +1025,7 @@ fun BookReaderScreen(
                 isPlaying = isPlayingAudio,
                 speechRate = readerPrefs.speechRate,
                 voiceLabel = if (isAiVoiceMode) {
-                    activeClonedVoice?.let { "✦ ${it.name}" } ?: "Chưa có AI"
+                    activeAiVoiceLabel
                 } else {
                     activeSpeakerName ?: readerPrefs.voiceProfile.shortLabel
                 },
@@ -1240,6 +1258,7 @@ fun BookReaderScreen(
                     onSelectCustomAmbient = onSelectCustomAmbient,
                     onDeleteCustomAmbient = onDeleteCustomAmbient,
                     clonedVoices = clonedVoices,
+                    presetAiVoices = presetAiVoices,
                     onSelectClonedVoice = onSelectClonedVoice,
                     onOpenAiDiagnostics = {
                         BookAudioPlaybackService.stopPreview(context)

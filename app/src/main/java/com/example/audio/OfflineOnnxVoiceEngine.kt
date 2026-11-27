@@ -113,9 +113,9 @@ class OfflineOnnxVoiceEngine(context: Context) {
                         return@withLock engineMode
                     }
 
-                    // 1. Initialize NeuCodec ONNX Encoder (optional) & Decoder (24kHz)
+                    // 1. Initialize NeuCodec ONNX Decoder (24kHz) ONLY — never search/load non-existent neucodec_encoder.onnx
                     neuCodec.initialize(
-                        encoderFile = discovered.codecEncoderFile,
+                        encoderFile = null,
                         decoderFile = discovered.codecDecoderFile
                     )
                     neuCodec.loadErrors.forEach { (role, err) -> initErrors[role] = err }
@@ -162,6 +162,21 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
     fun getPresetVoices(): List<VieNeuPresetVoice> = presetVoices
 
+    fun findPresetVoiceById(presetId: String?): VieNeuPresetVoice? {
+        if (presetId.isNullOrBlank()) return presetVoices.firstOrNull { it.referenceCodes.size >= 8 }
+        return presetVoices.firstOrNull { it.id.equals(presetId, ignoreCase = true) && it.referenceCodes.size >= 8 }
+            ?: presetVoices.firstOrNull { it.referenceCodes.size >= 8 }
+    }
+
+    fun getStatusBadgeSummary(): String {
+        val voiceCount = presetVoices.size
+        return when {
+            isFullOnnxSynthesisReady() -> "Model: OK | Voices: $voiceCount"
+            engineMode == OnnxVoiceEngineMode.UNINITIALIZED -> "Model: Chờ nạp | Voices: $voiceCount"
+            else -> "Model: Lỗi | Voices: $voiceCount"
+        }
+    }
+
     fun getReadinessDiagnostic(): String {
         val d = discoveredModels
         if (d == null || !d.hasAnyModel) {
@@ -171,12 +186,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
         if (!ggufRunner.isLoaded) missing.add("chưa nạp được backbone .gguf (${ggufRunner.lastLoadError ?: "thiếu file .gguf"})")
         if (!neuCodec.hasDecoder) missing.add("chưa nạp được neucodec_decoder.onnx")
         return if (missing.isEmpty()) {
-            val voiceInfo = if (neuCodec.hasEncoder) {
-                "Encoder ONNX + ${presetVoices.size} giọng voices.json"
-            } else {
-                "${presetVoices.size} giọng mẫu voices.json + chỉnh cao độ"
-            }
-            "Sẵn sàng VieNeu-TTS GGUF + NeuCodec 24kHz ($voiceInfo)"
+            "Sẵn sàng VieNeu-TTS GGUF + NeuCodec 24kHz (${presetVoices.size} giọng mẫu voices.json + chỉnh cao độ)"
         } else {
             missing.joinToString(" | ")
         }
@@ -255,24 +265,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
         )
         val fingerprint = OnnxModelAssetHelper.computeAcousticFingerprint(samples16k)
 
-        if (neuCodec.hasEncoder) {
-            val encoded = neuCodec.encodeReferenceAudio(samples16k, NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE)
-            encoded.onSuccess { codes ->
-                return@withContext SpeakerEmbeddingResult(
-                    embedding = fingerprint,
-                    usedOnnxEncoder = true,
-                    estimatedPitchRatio = estimatedPitchRatio,
-                    referenceCodes = codes,
-                    matchedPresetId = null,
-                    matchedPresetRefText = null,
-                    errorMessage = null
-                )
-            }.onFailure { err ->
-                Log.w(TAG, "Optional neucodec_encoder.onnx failed; falling back to voices.json preset matching: ${err.message}")
-            }
-        }
-
-        // Standard pnnbao-ump mode: match user's acoustic profile to closest Vietnamese preset in voices.json
+        // Official pnnbao-ump offline cloning (no neucodec_encoder.onnx):
+        // Analyze F0 pitch_ratio & acoustic fingerprint -> auto-match closest preset in voices.json
         val matchedPreset = selectClosestPresetVoice(estimatedPitchRatio, fingerprint)
         if (matchedPreset != null) {
             return@withContext SpeakerEmbeddingResult(
@@ -286,8 +280,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
             )
         }
 
-        val loadErr = initErrors["neucodec_encoder"]
-            ?: "Không tìm thấy giọng mẫu hợp lệ trong voices.json và không có neucodec_encoder.onnx."
+        val loadErr = "Không tìm thấy giọng mẫu hợp lệ trong voices.json (filesDir/models/voices.json)."
         SpeakerEmbeddingResult(
             embedding = fingerprint,
             usedOnnxEncoder = false,
@@ -437,7 +430,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 "pipeline" to "Official pnnbao97/VieNeu-TTS (GGUF + NeuCodec ONNX 24kHz)",
                 "gguf_backbone" to (d?.ggufBackboneFile?.name ?: "(không tìm thấy *.gguf)"),
                 "neucodec_decoder" to (d?.codecDecoderFile?.name ?: "(không tìm thấy neucodec_decoder.onnx)"),
-                "neucodec_encoder" to (d?.codecEncoderFile?.name ?: "Tùy chọn (không đi kèm — ghép giọng mẫu voices.json + chỉnh cao độ)"),
+                "neucodec_encoder" to "Không sử dụng (khớp giọng nền voices.json + chỉnh cao độ F0)",
                 "espeak_g2p_dict" to (d?.espeakDictFile?.let { "${it.name} (${espeakG2p.entryCount} âm tiết)" }
                     ?: "Dùng luật dự phòng eSpeak-NG vi (${espeakG2p.entryCount} âm tiết)"),
                 "voices.json" to (d?.voicesJsonFile?.let { "${it.name} (${presetVoices.size} giọng mẫu)" }

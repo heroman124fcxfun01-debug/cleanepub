@@ -16,6 +16,7 @@ import com.example.audio.OfflineOnnxVoiceEngine
 import com.example.audio.OnnxAudioTrackPlayer
 import com.example.audio.OnnxModelAssetHelper
 import com.example.audio.OnnxVoiceEngineMode
+import com.example.audio.VieNeuPresetVoice
 import com.example.data.BookCollection
 import com.example.data.CustomAmbientTrack
 import com.example.data.CustomImportedFont
@@ -152,6 +153,12 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     private val _clonedVoices = MutableStateFlow<List<ClonedVoiceProfile>>(emptyList())
     val clonedVoices: StateFlow<List<ClonedVoiceProfile>> = _clonedVoices.asStateFlow()
 
+    private val _presetAiVoices = MutableStateFlow<List<VieNeuPresetVoice>>(emptyList())
+    val presetAiVoices: StateFlow<List<VieNeuPresetVoice>> = _presetAiVoices.asStateFlow()
+
+    private val _aiModelStatusBadge = MutableStateFlow("Model: Chờ kiểm tra | Voices: 0")
+    val aiModelStatusBadge: StateFlow<String> = _aiModelStatusBadge.asStateFlow()
+
     private val _voiceCloneEngineMode = MutableStateFlow(OnnxVoiceEngineMode.UNINITIALIZED)
     val voiceCloneEngineMode: StateFlow<OnnxVoiceEngineMode> = _voiceCloneEngineMode.asStateFlow()
 
@@ -203,11 +210,20 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
             val loadedFonts = libraryManager.loadCustomImportedFonts()
             val loadedCustomAmbient = libraryManager.loadCustomAmbientTracks()
             val loadedClones = clonedVoiceRepository.loadAll()
+            val catalog = OnnxModelAssetHelper.inspectLightweightAiCatalog(getApplication())
             _books.value = loadedBooks
             _collections.value = loadedCollections
             _customFonts.value = loadedFonts
             _customAmbientTracks.value = loadedCustomAmbient
             _clonedVoices.value = loadedClones
+            _presetAiVoices.value = catalog.presetVoices
+            _aiModelStatusBadge.value = if (onnxVoiceEngineLazy.isInitialized() &&
+                onnxVoiceEngine.engineMode != OnnxVoiceEngineMode.UNINITIALIZED
+            ) {
+                onnxVoiceEngine.getStatusBadgeSummary()
+            } else {
+                catalog.statusBadgeText
+            }
         }
     }
 
@@ -732,15 +748,15 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     fun cycleVoiceProfile() {
         val prefs = _readerPrefs.value
         if (prefs.ttsEngineType == TtsEngineType.AI_TTS) {
-            // Chế độ AI Nhân bản -> CHỈ chuyển qua lại trong danh sách giọng AI nhân bản
-            val clones = _clonedVoices.value
-            if (clones.isEmpty()) {
-                _statusMessage.value = "Chưa có giọng AI nhân bản. Hãy tạo và lưu trong Studio."
+            // Chế độ AI Nhân bản -> chuyển qua lại giữa giọng nhân bản đã lưu và các giọng mẫu trong voices.json
+            val allAiVoiceIds = _clonedVoices.value.map { it.id } + _presetAiVoices.value.map { it.storageId }
+            if (allAiVoiceIds.isEmpty()) {
+                _statusMessage.value = "Chưa có giọng AI. Hãy kiểm tra voices.json hoặc tạo giọng mới trong Studio."
                 return
             }
-            val idx = clones.indexOfFirst { it.id == prefs.selectedClonedVoiceId }
-            val next = clones[(idx + 1).coerceAtLeast(0) % clones.size]
-            selectClonedVoice(next.id)
+            val idx = allAiVoiceIds.indexOfFirst { it == prefs.selectedClonedVoiceId }
+            val nextId = allAiVoiceIds[(idx + 1).coerceAtLeast(0) % allAiVoiceIds.size]
+            selectClonedVoice(nextId)
             return
         }
         // Chế độ Hệ thống -> CHỈ chuyển qua lại trong danh sách giọng Hệ thống
@@ -756,7 +772,11 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun selectClonedVoice(voiceId: String?) {
-        val validId = voiceId?.takeIf { id -> _clonedVoices.value.any { it.id == id } }
+        val validId = voiceId?.takeIf { id ->
+            _clonedVoices.value.any { it.id == id } ||
+                _presetAiVoices.value.any { it.storageId == id } ||
+                OnnxModelAssetHelper.extractPresetId(id) != null
+        }
         val updated = _readerPrefs.value.copy(selectedClonedVoiceId = validId)
         _readerPrefs.value = updated
         libraryManager.saveReaderPreferences(updated)
@@ -821,25 +841,24 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     samples
                 }
                 val extracted = onnxVoiceEngine.extractSpeakerEmbedding(
-                    samples = samples,
-                    sampleRate = sampleRate
+                    samples = samples16k,
+                    sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
                 )
                 _voiceCloneEngineMode.value = onnxVoiceEngine.engineMode
+                _presetAiVoices.value = onnxVoiceEngine.getPresetVoices()
+                _aiModelStatusBadge.value = onnxVoiceEngine.getStatusBadgeSummary()
 
                 if (extracted.embedding.isEmpty() || (extracted.referenceCodes?.size ?: 0) < 8) {
                     val err = extracted.errorMessage
-                        ?: "Không tìm thấy giọng mẫu hợp lệ từ voices.json hoặc encoder ONNX."
+                        ?: "Không tìm thấy giọng mẫu hợp lệ từ voices.json."
                     _lastAiVerbatimError.value = err
                     _statusMessage.value = err.lineSequence().firstOrNull() ?: err
                     return@launch
                 }
 
-                // Quan trọng: Khi ghép giọng từ voices.json (không dùng encoder rời), phải dùng đúng
-                // lời thoại mẫu của preset đó để chuỗi âm vị đầu vào khớp 100% với referenceCodes của GGUF!
-                val effectiveRefText = if (extracted.usedOnnxEncoder) {
-                    userRefText.ifBlank { OnnxModelAssetHelper.SUGGESTED_RECORDING_SCRIPT }
-                } else {
-                    extracted.matchedPresetRefText?.takeIf { it.isNotBlank() } ?: userRefText
+                // Lưu lời thoại mẫu (ref_text) người dùng nhập; nếu bỏ trống thì tự lấy ref_text gốc của giọng nền trong voices.json
+                val effectiveRefText = userRefText.ifBlank {
+                    extracted.matchedPresetRefText.orEmpty()
                 }
 
                 val cleanName = name.trim().ifBlank {
@@ -941,6 +960,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 val report = onnxVoiceEngine.runFullSystemDiagnostics(forceResync = forceResync)
                 _aiDiagnosticReport.value = report
                 _voiceCloneEngineMode.value = report.engineMode
+                _presetAiVoices.value = onnxVoiceEngine.getPresetVoices()
+                _aiModelStatusBadge.value = onnxVoiceEngine.getStatusBadgeSummary()
             } catch (e: Throwable) {
                 _aiDiagnosticTestResult.value = AiDiagnosticTestResult(
                     title = "Quét hệ thống AI",
@@ -1024,17 +1045,23 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     if (draft != null) {
                         Triple(draft.embedding, draft.referenceCodes, draft.referenceText)
                     } else {
-                        val prof = _readerPrefs.value.selectedClonedVoiceId?.let { id ->
-                            clonedVoiceRepository.findById(id)
-                        }
-                        if (prof != null) {
-                            Triple(
-                                clonedVoiceRepository.loadEmbedding(prof),
-                                clonedVoiceRepository.loadReferenceCodes(prof),
-                                prof.referenceText
-                            )
+                        val selId = _readerPrefs.value.selectedClonedVoiceId
+                        val presetId = OnnxModelAssetHelper.extractPresetId(selId)
+                        if (presetId != null) {
+                            onnxVoiceEngine.ensureInitialized()
+                            val preset = onnxVoiceEngine.findPresetVoiceById(presetId)
+                            Triple(preset?.voiceEmbedding, preset?.referenceCodes, preset?.referenceText)
                         } else {
-                            Triple(null, null, null)
+                            val prof = selId?.let { id -> clonedVoiceRepository.findById(id) }
+                            if (prof != null) {
+                                Triple(
+                                    clonedVoiceRepository.loadEmbedding(prof),
+                                    clonedVoiceRepository.loadReferenceCodes(prof),
+                                    prof.referenceText
+                                )
+                            } else {
+                                Triple(null, null, null)
+                            }
                         }
                     }
                 }
@@ -1046,6 +1073,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 )
                 _aiDiagnosticTestResult.value = res
                 _aiDiagnosticReport.value = onnxVoiceEngine.runFullSystemDiagnostics(forceResync = false)
+                _presetAiVoices.value = onnxVoiceEngine.getPresetVoices()
+                _aiModelStatusBadge.value = onnxVoiceEngine.getStatusBadgeSummary()
 
                 if (audio != null) {
                     diagnosticAudioJob = viewModelScope.launch(Dispatchers.IO) {
@@ -1287,8 +1316,17 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
         BookAudioPlaybackService.stopPreview(getApplication())
         val current = _readerPrefs.value
         val resolvedCloneId = if (engineType == TtsEngineType.AI_TTS) {
-            current.selectedClonedVoiceId?.takeIf { id -> _clonedVoices.value.any { it.id == id } }
-                ?: _clonedVoices.value.firstOrNull()?.id
+            val existing = current.selectedClonedVoiceId
+            val isExistingValid = existing != null && (
+                _clonedVoices.value.any { it.id == existing } ||
+                    _presetAiVoices.value.any { it.storageId == existing }
+                )
+            when {
+                isExistingValid -> existing
+                _clonedVoices.value.isNotEmpty() -> _clonedVoices.value.first().id
+                _presetAiVoices.value.isNotEmpty() -> _presetAiVoices.value.first().storageId
+                else -> null
+            }
         } else {
             current.selectedClonedVoiceId
         }
@@ -1299,8 +1337,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
         _readerPrefs.value = updated
         libraryManager.saveReaderPreferences(updated)
         BookAudioPlaybackService.syncSettings(getApplication())
-        if (engineType == TtsEngineType.AI_TTS && _clonedVoices.value.isEmpty()) {
-            _statusMessage.value = "Đã chọn AI Nhân bản (tắt giọng hệ thống). Hãy tạo hoặc import giọng mẫu trong Studio."
+        if (engineType == TtsEngineType.AI_TTS && _clonedVoices.value.isEmpty() && _presetAiVoices.value.isEmpty()) {
+            _statusMessage.value = "Đã chọn AI Nhân bản (tắt giọng hệ thống). Hãy kiểm tra voices.json hoặc tạo giọng mẫu trong Studio."
         }
     }
 

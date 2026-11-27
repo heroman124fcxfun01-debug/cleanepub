@@ -8,6 +8,7 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaPlayer
 import android.media.MediaRecorder
+import android.media.PlaybackParams
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -62,7 +63,7 @@ class VoiceSampleRecorder(context: Context? = null) {
 
     companion object {
         const val MIN_DURATION_MS = 3_000L
-        const val MAX_DURATION_MS = 8_000L
+        const val MAX_DURATION_MS = 12_000L
         const val DEFAULT_TARGET_SAMPLE_RATE = 16_000
         const val HIGH_TARGET_SAMPLE_RATE = 24_000
         private val CAPTURE_CANDIDATE_RATES = intArrayOf(16_000, 24_000, 44_100, 48_000)
@@ -307,7 +308,8 @@ class VoiceSampleRecorder(context: Context? = null) {
     fun togglePreviewRecordedSample(
         samplesOverride: FloatArray? = null,
         sampleRateOverride: Int? = null,
-        wavPathOverride: String? = null
+        wavPathOverride: String? = null,
+        pitchOverride: Float = 1.0f
     ) {
         if (_uiState.value.isPlayingPreview) {
             stopPreview()
@@ -319,6 +321,7 @@ class VoiceSampleRecorder(context: Context? = null) {
 
         val samples = samplesOverride ?: _uiState.value.recordedSamples
         val rate = (sampleRateOverride ?: _uiState.value.sampleRate).coerceAtLeast(8_000)
+        val safePitch = pitchOverride.coerceIn(0.82f, 1.22f)
 
         if (resolvedWavPath == null && (samples == null || samples.isEmpty())) return
 
@@ -340,13 +343,13 @@ class VoiceSampleRecorder(context: Context? = null) {
                 }
 
                 if (wavFileToPlay != null && wavFileToPlay.exists() && wavFileToPlay.length() > 44L) {
-                    val playedWithMediaPlayer = playWavFileWithMediaPlayer(wavFileToPlay)
+                    val playedWithMediaPlayer = playWavFileWithMediaPlayer(wavFileToPlay, safePitch)
                     if (playedWithMediaPlayer) return@launch
                 }
 
                 // Fallback path: properly drained streaming AudioTrack (small ring buffer + playbackHeadPosition wait)
                 if (samples != null && samples.isNotEmpty()) {
-                    playFloatWithStreamingAudioTrack(samples, rate)
+                    playFloatWithStreamingAudioTrack(samples, rate, safePitch)
                 }
             } catch (ce: kotlinx.coroutines.CancellationException) {
                 throw ce
@@ -364,7 +367,7 @@ class VoiceSampleRecorder(context: Context? = null) {
         }
     }
 
-    private suspend fun playWavFileWithMediaPlayer(wavFile: File): Boolean {
+    private suspend fun playWavFileWithMediaPlayer(wavFile: File, pitch: Float = 1.0f): Boolean {
         val player = MediaPlayer()
         activeMediaPlayer = player
         return try {
@@ -376,6 +379,11 @@ class VoiceSampleRecorder(context: Context? = null) {
             )
             player.setDataSource(wavFile.absolutePath)
             player.prepare()
+            if (pitch != 1.0f) {
+                runCatching {
+                    player.playbackParams = PlaybackParams().setSpeed(1.0f).setPitch(pitch)
+                }
+            }
             var finished = false
             player.setOnCompletionListener { finished = true }
             player.setOnErrorListener { _, _, _ ->
@@ -405,7 +413,7 @@ class VoiceSampleRecorder(context: Context? = null) {
         }
     }
 
-    private suspend fun playFloatWithStreamingAudioTrack(samples: FloatArray, rate: Int) {
+    private suspend fun playFloatWithStreamingAudioTrack(samples: FloatArray, rate: Int, pitch: Float = 1.0f) {
         val pcm = floatToPcm16(samples)
         val minBuf = AudioTrack.getMinBufferSize(
             rate,
@@ -439,6 +447,12 @@ class VoiceSampleRecorder(context: Context? = null) {
         if (track == null || track.state != AudioTrack.STATE_INITIALIZED) {
             runCatching { track?.release() }
             return
+        }
+
+        if (pitch != 1.0f) {
+            runCatching {
+                track.playbackParams = PlaybackParams().setSpeed(1.0f).setPitch(pitch)
+            }
         }
 
         activePreviewTrack = track

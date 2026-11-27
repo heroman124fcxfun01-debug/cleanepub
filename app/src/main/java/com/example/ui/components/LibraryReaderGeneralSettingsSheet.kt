@@ -125,6 +125,7 @@ fun LibraryReaderGeneralSettingsSheet(
     onSelectTtsEngine: (TtsEngineType) -> Unit,
     onSelectNarratorVoice: (ReaderVoiceProfile) -> Unit,
     clonedVoices: List<com.example.audio.ClonedVoiceProfile> = emptyList(),
+    presetAiVoices: List<com.example.audio.VieNeuPresetVoice> = emptyList(),
     onSelectClonedVoice: (String?) -> Unit = {},
     customAmbientTracks: List<CustomAmbientTrack> = emptyList(),
     onImportCustomAmbientClick: () -> Unit = {},
@@ -290,6 +291,7 @@ fun LibraryReaderGeneralSettingsSheet(
                         AudioListeningDefaultsTab(
                             readerPrefs = readerPrefs,
                             clonedVoices = clonedVoices,
+                            presetAiVoices = presetAiVoices,
                             cardBg = cardBg,
                             itemBg = itemBg,
                             borderCol = borderCol,
@@ -854,6 +856,7 @@ private fun ReadingModeDefaultsTab(
 private fun AudioListeningDefaultsTab(
     readerPrefs: ReaderPreferences,
     clonedVoices: List<com.example.audio.ClonedVoiceProfile>,
+    presetAiVoices: List<com.example.audio.VieNeuPresetVoice>,
     cardBg: Color,
     itemBg: Color,
     borderCol: Color,
@@ -873,8 +876,28 @@ private fun AudioListeningDefaultsTab(
     var narratorExpanded by remember { mutableStateOf(false) }
     val isAiMode = readerPrefs.ttsEngineType == TtsEngineType.AI_TTS
     val activeCloned = remember(readerPrefs.selectedClonedVoiceId, clonedVoices) {
-        clonedVoices.firstOrNull { it.id == readerPrefs.selectedClonedVoiceId }
-            ?: clonedVoices.firstOrNull()
+        val selectedId = readerPrefs.selectedClonedVoiceId
+        if (selectedId != null && !selectedId.startsWith(com.example.audio.OnnxModelAssetHelper.PRESET_VOICE_ID_PREFIX)) {
+            clonedVoices.firstOrNull { it.id == selectedId }
+        } else {
+            null
+        }
+    }
+    val activePreset = remember(readerPrefs.selectedClonedVoiceId, presetAiVoices, activeCloned, clonedVoices) {
+        val selectedId = readerPrefs.selectedClonedVoiceId
+        val presetId = com.example.audio.OnnxModelAssetHelper.extractPresetId(selectedId)
+        when {
+            presetId != null -> presetAiVoices.firstOrNull { it.id == presetId }
+            activeCloned != null -> null
+            selectedId.isNullOrBlank() && clonedVoices.isNotEmpty() -> null
+            else -> presetAiVoices.firstOrNull()
+        }
+    }
+    val effectiveCloned = activeCloned ?: if (activePreset == null) clonedVoices.firstOrNull() else null
+    val activeAiLabel = when {
+        effectiveCloned != null -> "✦ ${effectiveCloned.name}"
+        activePreset != null -> "★ ${activePreset.displayLabel}"
+        else -> "Chưa có giọng AI (kiểm tra voices.json / Studio)"
     }
 
     // 1. Chọn bộ máy giọng đọc: TTS Hệ thống (hiện tại) hoặc TTS AI (sắp tích hợp)
@@ -1014,7 +1037,7 @@ private fun AudioListeningDefaultsTab(
                 ) {
                     Text(
                         text = if (isAiMode) {
-                            activeCloned?.let { "✦ ${it.name}" } ?: "Chưa có giọng AI (tạo ở Studio)"
+                            activeAiLabel
                         } else {
                             readerPrefs.voiceProfile.displayName
                         },
@@ -1037,7 +1060,7 @@ private fun AudioListeningDefaultsTab(
                 containerColor = cardBg
             ) {
                 if (isAiMode) {
-                    if (clonedVoices.isEmpty()) {
+                    if (clonedVoices.isEmpty() && presetAiVoices.isEmpty()) {
                         DropdownMenuItem(
                             text = {
                                 Text(
@@ -1050,7 +1073,7 @@ private fun AudioListeningDefaultsTab(
                         )
                     } else {
                         clonedVoices.forEach { cloned ->
-                            val selected = activeCloned?.id == cloned.id
+                            val selected = effectiveCloned?.id == cloned.id
                             DropdownMenuItem(
                                 text = {
                                     Row(
@@ -1075,6 +1098,36 @@ private fun AudioListeningDefaultsTab(
                                 },
                                 onClick = {
                                     onSelectClonedVoice(cloned.id)
+                                    narratorExpanded = false
+                                }
+                            )
+                        }
+                        presetAiVoices.forEach { preset ->
+                            val selected = activePreset?.id == preset.id
+                            DropdownMenuItem(
+                                text = {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "★ ${preset.displayLabel}",
+                                            fontSize = 12.sp,
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (selected) accentBlue else primaryInk
+                                        )
+                                        if (selected) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Check,
+                                                contentDescription = null,
+                                                tint = accentBlue,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    onSelectClonedVoice(preset.storageId)
                                     narratorExpanded = false
                                 }
                             )
