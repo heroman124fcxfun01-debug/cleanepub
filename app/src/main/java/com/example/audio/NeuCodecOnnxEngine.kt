@@ -21,7 +21,7 @@ import kotlin.math.abs
  *    - Produces discrete 50 Hz FSQ speech token IDs (`IntArray`, values in `0..65535`).
  *    - Used when the user records or imports a voice sample to clone their voice 100% offline.
  *
- * 2. **Decoder (`neucodec_decoder.onnx` / `neuphonic/neucodec-onnx-decoder-int8`)**:
+ * 2. **Decoder (`neucodec_decoder.onnx` / `pnnbao-ump/neucodec-onnx-decoder-int8`)**:
  *    - Consumes discrete FSQ speech token IDs (`[1, 1, F]` or `[1, F]`, `INT32` or `INT64`).
  *    - Reconstructs crystal-clear 24,000 Hz Mono Float32 PCM speech waveforms (`[1, 1, T_24k]`).
  */
