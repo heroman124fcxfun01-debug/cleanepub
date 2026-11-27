@@ -80,8 +80,8 @@ class NeuCodecOnnxEngine(context: Context? = null) {
 
         val opts = try {
             OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(1, 2))
-                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
+                setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 4))
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
             }
         } catch (e: Throwable) {
             val err = "OrtSession.SessionOptions thất bại:\n${OnnxModelAssetHelper.formatFullThrowable(e)}"

@@ -96,13 +96,13 @@ class OnnxAudioTrackPlayer {
             if (!stopped && currentCoroutineContext().isActive) {
                 val totalFrames = pcm16.size
                 val expectedRemainingMs = ((streamBufBytes / 2L) * 1000L / (sampleRate * clampedSpeed)).toLong()
-                    .coerceIn(150L, 1200L)
-                val deadline = System.currentTimeMillis() + expectedRemainingMs + 450L
+                    .coerceIn(80L, 650L)
+                val deadline = System.currentTimeMillis() + expectedRemainingMs + 180L
                 while (currentCoroutineContext().isActive && !stopped &&
                     track.playbackHeadPosition < totalFrames &&
                     System.currentTimeMillis() < deadline
                 ) {
-                    delay(20L)
+                    delay(10L)
                 }
                 !stopped && currentCoroutineContext().isActive
             } else {

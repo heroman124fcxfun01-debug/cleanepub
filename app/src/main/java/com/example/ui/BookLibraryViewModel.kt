@@ -83,6 +83,8 @@ data class PendingDraftClonedVoice(
     val referenceText: String = "",
     val usedOnnxEncoder: Boolean,
     val estimatedPitchRatio: Float,
+    val timbreSettings: com.example.audio.VoiceTimbreSettings = com.example.audio.VoiceTimbreSettings(pitchRatio = estimatedPitchRatio),
+    val acousticSummary: String = "",
     val previewWavPath: String? = null,
     val synthesizedPreview: Boolean = false
 )
@@ -856,8 +858,11 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     return@launch
                 }
 
-                // Lưu lời thoại mẫu (ref_text) người dùng nhập; nếu bỏ trống thì tự lấy ref_text gốc của giọng nền trong voices.json
-                val effectiveRefText = userRefText.ifBlank {
+                // BẮT BUỘC đồng bộ 1-1: khi dùng mã giọng nền từ voices.json (không có encoder rời),
+                // ref_text phải là đúng lời thoại gốc của preset trong voices.json để GGUF không bao giờ đọc lấn câu mẫu.
+                val effectiveRefText = if (extracted.usedOnnxEncoder) {
+                    userRefText.ifBlank { extracted.matchedPresetRefText.orEmpty() }
+                } else {
                     extracted.matchedPresetRefText.orEmpty()
                 }
 
@@ -876,9 +881,11 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                         val synthRes = onnxVoiceEngine.synthesizeSentenceDetailed(
                             sentence = OnnxModelAssetHelper.AI_VOICE_QUICK_PREVIEW_SENTENCE,
                             speakerEmbedding = extracted.embedding,
-                            speed = 1.0f,
+                            speed = extracted.timbreSettings.speakingRateRatio,
                             referenceCodes = extracted.referenceCodes,
-                            referenceText = effectiveRefText
+                            referenceText = effectiveRefText,
+                            matchedPresetId = extracted.matchedPresetId,
+                            timbreSettings = extracted.timbreSettings
                         )
                         val synthAudio = synthRes.audio
                         if (synthAudio != null) {
@@ -908,7 +915,9 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     referenceCodes = extracted.referenceCodes,
                     referenceText = effectiveRefText,
                     usedOnnxEncoder = extracted.usedOnnxEncoder,
-                    estimatedPitchRatio = extracted.estimatedPitchRatio,
+                    estimatedPitchRatio = extracted.timbreSettings.pitchRatio,
+                    timbreSettings = extracted.timbreSettings,
+                    acousticSummary = extracted.acousticSummary,
                     previewWavPath = draftWavPath,
                     synthesizedPreview = usedSynthPreview
                 )
@@ -919,15 +928,15 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 ).joinToString("\n\n")
                 _lastAiVerbatimError.value = combinedDiagErr.ifBlank { null }
 
-                val codeCount = extracted.referenceCodes?.size ?: 0
-                val presetNote = extracted.matchedPresetId?.let { " • ghép voices.json '$it'" } ?: ""
+                val presetNote = extracted.matchedPresetId?.let { " • nền '$it'" } ?: ""
+                val timbreNote = extracted.timbreSettings.describeShort()
                 _statusMessage.value = when {
                     usedSynthPreview ->
-                        "Đã tạo giọng VieNeu \"$cleanName\" ($codeCount mã NeuCodec$presetNote) — Bấm Nghe thử rồi bấm Lưu."
+                        "Đã tạo giọng \"$cleanName\" ($presetNote • $timbreNote) — Bấm Nghe thử rồi bấm Lưu."
                     !synthPreviewNote.isNullOrBlank() ->
-                        "Đã tạo hồ sơ giọng ($codeCount mã NeuCodec$presetNote), tổng hợp GGUF báo lỗi (xem log bên dưới)."
+                        "Đã phân tích giọng ($presetNote • $timbreNote), tổng hợp GGUF báo lỗi (xem log bên dưới)."
                     else ->
-                        "Đã tạo giọng \"$cleanName\" ($codeCount mã NeuCodec$presetNote) — Bấm Nghe thử rồi bấm Lưu."
+                        "Đã tạo giọng \"$cleanName\" ($presetNote • $timbreNote) — Bấm Nghe thử rồi bấm Lưu."
                 }
                 onCreated()
             } catch (e: Throwable) {
@@ -1040,36 +1049,59 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
         _isRunningAiDiagnostics.value = true
         viewModelScope.launch {
             try {
-                val (selectedEmb, selectedRefCodes, selectedRefText) = withContext(Dispatchers.IO) {
+                data class DiagVoiceInput(
+                    val emb: FloatArray?,
+                    val codes: IntArray?,
+                    val refText: String?,
+                    val presetId: String?,
+                    val timbre: com.example.audio.VoiceTimbreSettings?
+                )
+                val voiceInput = withContext(Dispatchers.IO) {
                     val draft = _draftClonedVoice.value
                     if (draft != null) {
-                        Triple(draft.embedding, draft.referenceCodes, draft.referenceText)
+                        DiagVoiceInput(
+                            emb = draft.embedding,
+                            codes = draft.referenceCodes,
+                            refText = draft.referenceText,
+                            presetId = draft.timbreSettings.matchedPresetId,
+                            timbre = draft.timbreSettings
+                        )
                     } else {
                         val selId = _readerPrefs.value.selectedClonedVoiceId
                         val presetId = OnnxModelAssetHelper.extractPresetId(selId)
                         if (presetId != null) {
                             onnxVoiceEngine.ensureInitialized()
                             val preset = onnxVoiceEngine.findPresetVoiceById(presetId)
-                            Triple(preset?.voiceEmbedding, preset?.referenceCodes, preset?.referenceText)
+                            DiagVoiceInput(
+                                emb = preset?.voiceEmbedding,
+                                codes = preset?.referenceCodes,
+                                refText = preset?.referenceText,
+                                presetId = preset?.id,
+                                timbre = null
+                            )
                         } else {
                             val prof = selId?.let { id -> clonedVoiceRepository.findById(id) }
                             if (prof != null) {
-                                Triple(
-                                    clonedVoiceRepository.loadEmbedding(prof),
-                                    clonedVoiceRepository.loadReferenceCodes(prof),
-                                    prof.referenceText
+                                DiagVoiceInput(
+                                    emb = clonedVoiceRepository.loadEmbedding(prof),
+                                    codes = clonedVoiceRepository.loadReferenceCodes(prof),
+                                    refText = prof.referenceText,
+                                    presetId = prof.matchedPresetId.takeIf { it.isNotBlank() },
+                                    timbre = prof.toTimbreSettings()
                                 )
                             } else {
-                                Triple(null, null, null)
+                                DiagVoiceInput(null, null, null, null, null)
                             }
                         }
                     }
                 }
                 val (res, audio) = onnxVoiceEngine.runDiagnosticSentenceReadTest(
                     sentence = OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE,
-                    speakerEmbedding = selectedEmb,
-                    referenceCodes = selectedRefCodes,
-                    referenceText = selectedRefText
+                    speakerEmbedding = voiceInput.emb,
+                    referenceCodes = voiceInput.codes,
+                    referenceText = voiceInput.refText,
+                    matchedPresetId = voiceInput.presetId,
+                    timbreSettings = voiceInput.timbre
                 )
                 _aiDiagnosticTestResult.value = res
                 _aiDiagnosticReport.value = onnxVoiceEngine.runFullSystemDiagnostics(forceResync = false)
@@ -1122,7 +1154,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                         usedOnnxEncoder = draft.usedOnnxEncoder,
                         estimatedPitchRatio = draft.estimatedPitchRatio,
                         referenceCodes = draft.referenceCodes,
-                        referenceText = draft.referenceText
+                        referenceText = draft.referenceText,
+                        timbreSettings = draft.timbreSettings
                     )
                 }
                 val refreshed = withContext(Dispatchers.IO) { clonedVoiceRepository.loadAll() }

@@ -172,6 +172,67 @@ object VietnameseTtsTextNormalizer {
         return finalSentences
     }
 
+    /**
+     * Đếm số từ (âm tiết có chữ cái/chữ số) trong một câu tiếng Việt.
+     */
+    fun countWords(text: String): Int {
+        if (text.isBlank()) return 0
+        var count = 0
+        var inWord = false
+        for (ch in text) {
+            if (ch.isLetterOrDigit()) {
+                if (!inWord) {
+                    count++
+                    inWord = true
+                }
+            } else {
+                inWord = false
+            }
+        }
+        return count
+    }
+
+    /**
+     * Gộp các câu quá ngắn (< [minWords] từ) với câu liền kề (tối đa [maxMergedWords] từ / lần sinh)
+     * dành riêng cho bộ đọc AI VieNeu-TTS GGUF nhằm giảm mạnh số lần khởi chạy mô hình và tạo ngữ điệu mượt hơn.
+     *
+     * Trả về danh sách cặp `(mergedSpeakText, firstOriginalSentenceIndex)` để giao diện vẫn tô sáng câu chính xác.
+     */
+    fun mergeShortSentencesForAiTts(
+        sentences: List<String>,
+        minWords: Int = 8,
+        maxMergedWords: Int = 32
+    ): List<Pair<String, Int>> {
+        if (sentences.isEmpty()) return emptyList()
+        val result = ArrayList<Pair<String, Int>>(sentences.size)
+        var i = 0
+        while (i < sentences.size) {
+            val startIdx = i
+            val sb = StringBuilder(sentences[i].trim())
+            var words = countWords(sentences[i])
+            i++
+
+            // Nếu câu hiện tại ngắn (< minWords) hoặc câu kế tiếp quá ngắn (< minWords)
+            // và tổng số từ sau gộp không vượt maxMergedWords thì gộp lại thành một lần sinh GGUF
+            while (i < sentences.size) {
+                val nextSentence = sentences[i].trim()
+                val nextWords = countWords(nextSentence)
+                val shouldMerge = (words < minWords || nextWords < minWords) &&
+                    (words + nextWords <= maxMergedWords) &&
+                    (sb.length + 1 + nextSentence.length <= 220)
+                if (!shouldMerge) break
+                if (sb.isNotEmpty() && sb.last() !in ".!?…;:") {
+                    sb.append('.')
+                }
+                sb.append(' ').append(nextSentence)
+                words += nextWords
+                i++
+            }
+            result.add(sb.toString() to startIdx)
+        }
+        return result
+    }
+
     private fun splitOverlongSentence(
         sentence: String,
         maxLength: Int,

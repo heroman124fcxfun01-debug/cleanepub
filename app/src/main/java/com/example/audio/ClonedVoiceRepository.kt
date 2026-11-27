@@ -28,8 +28,22 @@ data class ClonedVoiceProfile(
     val referenceText: String = "",
     val referenceCodeCount: Int = 0,
     val usedOnnxEncoder: Boolean,
-    val estimatedPitchRatio: Float
-)
+    val estimatedPitchRatio: Float,
+    val matchedPresetId: String = "",
+    val warmthGainDb: Float = 0.0f,
+    val presenceGainDb: Float = 0.0f,
+    val brightnessGainDb: Float = 0.0f,
+    val speakingRateRatio: Float = 1.0f
+) {
+    fun toTimbreSettings(): VoiceTimbreSettings = VoiceTimbreSettings(
+        pitchRatio = estimatedPitchRatio.coerceIn(0.76f, 1.30f),
+        warmthGainDb = warmthGainDb.coerceIn(-4.5f, 4.5f),
+        presenceGainDb = presenceGainDb.coerceIn(-3.2f, 3.2f),
+        brightnessGainDb = brightnessGainDb.coerceIn(-4.5f, 4.5f),
+        speakingRateRatio = speakingRateRatio.coerceIn(0.88f, 1.14f),
+        matchedPresetId = matchedPresetId.takeIf { it.isNotBlank() }
+    )
+}
 
 /**
  * 100% Offline Persistent Storage for Cloned Voices (`filesDir/book_library/cloned_voices/`).
@@ -73,7 +87,12 @@ class ClonedVoiceRepository(private val rootDir: File) {
                         usedOnnxEncoder = obj.optBoolean("usedOnnxEncoder", false),
                         estimatedPitchRatio = obj.optDouble("estimatedPitchRatio", 1.0)
                             .toFloat()
-                            .coerceIn(0.75f, 1.28f)
+                            .coerceIn(0.75f, 1.30f),
+                        matchedPresetId = obj.optString("matchedPresetId", "").trim(),
+                        warmthGainDb = obj.optDouble("warmthGainDb", 0.0).toFloat().coerceIn(-4.5f, 4.5f),
+                        presenceGainDb = obj.optDouble("presenceGainDb", 0.0).toFloat().coerceIn(-3.2f, 3.2f),
+                        brightnessGainDb = obj.optDouble("brightnessGainDb", 0.0).toFloat().coerceIn(-4.5f, 4.5f),
+                        speakingRateRatio = obj.optDouble("speakingRateRatio", 1.0).toFloat().coerceIn(0.88f, 1.14f)
                     )
                 )
             }
@@ -96,7 +115,8 @@ class ClonedVoiceRepository(private val rootDir: File) {
         usedOnnxEncoder: Boolean,
         estimatedPitchRatio: Float,
         referenceCodes: IntArray? = null,
-        referenceText: String = ""
+        referenceText: String = "",
+        timbreSettings: VoiceTimbreSettings? = null
     ): ClonedVoiceProfile {
         rootDir.mkdirs()
         val id = "clone_${UUID.randomUUID().toString().take(8)}"
@@ -137,7 +157,12 @@ class ClonedVoiceRepository(private val rootDir: File) {
             referenceText = cleanRefText,
             referenceCodeCount = referenceCodes?.size ?: 0,
             usedOnnxEncoder = usedOnnxEncoder,
-            estimatedPitchRatio = estimatedPitchRatio.coerceIn(0.75f, 1.28f)
+            estimatedPitchRatio = (timbreSettings?.pitchRatio ?: estimatedPitchRatio).coerceIn(0.75f, 1.30f),
+            matchedPresetId = timbreSettings?.matchedPresetId.orEmpty(),
+            warmthGainDb = (timbreSettings?.warmthGainDb ?: 0.0f).coerceIn(-4.5f, 4.5f),
+            presenceGainDb = (timbreSettings?.presenceGainDb ?: 0.0f).coerceIn(-3.2f, 3.2f),
+            brightnessGainDb = (timbreSettings?.brightnessGainDb ?: 0.0f).coerceIn(-4.5f, 4.5f),
+            speakingRateRatio = (timbreSettings?.speakingRateRatio ?: 1.0f).coerceIn(0.88f, 1.14f)
         )
 
         val updated = listOf(profile) + loadAll().filterNot { it.id == id }
@@ -218,6 +243,11 @@ class ClonedVoiceRepository(private val rootDir: File) {
                     put("referenceCodeCount", p.referenceCodeCount)
                     put("usedOnnxEncoder", p.usedOnnxEncoder)
                     put("estimatedPitchRatio", p.estimatedPitchRatio.toDouble())
+                    put("matchedPresetId", p.matchedPresetId)
+                    put("warmthGainDb", p.warmthGainDb.toDouble())
+                    put("presenceGainDb", p.presenceGainDb.toDouble())
+                    put("brightnessGainDb", p.brightnessGainDb.toDouble())
+                    put("speakingRateRatio", p.speakingRateRatio.toDouble())
                 }
             )
         }

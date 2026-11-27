@@ -30,17 +30,24 @@ data class GgufGenerationResult(
  * assistant:<|SPEECH_GENERATION_START|>{ref_codes_str}
  * ```
  *
- * Native crash hardening for Samsung SM-S928U1 (Android 17, arm64-v8a):
- * - Loads strictly via physical file path (`LlamaModel.load(ggufFile.absolutePath, config)`),
- *   NEVER via `initContextWithFd` / `ParcelFileDescriptor`.
- * - Disables `mmap` and `mlock` (`useMmap = false`, `useMlock = false`) to avoid SIGSEGV/SIGBUS
- *   page faults on Android 16/17 16KB-page kernels.
- * - Uses baseline `-march=armv8-a+fp+simd` (`GGML_NATIVE=OFF`) with lightweight `n_batch = 128`
- *   and `n_ctx = 1024` (automatic fallback to `512` if RAM is tight).
- * - Uses streaming generation (`LlamaModel.generateStream`) with `stopSequences` + immediate
- *   `cancelGeneration()` the instant `<|SPEECH_GENERATION_END|>` (or EOG marker) is emitted.
+ * Key guarantees:
+ * - Physical file loading (`LlamaModel.load(ggufFile.absolutePath, cfg)`), `useMmap = false`, `useMlock = false`.
+ * - `n_batch = 256` (`safePromptLimit = 768`) & `n_ctx = 1536` (fallback `1024`) so NO `voices.json` preset's
+ *   `ref_codes` (up to 308 tokens) is ever truncated out of sync with `ref_phones`.
+ * - Caches the active voice's serialized prefix (`refPhones` + `refCodesStr`) across consecutive book sentences
+ *   and keeps the warm `LlamaModel` context resident without reloading.
+ * - Uses parallel prompt prefill (`threadsBatch = 4..6`) + fast streaming generation with immediate
+ *   `cancelGeneration()` on `<|SPEECH_GENERATION_END|>`.
  */
 class VieNeuGgufRunner(context: Context? = null) {
+
+    private data class CachedVoicePrefix(
+        val cacheKey: String,
+        val refPhones: String,
+        val refCodesCount: Int,
+        val refCodesStr: String,
+        val promptHead: String
+    )
 
     private val appContext: Context? = context?.applicationContext
     @Volatile
@@ -49,6 +56,11 @@ class VieNeuGgufRunner(context: Context? = null) {
     private var activeContextSize: Int = PREFERRED_CONTEXT_SIZE
     private var activeBatchSize: Int = DEFAULT_BATCH_SIZE
     private var activeThreads: Int = 4
+    private var activeThreadsBatch: Int = 6
+
+    // Prefix cache for the currently active voice so consecutive sentences avoid rebuilding ref tags
+    @Volatile
+    private var cachedVoicePrefix: CachedVoicePrefix? = null
 
     @Volatile
     var statusSummary: String = "Chưa nạp model GGUF"
@@ -102,6 +114,9 @@ class VieNeuGgufRunner(context: Context? = null) {
 
     @Synchronized
     fun loadModel(ggufFile: File?): Boolean {
+        if (ggufFile != null && loadedModelPath == ggufFile.absolutePath && isLoaded) {
+            return true
+        }
         release()
         lastLoadError = null
         specialTokenCheckSummary = ""
@@ -121,30 +136,38 @@ class VieNeuGgufRunner(context: Context? = null) {
             return false
         }
 
-        val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
-        val candidateContexts = intArrayOf(PREFERRED_CONTEXT_SIZE, FALLBACK_CONTEXT_SIZE)
+        val cores = Runtime.getRuntime().availableProcessors()
+        val threads = cores.coerceIn(2, 4)
+        val threadsBatch = cores.coerceIn(4, 6)
+        // Prefer n_ctx=1536, n_batch=256 so full ref_codes (up to 308 tokens) never get truncated;
+        // automatically fall back to lighter configs only if a low-RAM device rejects it.
+        val candidates = listOf(
+            PREFERRED_CONTEXT_SIZE to DEFAULT_BATCH_SIZE,
+            FALLBACK_CONTEXT_SIZE to DEFAULT_BATCH_SIZE,
+            FALLBACK_CONTEXT_SIZE to FALLBACK_BATCH_SIZE
+        )
         val loadFailures = mutableListOf<String>()
 
-        for (ctxSize in candidateContexts) {
+        for ((ctxSize, batchSz) in candidates) {
             CrashReportStore.markNativeOperationStart(
                 context = appContext,
                 operation = "LlamaModel.load (${ggufFile.name})",
                 detail = "path=${ggufFile.absolutePath}, size=${AiSystemDiagnosticReport.formatMb(ggufFile.length())}, " +
-                    "n_ctx=$ctxSize, n_batch=$DEFAULT_BATCH_SIZE, threads=$threads, use_mmap=false, use_mlock=false"
+                    "n_ctx=$ctxSize, n_batch=$batchSz, threads=$threads/$threadsBatch, use_mmap=false, use_mlock=false"
             )
             try {
                 val cfg = LlamaConfig(
                     contextSize = ctxSize,
-                    batchSize = DEFAULT_BATCH_SIZE,
+                    batchSize = batchSz,
                     threads = threads,
-                    threadsBatch = threads,
-                    temperature = 0.8f,
+                    threadsBatch = threadsBatch,
+                    temperature = 0.75f,
                     topP = 0.95f,
                     topK = 50,
                     repeatPenalty = 1.1f,
                     frequencyPenalty = 0.0f,
                     presencePenalty = 0.0f,
-                    maxTokens = 384,
+                    maxTokens = 480,
                     stopSequences = STOP_MARKERS,
                     useMmap = false,
                     useMlock = false,
@@ -159,19 +182,20 @@ class VieNeuGgufRunner(context: Context? = null) {
                     loadedModel = model
                     loadedModelPath = ggufFile.absolutePath
                     activeContextSize = ctxSize
-                    activeBatchSize = DEFAULT_BATCH_SIZE
+                    activeBatchSize = batchSz
                     activeThreads = threads
+                    activeThreadsBatch = threadsBatch
                     statusSummary = "OK (${ggufFile.name} • ${AiSystemDiagnosticReport.formatMb(ggufFile.length())} • " +
-                        "n_ctx=$ctxSize • n_batch=$DEFAULT_BATCH_SIZE • threads=$threads • mmap=off)"
+                        "n_ctx=$ctxSize • n_batch=$batchSz • threads=$threads/$threadsBatch • mmap=off)"
                     Log.i(TAG, "Loaded GGUF backbone via file path: $statusSummary")
                     return true
                 } else {
-                    loadFailures.add("n_ctx=$ctxSize: LlamaModel.load hoàn tất nhưng isLoaded() == false")
+                    loadFailures.add("n_ctx=$ctxSize,batch=$batchSz: LlamaModel.load hoàn tất nhưng isLoaded == false")
                     runCatching { model.close() }
                 }
             } catch (e: Throwable) {
-                loadFailures.add("n_ctx=$ctxSize: ${OnnxModelAssetHelper.formatFullThrowable(e)}")
-                Log.e(TAG, "LlamaModel.load failed at n_ctx=$ctxSize", e)
+                loadFailures.add("n_ctx=$ctxSize,batch=$batchSz: ${OnnxModelAssetHelper.formatFullThrowable(e)}")
+                Log.e(TAG, "LlamaModel.load failed at n_ctx=$ctxSize, batch=$batchSz", e)
             } finally {
                 CrashReportStore.clearNativeOperation(appContext)
             }
@@ -185,14 +209,56 @@ class VieNeuGgufRunner(context: Context? = null) {
         return false
     }
 
+    private fun getOrBuildVoicePrefix(refPhones: String, refCodes: IntArray): CachedVoicePrefix {
+        val cleanRefPhones = refPhones.trim()
+        val headHash = if (refCodes.isNotEmpty()) {
+            var h = refCodes.size
+            val step = (refCodes.size / 16).coerceAtLeast(1)
+            var i = 0
+            while (i < refCodes.size) {
+                h = 31 * h + refCodes[i]
+                i += step
+            }
+            h
+        } else 0
+        val key = "${cleanRefPhones.hashCode()}:${refCodes.size}:$headHash"
+        val existing = cachedVoicePrefix
+        if (existing != null && existing.cacheKey == key) {
+            return existing
+        }
+
+        // Preserve FULL refCodes aligned 1-to-1 with refPhones (NEVER chop refCodes out of sync with refPhones!)
+        val refCodesStr = buildString(refCodes.size * 14) {
+            for (code in refCodes) {
+                append("<|speech_")
+                append(code)
+                append("|>")
+            }
+        }
+        val promptHead = if (cleanRefPhones.isNotEmpty()) {
+            "user: Convert the text to speech:<|TEXT_PROMPT_START|>$cleanRefPhones "
+        } else {
+            "user: Convert the text to speech:<|TEXT_PROMPT_START|>"
+        }
+        return CachedVoicePrefix(
+            cacheKey = key,
+            refPhones = cleanRefPhones,
+            refCodesCount = refCodes.size,
+            refCodesStr = refCodesStr,
+            promptHead = promptHead
+        ).also {
+            cachedVoicePrefix = it
+        }
+    }
+
     @Synchronized
     fun generateSpeechCodes(
         refPhones: String,
         targetPhones: String,
         refCodes: IntArray,
-        temperature: Double = 0.8,
+        temperature: Double = 0.75,
         topK: Int = 50,
-        maxNewTokens: Int = 600
+        maxNewTokens: Int = 520
     ): GgufGenerationResult {
         val model = loadedModel
         if (model == null || !isLoaded) {
@@ -200,52 +266,35 @@ class VieNeuGgufRunner(context: Context? = null) {
                 errorMessage = lastLoadError ?: "Chưa nạp được model VieNeu-TTS GGUF."
             )
         }
-        if (targetPhones.isBlank()) {
+        val cleanTargetPhones = targetPhones.trim()
+        if (cleanTargetPhones.isBlank()) {
             return GgufGenerationResult(errorMessage = "Chuỗi âm vị mục tiêu trống.")
         }
 
-        val combinedPhones = if (refPhones.isNotBlank()) {
-            "$refPhones $targetPhones".trim()
-        } else {
-            targetPhones.trim()
+        val prefix = getOrBuildVoicePrefix(refPhones, refCodes)
+
+        // Exact official pnnbao97/VieNeu-TTS & scripts/test_tts_gguf.py prompt format:
+        // ONLY {ref_phones} {target_phones} inside TEXT_PROMPT, followed by FULL {ref_codes_str}.
+        val prompt = buildString(prefix.promptHead.length + cleanTargetPhones.length + prefix.refCodesStr.length + 64) {
+            append(prefix.promptHead)
+            append(cleanTargetPhones)
+            append("<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>")
+            append(prefix.refCodesStr)
         }
 
-        // Guard against native wrapper's `safePromptLimit = min(n_ctx - maxTokens - 16, batchSize * 3)`:
-        // Keep prompt well inside `batchSize * 3` (384 tokens) AND leave generous room for speech generation.
-        val estTextTokens = (combinedPhones.length + 34).coerceAtLeast(48)
-        val maxPromptBudget = (activeBatchSize * 3 - 14).coerceAtMost(activeContextSize - 160)
-        val maxAllowedRefCodes = (maxPromptBudget - estTextTokens)
-            .coerceIn(48, if (activeContextSize <= 512) 180 else MAX_REF_CODES)
-
-        val cappedRefCodes = if (refCodes.size > maxAllowedRefCodes) {
-            refCodes.copyOfRange(0, maxAllowedRefCodes)
-        } else {
-            refCodes
-        }
-
-        val refCodesStr = buildString(cappedRefCodes.size * 14) {
-            for (code in cappedRefCodes) {
-                append("<|speech_")
-                append(code)
-                append("|>")
-            }
-        }
-
-        // Exact official pnnbao97/VieNeu-TTS & scripts/test_tts_gguf.py prompt format
-        val prompt = "user: Convert the text to speech:<|TEXT_PROMPT_START|>$combinedPhones<|TEXT_PROMPT_END|>\n" +
-            "assistant:<|SPEECH_GENERATION_START|>$refCodesStr"
-
-        val estPromptTokens = estTextTokens + cappedRefCodes.size + 8
-        val availableGenRoom = (activeContextSize - estPromptTokens - 24).coerceIn(96, 680)
-        val safeMaxTokens = maxNewTokens.coerceIn(96, availableGenRoom)
+        // Estimate prompt tokens carefully so maxTokens stays inside n_ctx without triggering native smartTruncate
+        val estTextTokens = ((prefix.refPhones.length + cleanTargetPhones.length) * 0.75f).toInt().coerceAtLeast(32) + 28
+        val estPromptTokens = estTextTokens + prefix.refCodesCount
+        val availableGenRoom = (activeContextSize - estPromptTokens - 32).coerceIn(120, 720)
+        val safeMaxTokens = maxNewTokens.coerceIn(120, availableGenRoom)
         val startMs = System.currentTimeMillis()
 
         val genCfg = LlamaConfig(
             contextSize = activeContextSize,
             batchSize = activeBatchSize,
             threads = activeThreads,
-            threadsBatch = activeThreads,
-            temperature = temperature.toFloat().coerceIn(0.1f, 1.3f),
+            threadsBatch = activeThreadsBatch,
+            temperature = temperature.toFloat().coerceIn(0.1f, 1.2f),
             topP = 0.95f,
             topK = topK.coerceIn(1, 200),
             repeatPenalty = 1.1f,
@@ -262,8 +311,8 @@ class VieNeuGgufRunner(context: Context? = null) {
         CrashReportStore.markNativeOperationStart(
             context = appContext,
             operation = "LlamaModel.generateStream (sinh speech tokens)",
-            detail = "refCodes=${cappedRefCodes.size}, targetIpaLen=${targetPhones.length}, " +
-                "n_ctx=$activeContextSize, maxTokens=$safeMaxTokens, threads=$activeThreads"
+            detail = "refCodes=${prefix.refCodesCount}, targetIpaLen=${cleanTargetPhones.length}, " +
+                "n_ctx=$activeContextSize, n_batch=$activeBatchSize, maxTokens=$safeMaxTokens, threads=$activeThreads/$activeThreadsBatch"
         )
         return try {
             val rawOut = StringBuilder(safeMaxTokens * 14)
@@ -277,7 +326,6 @@ class VieNeuGgufRunner(context: Context? = null) {
                         if (piece.isNotEmpty()) {
                             rawOut.append(piece)
                             emittedPieces++
-                            // Check recent tail for <|SPEECH_GENERATION_END|> or EOG markers
                             val tailStart = (rawOut.length - 48).coerceAtLeast(0)
                             val tail = rawOut.substring(tailStart)
                             val hitStop = STOP_MARKERS.any { marker -> tail.contains(marker) }
@@ -298,7 +346,7 @@ class VieNeuGgufRunner(context: Context? = null) {
             val elapsed = System.currentTimeMillis() - startMs
             val combinedRaw = rawOut.toString()
 
-            // Cut cleanly at the earliest stop marker if present
+            // Cut cleanly at the earliest stop marker (<|SPEECH_GENERATION_END|>, etc.)
             var cutIdx = combinedRaw.length
             for (marker in STOP_MARKERS) {
                 val idx = combinedRaw.indexOf(marker)
@@ -308,7 +356,7 @@ class VieNeuGgufRunner(context: Context? = null) {
             }
             val cleanSegment = combinedRaw.substring(0, cutIdx)
             val codes = extractSpeechIds(cleanSegment)
-            val promptPreview = "refPhones='${refPhones.take(80)}' | targetPhones='${targetPhones.take(100)}' | refCodes=${cappedRefCodes.size}"
+            val promptPreview = "refPhones='${prefix.refPhones.take(80)}' | targetPhones='${cleanTargetPhones.take(100)}' | refCodes=${prefix.refCodesCount}"
 
             if (codes.size < 4) {
                 val err = buildString {
@@ -366,6 +414,7 @@ class VieNeuGgufRunner(context: Context? = null) {
     fun release() {
         val model = loadedModel
         loadedModel = null
+        cachedVoicePrefix = null
         if (model != null) {
             runCatching { model.cancelGeneration() }
             runCatching { model.close() }
@@ -376,10 +425,10 @@ class VieNeuGgufRunner(context: Context? = null) {
 
     companion object {
         private const val TAG = "VieNeuGgufRunner"
-        private const val PREFERRED_CONTEXT_SIZE = 1024
-        private const val FALLBACK_CONTEXT_SIZE = 512
-        private const val DEFAULT_BATCH_SIZE = 128
-        private const val MAX_REF_CODES = 260
+        private const val PREFERRED_CONTEXT_SIZE = 1536
+        private const val FALLBACK_CONTEXT_SIZE = 1024
+        private const val DEFAULT_BATCH_SIZE = 256
+        private const val FALLBACK_BATCH_SIZE = 128
         const val SPEECH_END_TOKEN = "<|SPEECH_GENERATION_END|>"
         private val STOP_MARKERS = listOf(
             SPEECH_END_TOKEN,

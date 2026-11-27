@@ -846,11 +846,7 @@ fun StudioVoiceCloneSection(
                             samples = draft.samples,
                             sampleRate = draft.sampleRate,
                             wavPath = draft.previewWavPath,
-                            pitchOverride = if (draft.synthesizedPreview) {
-                                draft.estimatedPitchRatio.coerceIn(0.85f, 1.18f)
-                            } else {
-                                1.0f
-                            }
+                            pitchOverride = 1.0f
                         )
                     },
                     enabled = draftCanPreview,
@@ -958,19 +954,19 @@ fun StudioVoiceCloneSection(
                     val modeBadge = when {
                         draft.usedOnnxEncoder && draft.synthesizedPreview -> "GGUF + NeuCodec 24kHz"
                         draft.usedOnnxEncoder -> "NeuCodec Encoder"
-                        draft.synthesizedPreview -> "GGUF + voices.json + Pitch"
-                        else -> "voices.json + Pitch"
+                        draft.synthesizedPreview -> "GGUF + nền ${draft.timbreSettings.matchedPresetId ?: "voices.json"} + DSP"
+                        else -> "nền ${draft.timbreSettings.matchedPresetId ?: "voices.json"} + DSP"
                     }
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(
-                            text = "✓ Đã tạo \"${draft.name}\" ($tokenCount mã NeuCodec • $modeBadge) — Bấm Nghe thử để kiểm tra, rồi bấm Lưu.",
+                            text = "✓ Đã tạo \"${draft.name}\" ($tokenCount mã • $modeBadge) — Bấm Nghe thử để kiểm tra, rồi bấm Lưu.",
                             fontSize = 10.5.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = IosGreen
                         )
-                        if (draft.synthesizedPreview) {
+                        if (draft.acousticSummary.isNotBlank()) {
                             Text(
-                                text = "Câu mẫu VieNeu: \"${com.example.audio.OnnxModelAssetHelper.AI_VOICE_TEST_SENTENCE}\"",
+                                text = draft.acousticSummary,
                                 fontSize = 9.5.sp,
                                 color = secondaryInk
                             )
