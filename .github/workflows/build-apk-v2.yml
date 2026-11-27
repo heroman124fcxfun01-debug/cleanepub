@@ -109,8 +109,13 @@ jobs:
           unzip -l "$APK_FILE" | grep "assets/models/" || { echo "LỖI: APK không chứa assets/models/!"; exit 1; }
           unzip -l "$APK_FILE" | grep -q "\.gguf" || { echo "LỖI: APK thiếu model .gguf!"; exit 1; }
           unzip -l "$APK_FILE" | grep -q "neucodec_decoder\.onnx" || { echo "LỖI: APK thiếu neucodec_decoder.onnx!"; exit 1; }
-          unzip -l "$APK_FILE" | grep -q "neucodec_encoder\.onnx" || { echo "LỖI: APK thiếu neucodec_encoder.onnx!"; exit 1; }
+          unzip -l "$APK_FILE" | grep -q "voices\.json" || { echo "LỖI: APK thiếu voices.json!"; exit 1; }
           unzip -l "$APK_FILE" | grep -q "vi_espeak_ipa\.tsv" || { echo "LỖI: APK thiếu vi_espeak_ipa.tsv!"; exit 1; }
+          if unzip -l "$APK_FILE" | grep -q "neucodec_encoder\.onnx"; then
+            echo "Thông tin: APK có kèm tùy chọn neucodec_encoder.onnx."
+          else
+            echo "Thông tin: APK dùng giọng mẫu chuẩn từ voices.json (không cần neucodec_encoder.onnx)."
+          fi
           echo "APK_PATH=$APK_FILE" >> "$GITHUB_ENV"
 
       - name: Lưu file APK vào GitHub Actions Artifacts

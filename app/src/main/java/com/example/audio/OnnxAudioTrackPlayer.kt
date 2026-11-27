@@ -34,7 +34,8 @@ class OnnxAudioTrackPlayer {
     suspend fun playBlocking(
         samples: FloatArray,
         sampleRate: Int,
-        speed: Float = 1.0f
+        speed: Float = 1.0f,
+        pitch: Float = 1.0f
     ): Boolean {
         if (samples.isEmpty() || sampleRate <= 0) return false
         stopped = false
@@ -72,9 +73,12 @@ class OnnxAudioTrackPlayer {
         }
 
         val clampedSpeed = speed.coerceIn(0.8f, 1.5f)
-        if (clampedSpeed != 1.0f) {
+        val clampedPitch = pitch.coerceIn(0.82f, 1.22f)
+        if (clampedSpeed != 1.0f || clampedPitch != 1.0f) {
             runCatching {
-                track.playbackParams = PlaybackParams().setSpeed(clampedSpeed)
+                track.playbackParams = PlaybackParams()
+                    .setSpeed(clampedSpeed)
+                    .setPitch(clampedPitch)
             }
         }
 

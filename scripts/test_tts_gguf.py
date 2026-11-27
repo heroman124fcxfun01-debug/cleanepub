@@ -403,7 +403,7 @@ def main() -> int:
 
         log(f"GGUF backbone:    {gguf_path}")
         log(f"NeuCodec decoder: {decoder_path}")
-        log(f"NeuCodec encoder: {encoder_path}")
+        log(f"NeuCodec encoder: {encoder_path or '(optional / not bundled — using voices.json presets)'}")
         log(f"voices.json:      {voices_path}")
         log(f"vi_espeak_ipa:    {tsv_path}")
 
@@ -411,8 +411,6 @@ def main() -> int:
             raise FileNotFoundError("Missing *.gguf backbone in assets/models/")
         if not decoder_path:
             raise FileNotFoundError("Missing neucodec_decoder.onnx in assets/models/")
-        if not encoder_path:
-            raise FileNotFoundError("Missing neucodec_encoder.onnx in assets/models/")
 
         preset_id, ref_text, ref_codes, voice_emb = load_preset_voice(voices_path)
         emb_label = f", voice_embedding={voice_emb.shape}" if voice_emb is not None else ""
@@ -530,8 +528,8 @@ def main() -> int:
         if stats["env_cv"] < 0.12:
             failures.append(f"Audio lacks speech syllable modulation (env_cv={stats['env_cv']:.4f} < 0.12)")
 
-        # Smoke test NeuCodec Encoder (offline voice cloning verification)
-        if wav.size >= DECODER_SAMPLE_RATE:
+        # Optional smoke test for NeuCodec Encoder (only if bundled)
+        if encoder_path and wav.size >= DECODER_SAMPLE_RATE:
             enc_t0 = time.time()
             enc_codes = smoke_test_neucodec_encoder(encoder_path, wav)
             enc_elapsed = time.time() - enc_t0
@@ -543,6 +541,8 @@ def main() -> int:
                 failures.append(
                     f"NeuCodec encoder smoke test produced invalid codes (len={len(enc_codes)}, unique={len(set(enc_codes))})"
                 )
+        else:
+            log("NeuCodec Encoder smoke test: skipped (optional encoder not bundled; using voices.json presets)")
 
         total_elapsed = time.time() - t0
         if failures:

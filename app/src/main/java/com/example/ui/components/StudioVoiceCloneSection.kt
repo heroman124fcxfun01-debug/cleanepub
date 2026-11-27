@@ -202,8 +202,7 @@ fun StudioVoiceCloneSection(
         else -> null
     }
     val hasValidInput = activeInputSamples != null && activeInputSamples.isNotEmpty() && !recState.isRecording
-    val hasValidReferenceText = referenceText.trim().length >= 4
-    val canCreateDraft = hasValidInput && hasValidReferenceText
+    val canCreateDraft = hasValidInput
 
     val isPreviewingRawSample = recState.isPlayingPreview && localPreviewTarget == "raw_sample"
     val isPreviewingDraftVoice = recState.isPlayingPreview && localPreviewTarget == "draft_voice"
@@ -649,7 +648,7 @@ fun StudioVoiceCloneSection(
                 }
             }
 
-            // 2.5. Ô BẮT BUỘC: Nội dung chữ trong file ghi âm mẫu (chuẩn pnnbao97/VieNeu-TTS)
+            // 2.5. Ô TÙY CHỌN: Nội dung chữ trong file ghi âm mẫu (dùng khi có encoder ONNX; nếu trống sẽ tự ghép voices.json + chỉnh cao độ)
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(5.dp)
@@ -660,7 +659,7 @@ fun StudioVoiceCloneSection(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Nội dung chữ trong file ghi âm mẫu *",
+                        text = "Lời thoại mẫu (tùy chọn)",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = primaryInk,
@@ -705,14 +704,14 @@ fun StudioVoiceCloneSection(
                         .background(paperBg)
                         .border(
                             width = 1.3.dp,
-                            color = if (hasValidInput && !hasValidReferenceText) IosOrange else borderCol,
+                            color = borderCol,
                             shape = RoundedCornerShape(10.dp)
                         )
                         .padding(horizontal = 10.dp, vertical = 8.dp)
                 ) {
                     if (referenceText.isEmpty()) {
                         Text(
-                            text = "Gõ chính xác câu nói trong đoạn ghi âm/file import để VieNeu-TTS căn chỉnh âm vị tiếng Việt chuẩn xác…",
+                            text = "Có thể để trống — app sẽ tự phân tích cao độ giọng mẫu, ghép giọng tương đồng từ voices.json và đọc bằng VieNeu-TTS 24kHz.",
                             fontSize = 11.sp,
                             lineHeight = 15.sp,
                             color = secondaryInk.copy(alpha = 0.72f)
@@ -734,15 +733,6 @@ fun StudioVoiceCloneSection(
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("studio_clone_ref_text_input")
-                    )
-                }
-
-                if (hasValidInput && !hasValidReferenceText) {
-                    Text(
-                        text = "Bắt buộc nhập đúng lời thoại của mẫu âm thanh để mở nút Tạo.",
-                        fontSize = 9.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = IosOrange
                     )
                 }
             }
@@ -925,7 +915,8 @@ fun StudioVoiceCloneSection(
                     val modeBadge = when {
                         draft.usedOnnxEncoder && draft.synthesizedPreview -> "GGUF + NeuCodec 24kHz"
                         draft.usedOnnxEncoder -> "NeuCodec Encoder"
-                        else -> "Vector dự phòng"
+                        draft.synthesizedPreview -> "GGUF + voices.json + Pitch"
+                        else -> "voices.json + Pitch"
                     }
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(

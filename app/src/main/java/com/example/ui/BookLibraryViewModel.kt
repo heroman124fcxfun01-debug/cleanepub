@@ -791,10 +791,10 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
 
     /**
      * Bước "Tạo" trong Studio (chuẩn `pnnbao97/VieNeu-TTS`):
-     * 1. Bắt buộc có `referenceText` ("Nội dung chữ trong file ghi âm mẫu") khớp với file âm thanh mẫu.
-     * 2. Chạy `neucodec_encoder.onnx` (16kHz Mono -> chuỗi mã FSQ NeuCodec `IntArray`).
-     * 3. Nếu đã nạp đủ GGUF backbone + `neucodec_decoder.onnx`, tổng hợp sẵn câu mẫu tiếng Việt
-     *    ra file WAV 24kHz 16-bit PCM chuẩn cho nút Nghe thử.
+     * 1. Nếu có tùy chọn `neucodec_encoder.onnx`, mã hóa âm thanh mẫu sang mã FSQ NeuCodec.
+     * 2. Nếu không có encoder rời (mặc định của `pnnbao-ump`), phân tích cao độ & đặc trưng âm học
+     *    của mẫu ghi âm/import để chọn giọng mẫu tương đồng nhất trong `voices.json` kèm tỉ lệ cao độ (pitch).
+     * 3. Tổng hợp sẵn câu mẫu tiếng Việt qua GGUF + `neucodec_decoder.onnx` 24kHz cho nút Nghe thử.
      */
     fun createDraftClonedVoice(
         name: String,
@@ -804,11 +804,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
         onCreated: () -> Unit = {}
     ) {
         if (_isExtractingVoiceClone.value || samples.isEmpty()) return
-        val cleanRefText = referenceText.trim()
-        if (cleanRefText.isEmpty()) {
-            _statusMessage.value = "Vui lòng nhập nội dung chữ trong file ghi âm mẫu trước khi tạo giọng."
-            return
-        }
+        val userRefText = referenceText.trim()
         _isExtractingVoiceClone.value = true
         _lastAiVerbatimError.value = null
         viewModelScope.launch {
@@ -830,12 +826,20 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 )
                 _voiceCloneEngineMode.value = onnxVoiceEngine.engineMode
 
-                if (extracted.embedding.isEmpty() || !extracted.usedOnnxEncoder || (extracted.referenceCodes?.size ?: 0) < 8) {
+                if (extracted.embedding.isEmpty() || (extracted.referenceCodes?.size ?: 0) < 8) {
                     val err = extracted.errorMessage
-                        ?: "Không mã hóa được giọng mẫu qua neucodec_encoder.onnx (thiếu mã FSQ NeuCodec)."
+                        ?: "Không tìm thấy giọng mẫu hợp lệ từ voices.json hoặc encoder ONNX."
                     _lastAiVerbatimError.value = err
                     _statusMessage.value = err.lineSequence().firstOrNull() ?: err
                     return@launch
+                }
+
+                // Quan trọng: Khi ghép giọng từ voices.json (không dùng encoder rời), phải dùng đúng
+                // lời thoại mẫu của preset đó để chuỗi âm vị đầu vào khớp 100% với referenceCodes của GGUF!
+                val effectiveRefText = if (extracted.usedOnnxEncoder) {
+                    userRefText.ifBlank { OnnxModelAssetHelper.SUGGESTED_RECORDING_SCRIPT }
+                } else {
+                    extracted.matchedPresetRefText?.takeIf { it.isNotBlank() } ?: userRefText
                 }
 
                 val cleanName = name.trim().ifBlank {
@@ -855,7 +859,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                             speakerEmbedding = extracted.embedding,
                             speed = 1.0f,
                             referenceCodes = extracted.referenceCodes,
-                            referenceText = cleanRefText
+                            referenceText = effectiveRefText
                         )
                         val synthAudio = synthRes.audio
                         if (synthAudio != null) {
@@ -883,7 +887,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     durationSeconds = durationSec,
                     embedding = extracted.embedding,
                     referenceCodes = extracted.referenceCodes,
-                    referenceText = cleanRefText,
+                    referenceText = effectiveRefText,
                     usedOnnxEncoder = extracted.usedOnnxEncoder,
                     estimatedPitchRatio = extracted.estimatedPitchRatio,
                     previewWavPath = draftWavPath,
@@ -897,13 +901,14 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 _lastAiVerbatimError.value = combinedDiagErr.ifBlank { null }
 
                 val codeCount = extracted.referenceCodes?.size ?: 0
+                val presetNote = extracted.matchedPresetId?.let { " • ghép voices.json '$it'" } ?: ""
                 _statusMessage.value = when {
-                    usedSynthPreview && extracted.usedOnnxEncoder ->
-                        "Đã tạo giọng VieNeu \"$cleanName\" ($codeCount mã NeuCodec) — Bấm Nghe thử rồi bấm Lưu."
+                    usedSynthPreview ->
+                        "Đã tạo giọng VieNeu \"$cleanName\" ($codeCount mã NeuCodec$presetNote) — Bấm Nghe thử rồi bấm Lưu."
                     !synthPreviewNote.isNullOrBlank() ->
-                        "Đã mã hóa giọng mẫu ($codeCount mã NeuCodec), tổng hợp GGUF báo lỗi (xem log bên dưới)."
+                        "Đã tạo hồ sơ giọng ($codeCount mã NeuCodec$presetNote), tổng hợp GGUF báo lỗi (xem log bên dưới)."
                     else ->
-                        "Đã tạo giọng \"$cleanName\" ($codeCount mã NeuCodec) — Bấm Nghe thử rồi bấm Lưu."
+                        "Đã tạo giọng \"$cleanName\" ($codeCount mã NeuCodec$presetNote) — Bấm Nghe thử rồi bấm Lưu."
                 }
                 onCreated()
             } catch (e: Throwable) {

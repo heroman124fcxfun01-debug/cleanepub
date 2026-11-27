@@ -644,12 +644,14 @@ class BookAudioPlaybackService : Service() {
             )
 
             val clonedRefCodes = clonedVoiceRepo.loadReferenceCodes(selectedClone)
+            val pitchRatio = if (selectedClone.usedOnnxEncoder) 1.0f else selectedClone.estimatedPitchRatio.coerceIn(0.85f, 1.18f)
             launchPipelinedOnnxSentences(
                 sentences = sentences,
                 startSentenceIndex = safeSentenceStart,
                 embedding = clonedEmbedding,
                 referenceCodes = clonedRefCodes,
                 referenceText = selectedClone.referenceText,
+                pitchRatio = pitchRatio,
                 generation = generation
             )
             return
@@ -719,6 +721,7 @@ class BookAudioPlaybackService : Service() {
         embedding: FloatArray,
         referenceCodes: IntArray?,
         referenceText: String,
+        pitchRatio: Float = 1.0f,
         generation: Long
     ) {
         onnxStreamJob = serviceScope.launch {
@@ -799,7 +802,8 @@ class BookAudioPlaybackService : Service() {
                 val completed = onnxPlayer.playBlocking(
                     samples = currentAudio.pcmFloat,
                     sampleRate = currentAudio.sampleRate,
-                    speed = speed
+                    speed = speed,
+                    pitch = pitchRatio
                 )
                 if (!completed || !isActive || generation != activeParagraphGeneration) return@launch
 
@@ -1112,10 +1116,12 @@ class BookAudioPlaybackService : Service() {
 
                 val synthesized = synthResult?.audio
                 if (synthesized != null) {
+                    val pitchRatio = if (targetVoice.usedOnnxEncoder) 1.0f else targetVoice.estimatedPitchRatio.coerceIn(0.85f, 1.18f)
                     onnxPlayer.playBlocking(
                         samples = synthesized.pcmFloat,
                         sampleRate = synthesized.sampleRate,
-                        speed = 1.0f
+                        speed = 1.0f,
+                        pitch = pitchRatio
                     )
                 } else {
                     // Nếu tổng hợp ONNX báo lỗi chi tiết, hiển thị rõ lý do đồng thời phát bản WAV gốc chuẩn 44-byte

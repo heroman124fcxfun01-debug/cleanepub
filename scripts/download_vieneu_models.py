@@ -404,26 +404,32 @@ def main() -> int:
 
     # =========================================================================
     # 2. Public NeuCodec ONNX 24kHz FSQ Decoder (NO gated neuphonic repos!)
-    #    IMPORTANT: Do NOT use `pnnbao-ump/VieNeu-Codec` (VieNeu-TTS v2 codec
-    #    taking `content_ids` + `voice_embedding`), which is incompatible with
-    #    `VieNeu-TTS-0.3B-q4-gguf` NeuCodec FSQ tokens (`0..65535`).
+    #    Check public `pnnbao-ump` repos first, then verified public Apache-2.0
+    #    mirrors of `neuphonic/neucodec-onnx-decoder-int8`.
+    #    Every candidate is verified via `onnxruntime` dry-run with FSQ tokens
+    #    [6181, 6377, 55510, 53535] so incompatible v2 codecs are skipped.
     # =========================================================================
     decoder_candidates: List[str] = [
         "pnnbao-ump/neucodec-onnx-decoder-int8",
-        "TamPham92/neucodec-onnx-decoder-int8",
-        "aoiandroid/neuphonic-neucodec-onnx-decoder-int8-mirror",
         "pnnbao-ump/neucodec-onnx-decoder",
     ]
     for r in pnnbao_public_repos:
         low = r.lower()
-        if "neucodec" in low and "enc" not in low and r not in decoder_candidates:
-            decoder_candidates.append(r)
+        if ("neucodec" in low or "decoder" in low) and "enc" not in low and "vieneu-codec" not in low:
+            if r not in decoder_candidates:
+                decoder_candidates.append(r)
+
+    for mirror in (
+        "TamPham92/neucodec-onnx-decoder-int8",
+        "aoiandroid/neuphonic-neucodec-onnx-decoder-int8-mirror",
+    ):
+        if mirror not in decoder_candidates:
+            decoder_candidates.append(mirror)
+
     for query in ("neucodec-onnx-decoder-int8", "neucodec-onnx-decoder", "neucodec"):
         for r in discover_public_repos(api, search=query, limit=25):
             low = r.lower()
-            if low.startswith("neuphonic/"):
-                continue
-            if "vieneu-codec" in low:
+            if low.startswith("neuphonic/") or "vieneu-codec" in low:
                 continue
             if r not in decoder_candidates:
                 decoder_candidates.append(r)
@@ -459,33 +465,28 @@ def main() -> int:
         )
 
     # =========================================================================
-    # 3. Public NeuCodec ONNX 16kHz FSQ Encoder (for Offline Voice Cloning)
+    # 3. OPTIONAL NeuCodec ONNX 16kHz FSQ Encoder
+    #    `pnnbao-ump` stores Vietnamese reference voices directly inside `voices.json`
+    #    and does NOT require a standalone `neucodec_encoder.onnx`.
+    #    If a verified public encoder exists we include it; otherwise we NEVER fail!
     # =========================================================================
     encoder_candidates: List[Tuple[str, bool]] = [
         ("pnnbao-ump/neucodec-onnx-encoder", False),
         ("pnnbao-ump/distill-neucodec-onnx", False),
-        ("KevinAHM/distill-neucodec-onnx", False),
         ("pnnbao-ump/VieNeu-TTS-0.3B-q4-gguf", True),
+        ("KevinAHM/distill-neucodec-onnx", False),
     ]
     seen_enc = {r for r, _ in encoder_candidates}
     for r in pnnbao_public_repos:
         low = r.lower()
-        if "neucodec" in low and "vieneu-codec" not in low and r not in seen_enc:
+        if ("neucodec" in low or "encoder" in low) and "vieneu-codec" not in low and r not in seen_enc:
             encoder_candidates.append((r, "encoder" not in low))
             seen_enc.add(r)
-    for query in ("distill-neucodec-onnx", "neucodec-onnx-encoder", "neucodec"):
-        for r in discover_public_repos(api, search=query, limit=20):
-            low = r.lower()
-            if low.startswith("neuphonic/") or "vieneu-codec" in low:
-                continue
-            if r not in seen_enc:
-                encoder_candidates.append((r, "enc" not in low and "distill" not in low))
-                seen_enc.add(r)
 
     encoder_repo_used: Optional[str] = None
     encoder_file_used: Optional[str] = None
     encoder_schema: Optional[Dict[str, object]] = None
-    print("\n=== [3/3] Downloading & Verifying Public NeuCodec ONNX Encoder (16kHz FSQ) ===", flush=True)
+    print("\n=== [3/3] Checking OPTIONAL Public NeuCodec ONNX Encoder (non-fatal if absent) ===", flush=True)
     for repo, req_kw in encoder_candidates:
         files = inspect_public_repo_files(api, repo)
         if not files:
@@ -507,23 +508,25 @@ def main() -> int:
         break
 
     if not encoder_repo_used:
-        raise RuntimeError(
-            "Failed to download a verified NeuCodec FSQ 16kHz neucodec_encoder.onnx! Checked candidates: "
-            + ", ".join(r for r, _ in encoder_candidates)
+        print(
+            "  [info] Optional neucodec_encoder.onnx was not found in public repos — "
+            "continuing cleanly using GGUF + NeuCodec 24kHz Decoder + voices.json presets.",
+            flush=True,
         )
 
     # =========================================================================
     # 4. Write manifest.json & summary
     # =========================================================================
     manifest = {
-        "version": "vieneu-gguf-neucodec-2.2",
+        "version": "vieneu-gguf-neucodec-2.3",
         "architecture": "pnnbao97/VieNeu-TTS",
         "sampleRate": 24000,
         "encoderSampleRate": 16000,
+        "hasEncoder": bool(encoder_repo_used),
         "sources": {
             "gguf": gguf_repo_used,
             "decoder": f"{decoder_repo_used}/{decoder_file_used}",
-            "encoder": f"{encoder_repo_used}/{encoder_file_used}",
+            "encoder": f"{encoder_repo_used}/{encoder_file_used}" if encoder_repo_used else None,
         },
         "schemas": {
             "decoder": decoder_schema,
