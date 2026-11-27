@@ -111,7 +111,8 @@ object VietnameseIpaPhonemizer {
     fun encodeTextForVieNeuV3(
         cleanText: String,
         tokenizer: ParsedTokenizerData?,
-        config: VieNeuConfigData?
+        config: VieNeuConfigData?,
+        seaG2pDict: SeaG2pBinaryDict? = null
     ): Pair<LongArray, String> {
         if (tokenizer == null || tokenizer.tokenToId.isEmpty()) {
             val fallbackIds = LongArray(cleanText.length.coerceAtLeast(1)) { i ->
@@ -125,7 +126,7 @@ object VietnameseIpaPhonemizer {
         val style = detectVocabStyle(tokenizer, decodedMergedStrings)
 
         val surfaceOrPhonemes = when (style) {
-            VocabStyle.SEA_G2P_ESPEAK_IPA -> phonemizeSeaG2pEspeak(cleanText, decodedMergedStrings)
+            VocabStyle.SEA_G2P_ESPEAK_IPA -> phonemizeSeaG2pEspeak(cleanText, decodedMergedStrings, seaG2pDict)
             VocabStyle.CHAO_IPA -> phonemizeChaoIpa(cleanText, vocab)
             VocabStyle.RAW_VIETNAMESE -> cleanText
         }
@@ -195,7 +196,7 @@ object VietnameseIpaPhonemizer {
             trimmed
         }
 
-        val chunks = splitByteLevelChunks(inputWithPrefix)
+        val chunks = splitWithTokenizerPattern(inputWithPrefix, tokenizer.splitPattern, tokenizer.splitBehavior)
         for (chunk in chunks) {
             val byteEncoded = encodeUtf8ToByteLevel(chunk)
             if (byteEncoded.isEmpty()) continue
@@ -240,6 +241,35 @@ object VietnameseIpaPhonemizer {
                 }
             }
         }
+    }
+
+    private fun splitWithTokenizerPattern(
+        text: String,
+        splitPattern: String?,
+        splitBehavior: String
+    ): List<String> {
+        if (!splitPattern.isNullOrEmpty() && splitBehavior.equals("Isolated", ignoreCase = true)) {
+            val regexPieces = runCatching {
+                val re = Regex(splitPattern)
+                val out = ArrayList<String>()
+                var cursor = 0
+                for (m in re.findAll(text)) {
+                    if (m.range.first > cursor) {
+                        out.add(text.substring(cursor, m.range.first))
+                    }
+                    if (m.value.isNotEmpty()) {
+                        out.add(m.value)
+                    }
+                    cursor = m.range.last + 1
+                }
+                if (cursor < text.length) {
+                    out.add(text.substring(cursor))
+                }
+                out
+            }.getOrNull()
+            if (!regexPieces.isNullOrEmpty()) return regexPieces
+        }
+        return splitByteLevelChunks(text)
     }
 
     /**
@@ -336,24 +366,36 @@ object VietnameseIpaPhonemizer {
     //   "điểm" -> "ɗˈiɛ4m", "một" -> "mˈo6t̪", "hôm" -> "hˈom", "nay" -> "nˈaj"
     // -------------------------------------------------------------------------
 
-    private fun phonemizeSeaG2pEspeak(sentence: String, decodedMerges: Set<String>): String {
+    private fun phonemizeSeaG2pEspeak(
+        sentence: String,
+        decodedMerges: Set<String>,
+        seaG2pDict: SeaG2pBinaryDict? = null
+    ): String {
         val mergedBlob = decodedMerges.joinToString(" ")
         val useStressMark = mergedBlob.contains("ˈ") || decodedMerges.isEmpty()
-        val useDentalT = mergedBlob.contains("t̪")
+        // NOTE: Combining dental diacritic U+032A (`̪`, token 330) appears standalone in tokenizer[300..418]!
+        val useDentalT = mergedBlob.contains("\u032A") || mergedBlob.contains("t\u032A")
         val useLengthColon = mergedBlob.contains("ː") || decodedMerges.isEmpty()
         val useImplosiveD = mergedBlob.contains("ɗ") || decodedMerges.isEmpty()
         val useImplosiveB = mergedBlob.contains("ɓ")
+        val hasAspirationH = mergedBlob.contains("ʰ")
+        // NOTE: `tokenizer[300..418]` contains `ᵻ` (333) and NO `ɯ`! Use `ᵻ` when `ɯ` is absent.
+        val uBarSymbol = when {
+            mergedBlob.contains("ɯ") -> "ɯ"
+            mergedBlob.contains("ᵻ") -> "ᵻ"
+            else -> "ᵻ"
+        }
         val useChAffricate = when {
-            mergedBlob.contains("tɕ") -> "tɕ"
-            mergedBlob.contains("tʃ") -> "tʃ"
+            mergedBlob.contains("tɕ") || mergedBlob.contains("ɕ") -> "tɕ"
+            mergedBlob.contains("ʃ") -> "tʃ"
             else -> "tʃ"
         }
         // In eSpeak-NG Vietnamese (`sea-g2p`):
-        // tone 1 (ngang) = ""
+        // tone 1 (ngang) = "" (or 1)
         // tone 2 (huyền) = "2"
-        // tone 3 (sắc)   = "ɜ" (if "ɜ" in merges — eSpeak IPA rendering of `ph_vietnam` tone 3/sắc!) else "5"
+        // tone 3 (sắc)   = "ɜ" (311:ɜ in tokenizer[300..418] — eSpeak IPA rendering of `ph_vietnam` sắc!)
         // tone 4 (hỏi)   = "4"
-        // tone 5 (ngã)   = "5" (if sắc uses "ɜ") else "3"
+        // tone 5 (ngã)   = "5"
         // tone 6 (nặng)  = "6"
         val sacSymbol = when {
             mergedBlob.contains("ɜ") -> "ɜ"
@@ -371,7 +413,9 @@ object VietnameseIpaPhonemizer {
             .toList()
 
         val result = ArrayList<String>(tokens.size)
-        for (tok in tokens) {
+        var i = 0
+        while (i < tokens.size) {
+            val tok = tokens[i]
             if (tok.length == 1 && !tok[0].isLetterOrDigit()) {
                 val mappedPunct = when (tok) {
                     ",", ".", "!", "?", ";", ":" -> tok
@@ -380,13 +424,33 @@ object VietnameseIpaPhonemizer {
                     else -> ""
                 }
                 if (mappedPunct.isNotEmpty() && result.isNotEmpty()) {
-                    // Attach punctuation to previous word (exact sea-g2p output: `ɗˈiɛ4m.`)
                     result[result.lastIndex] = result.last() + mappedPunct
                 }
+                i++
                 continue
             }
 
             val lower = tok.lowercase(Locale("vi", "VN"))
+            // 1. Prefer exact mmap lookup in `sea_g2p.bin` (check 2-word Vietnamese compound first, then 1-word)
+            if (seaG2pDict != null && seaG2pDict.isValidatedForVietnamese) {
+                if (i + 1 < tokens.size && tokens[i + 1].all { it.isLetterOrDigit() }) {
+                    val bigram = "$lower ${tokens[i + 1].lowercase(Locale("vi", "VN"))}"
+                    val biIpa = seaG2pDict.lookupVietnamese(bigram)
+                    if (!biIpa.isNullOrBlank()) {
+                        result.add(biIpa.trim())
+                        i += 2
+                        continue
+                    }
+                }
+                val uniIpa = seaG2pDict.lookupVietnamese(lower)
+                if (!uniIpa.isNullOrBlank()) {
+                    result.add(uniIpa.trim())
+                    i++
+                    continue
+                }
+            }
+
+            // 2. Fallback to exact eSpeak-NG / sea-g2p Northern Vietnamese rule phonemizer
             val ipa = phonemizeSingleVietnameseWordEspeak(
                 rawWord = lower,
                 useStress = useStressMark,
@@ -394,6 +458,8 @@ object VietnameseIpaPhonemizer {
                 useLengthColon = useLengthColon,
                 useImplosiveD = useImplosiveD,
                 useImplosiveB = useImplosiveB,
+                hasAspirationH = hasAspirationH,
+                uBarSymbol = uBarSymbol,
                 chAffricate = useChAffricate,
                 sacSymbol = sacSymbol,
                 ngaSymbol = ngaSymbol
@@ -401,6 +467,7 @@ object VietnameseIpaPhonemizer {
             if (ipa.isNotEmpty()) {
                 result.add(ipa)
             }
+            i++
         }
         return result.joinToString(" ")
     }
@@ -412,6 +479,8 @@ object VietnameseIpaPhonemizer {
         useLengthColon: Boolean,
         useImplosiveD: Boolean,
         useImplosiveB: Boolean,
+        hasAspirationH: Boolean,
+        uBarSymbol: String,
         chAffricate: String,
         sacSymbol: String,
         ngaSymbol: String
@@ -421,7 +490,8 @@ object VietnameseIpaPhonemizer {
 
         // 1. Parse Onset (Phụ âm đầu)
         var rest = baseWord
-        val tSym = if (useDentalT) "t̪" else "t"
+        val tSym = if (useDentalT) "t\u032A" else "t"
+        val thSym = if (hasAspirationH) "tʰ" else "${tSym}h"
         val onset: String
         when {
             rest.startsWith("ngh") -> { onset = "ŋ"; rest = rest.substring(3) }
@@ -429,7 +499,7 @@ object VietnameseIpaPhonemizer {
             rest.startsWith("nh") -> { onset = "ɲ"; rest = rest.substring(2) }
             rest.startsWith("ch") -> { onset = chAffricate; rest = rest.substring(2) }
             rest.startsWith("tr") -> { onset = chAffricate; rest = rest.substring(2) }
-            rest.startsWith("th") -> { onset = "tʰ"; rest = rest.substring(2) }
+            rest.startsWith("th") -> { onset = thSym; rest = rest.substring(2) }
             rest.startsWith("ph") -> { onset = "f"; rest = rest.substring(2) }
             rest.startsWith("kh") -> { onset = "x"; rest = rest.substring(2) }
             rest.startsWith("gh") -> { onset = "ɣ"; rest = rest.substring(2) }
@@ -491,28 +561,28 @@ object VietnameseIpaPhonemizer {
             }
         }
 
-        // 4. Parse Vowel Nucleus (Âm chính) matching eSpeak-NG / sea-g2p Northern Vietnamese
+        // 4. Parse Vowel Nucleus (Âm chính) matching eSpeak-NG / sea-g2p Northern Vietnamese & tokenizer[300..418]
         val longMark = if (useLengthColon) "ː" else ""
         val nucleus = when (rest) {
             "iê", "yê", "ia", "ya" -> "iɛ"
             "uô", "ua" -> "uə"
-            "ươ", "ưa" -> "ɯə"
+            "ươ", "ưa" -> "${uBarSymbol}ə"
             "i", "y" -> "i"
             "ê" -> "e"
             "e" -> "ɛ"
-            "ư" -> "ɯ"
+            "ư" -> uBarSymbol
             "ơ" -> "ə$longMark"
             "â" -> "ə"
-            "a" -> if (coda.isEmpty() || coda == "j" || coda == "w") "a$longMark" else "a$longMark"
+            "a" -> "a$longMark"
             "ă" -> "a"
             "u" -> "u"
             "ô" -> "o"
             "o" -> "ɔ"
-            "ưu" -> { coda = "w"; "ɯ" }
+            "ưu" -> { coda = "w"; uBarSymbol }
             "iu" -> { coda = "w"; "i" }
             "uôi" -> { coda = "j"; "uə" }
-            "ươi" -> { coda = "j"; "ɯə" }
-            "ươu" -> { coda = "w"; "ɯə" }
+            "ươi" -> { coda = "j"; "${uBarSymbol}ə" }
+            "ươu" -> { coda = "w"; "${uBarSymbol}ə" }
             "iêu", "yêu" -> { coda = "w"; "iɛ" }
             else -> rest.map { ch ->
                 when (ch) {
@@ -523,7 +593,7 @@ object VietnameseIpaPhonemizer {
                     'ô' -> "o"
                     'o' -> "ɔ"
                     'ơ' -> "ə$longMark"
-                    'ư' -> "ɯ"
+                    'ư' -> uBarSymbol
                     'y' -> "i"
                     else -> ch.toString()
                 }
@@ -578,6 +648,8 @@ object VietnameseIpaPhonemizer {
                 useLengthColon = false,
                 useImplosiveD = true,
                 useImplosiveB = true,
+                hasAspirationH = true,
+                uBarSymbol = "ɯ",
                 chAffricate = "tɕ",
                 sacSymbol = "",
                 ngaSymbol = ""

@@ -126,6 +126,27 @@ jobs:
             })();
           '
 
+      - name: Chạy kiểm thử tự động âm thanh AI (test_voice.wav)
+        run: |
+          mkdir -p /tmp/ort-test
+          npm --prefix /tmp/ort-test install --no-audit --no-fund onnxruntime-node
+          NODE_PATH=/tmp/ort-test/node_modules node scripts/test_tts.mjs \
+            app/src/main/assets/models \
+            test_voice.wav \
+            tts_test_report.txt
+          ls -lh test_voice.wav tts_test_report.txt
+
+      - name: Lưu kết quả kiểm thử âm thanh (test_voice.wav & log)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TTS-Audio-Test-${{ github.run_number }}
+          path: |
+            test_voice.wav
+            tts_test_report.txt
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Cài đặt Java 21 (bắt buộc cho AGP 9.1 & Gradle 9.3)
         uses: actions/setup-java@v4
         with:
@@ -168,10 +189,13 @@ jobs:
           path: ${{ env.APK_PATH }}
           retention-days: 14
 
-      - name: Xuất thẳng file APK ra mục Releases
+      - name: Xuất thẳng file APK và mẫu nghe thử test_voice.wav ra mục Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v2.0.${{ github.run_number }}
           name: Cleanbook Full Offline v2.0.${{ github.run_number }}
-          files: ${{ env.APK_PATH }}
+          files: |
+            ${{ env.APK_PATH }}
+            test_voice.wav
+            tts_test_report.txt
           fail_on_unmatched_files: true

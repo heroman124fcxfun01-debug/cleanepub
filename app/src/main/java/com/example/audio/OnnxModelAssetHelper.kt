@@ -84,6 +84,8 @@ data class ParsedTokenizerData(
     val merges: List<Pair<String, String>> = emptyList(),
     val isByteLevelBpe: Boolean = false,
     val addPrefixSpace: Boolean = false,
+    val splitPattern: String? = null,
+    val splitBehavior: String = "",
     val preTokenizerSummary: String = "",
     val bosTokenId: Long?,
     val eosTokenId: Long?,
@@ -772,24 +774,39 @@ object OnnxModelAssetHelper {
             }
 
             var addPrefixSpace = false
+            var splitPattern: String? = null
+            var splitBehavior = ""
             var preTokSummary = ""
             val preTokObj = root.optJSONObject("pre_tokenizer")
             if (preTokObj != null) {
+                fun extractSplit(obj: JSONObject) {
+                    if (obj.optString("type").equals("Split", ignoreCase = true)) {
+                        val patObj = obj.optJSONObject("pattern")
+                        val pat = patObj?.optString("Regex")?.ifBlank { patObj.optString("String") }
+                            ?: obj.optString("pattern")
+                        if (!pat.isNullOrEmpty()) splitPattern = pat
+                        splitBehavior = obj.optString("behavior", "")
+                    }
+                }
                 val ptType = preTokObj.optString("type")
                 addPrefixSpace = preTokObj.optBoolean("add_prefix_space", false)
+                extractSplit(preTokObj)
                 val subList = preTokObj.optJSONArray("pretokenizers")
                 if (subList != null) {
                     val types = ArrayList<String>()
                     for (i in 0 until subList.length()) {
                         val sub = subList.optJSONObject(i) ?: continue
                         types.add(sub.optString("type"))
+                        extractSplit(sub)
                         if (sub.has("add_prefix_space") && sub.optBoolean("add_prefix_space", false)) {
                             addPrefixSpace = true
                         }
                     }
-                    preTokSummary = "$ptType[${types.joinToString("+")}](prefixSpace=$addPrefixSpace)"
+                    val patPart = splitPattern?.let { ", split='$it'($splitBehavior)" }.orEmpty()
+                    preTokSummary = "$ptType[${types.joinToString("+")}](prefixSpace=$addPrefixSpace$patPart)"
                 } else {
-                    preTokSummary = "$ptType(prefixSpace=$addPrefixSpace)"
+                    val patPart = splitPattern?.let { ", split='$it'($splitBehavior)" }.orEmpty()
+                    preTokSummary = "$ptType(prefixSpace=$addPrefixSpace$patPart)"
                 }
             }
             val isByteLevelBpe = tokenToId.containsKey("Ā") && tokenToId.containsKey("Ġ")
@@ -800,6 +817,8 @@ object OnnxModelAssetHelper {
                 merges = merges,
                 isByteLevelBpe = isByteLevelBpe,
                 addPrefixSpace = addPrefixSpace,
+                splitPattern = splitPattern,
+                splitBehavior = splitBehavior,
                 preTokenizerSummary = preTokSummary,
                 bosTokenId = bosId,
                 eosTokenId = eosId,

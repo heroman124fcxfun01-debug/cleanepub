@@ -38,7 +38,8 @@ data class VieNeuConfigData(
     val audioRefSlotTokenId: Long? = null,
     val defaultStyleTokenId: Long? = null,
     val rmsNormEps: Float = 1e-6f,
-    val rawSummary: String = ""
+    val rawSummary: String = "",
+    val codecMetaSummary: String = ""
 )
 
 /**
@@ -340,6 +341,7 @@ class VieNeuV3WeightStore(
                 }
             }
 
+            val codecMetaParts = ArrayList<String>()
             codecMetaFile?.takeIf { it.exists() }?.let { cm ->
                 runCatching {
                     val root = JSONObject(cm.readText(Charsets.UTF_8))
@@ -347,6 +349,12 @@ class VieNeuV3WeightStore(
                     if (sr in setOf(16_000, 22_050, 24_000, 44_100, 48_000)) sampleRate = sr
                     val nq = root.optInt("num_codebooks", root.optInt("num_quantizers", root.optInt("n_q", 0)))
                     if (nq in 1..32) numCodebooks = nq
+                    val keys = root.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        val vStr = root.opt(k)?.toString().orEmpty()
+                        codecMetaParts.add(if (vStr.length <= 64) "$k=$vStr" else "$k=[len=${vStr.length}]")
+                    }
                 }
             }
 
@@ -367,7 +375,8 @@ class VieNeuV3WeightStore(
                 audioRefSlotTokenId = audioRefSlotId,
                 defaultStyleTokenId = defaultStyleId,
                 rmsNormEps = rmsEps,
-                rawSummary = summaryParts.take(28).joinToString(", ")
+                rawSummary = summaryParts.joinToString(", "),
+                codecMetaSummary = codecMetaParts.joinToString(", ")
             )
         }
 

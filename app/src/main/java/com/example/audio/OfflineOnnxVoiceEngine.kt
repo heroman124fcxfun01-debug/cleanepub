@@ -105,6 +105,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
     private var codecDecoderSession: OrtSession? = null
 
     private var g2pLexicon: Map<String, IntArray> = emptyMap()
+    private var seaG2pDict: SeaG2pBinaryDict? = null
     private var tokenizerData: ParsedTokenizerData? = null
     private var vieNeuConfig: VieNeuConfigData = VieNeuConfigData()
     private var headWeightStore: VieNeuV3WeightStore? = null
@@ -112,6 +113,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
     private var presetVoices: Map<String, FloatArray> = emptyMap()
     private var vieNeuV3Runner: VieNeuV3OnnxRunner? = null
     private var seaG2pHeaderInfo: String = ""
+    private var lastCodecEncodeNote: String = ""
     private val sessionLoadErrors = LinkedHashMap<String, String>()
     private val loadedSessionSignatures = LinkedHashMap<String, String>()
 
@@ -145,6 +147,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
         // Parse supporting dictionaries, configs, and VieNeu v3 binary head tables from filesDir/models/
         g2pLexicon = OnnxModelAssetHelper.parseSeaG2pBinary(discovered.g2pDictionaryFile)
+        runCatching { seaG2pDict?.close() }
+        seaG2pDict = SeaG2pBinaryDict.open(discovered.g2pDictionaryFile)
         seaG2pHeaderInfo = VietnameseIpaPhonemizer.inspectSeaG2pHeader(discovered.g2pDictionaryFile)
         tokenizerData = OnnxModelAssetHelper.parseTokenizerAndConfig(
             discovered.tokenizerJsonFile,
@@ -261,7 +265,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 weightStore = headWeightStore,
                 config = vieNeuConfig,
                 tokenizer = tokenizerData,
-                presetVoices = richPresetVoices
+                presetVoices = richPresetVoices,
+                seaG2pDict = seaG2pDict
             )
         } else {
             null
@@ -287,6 +292,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
     private fun closeSessionsLocked() {
         vieNeuV3Runner = null
+        runCatching { seaG2pDict?.close() }
+        seaG2pDict = null
         runCatching { speakerEncoderSession?.close() }
         runCatching { prefillSession?.close() }
         runCatching { decodeStepSession?.close() }
@@ -345,13 +352,21 @@ class OfflineOnnxVoiceEngine(context: Context) {
             val voicesDetail = if (richPresetVoices.isEmpty()) "(trống)" else {
                 richPresetVoices.take(3).joinToString(" | ") { "${it.id}(${it.keysSummary})" }
             }
+            val manifestText = d?.manifestJsonFile?.takeIf { it.exists() }?.let { mf ->
+                runCatching { mf.readText(Charsets.UTF_8).replace(Regex("\\s+"), " ").take(600) }.getOrNull()
+            } ?: "(trống)"
+            val calibrationSummary = vieNeuV3Runner?.getOrRunCalibration()?.diagnosticSummary ?: "(chưa có VieNeuV3Runner)"
             val metadata = linkedMapOf(
                 "config.json" to vieNeuConfig.rawSummary.ifBlank { "(trống)" },
+                "codec_meta" to vieNeuConfig.codecMetaSummary.ifBlank { "(trống)" },
+                "manifest.json" to manifestText,
                 "heads.json" to (headWeightStore?.describeAll() ?: "(trống)"),
+                "sea_g2p_mmap" to (seaG2pDict?.diagnosticSummary ?: "(chưa mở được SEAP)"),
                 "tokenizer_info" to "byteBpe=${tokenizerData?.isByteLevelBpe == true}, merges=${tokenizerData?.merges?.size ?: 0}, pre=${tokenizerData?.preTokenizerSummary.orEmpty()}",
                 "tokenizer[0..23]" to sampleToks,
                 "tokenizer[300..418] (decoded UTF-8)" to decodedMerges,
-                "voices.json" to voicesDetail
+                "voices.json" to voicesDetail,
+                "auto_calibration" to calibrationSummary
             )
 
             AiSystemDiagnosticReport(
@@ -396,6 +411,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 appendLine("Mẫu đầu vào: ${inputSamples.size} mẫu @ ${sampleRate} Hz")
                 appendLine("Dùng ONNX speaker_encoder: ${result.usedOnnxEncoder}")
                 appendLine("Kích thước vector đặc trưng: ${result.embedding.size} chiều")
+                appendLine("ReferenceCodes (MOSS encode): ${result.referenceCodes?.size ?: 0} frames (${lastCodecEncodeNote.ifBlank { "n/a" }})")
                 appendLine("Pitch ratio ước lượng: ${String.format(Locale.US, "%.3f", result.estimatedPitchRatio)}")
                 loadedSessionSignatures["speaker_encoder"]?.let { appendLine("Session: $it") }
                 if (!result.errorMessage.isNullOrBlank()) {
@@ -1662,11 +1678,15 @@ class OfflineOnnxVoiceEngine(context: Context) {
                         raw.coerceIn(0, vieNeuConfig.codebookSize - 1)
                     }
                 }
-                Log.i(TAG, "Encoded reference audio via ${encFile.name}: ${matrix.size}x$nq frames")
+                val sigNote = "in=[${formatInputSignatures(encSession)}] out=[${formatOutputSignatures(encSession)}] -> ${matrix.size}x$nq"
+                lastCodecEncodeNote = sigNote
+                Log.i(TAG, "Encoded reference audio via ${encFile.name}: $sigNote")
                 return matrix
             }
         } catch (e: Throwable) {
-            Log.w(TAG, "Transient moss_audio_tokenizer_encode skipped: ${e.message}")
+            val sigNote = encSession?.let { "in=[${formatInputSignatures(it)}] out=[${formatOutputSignatures(it)}] " }.orEmpty()
+            lastCodecEncodeNote = "${sigNote}ERR=${e.message}"
+            Log.w(TAG, "Transient moss_audio_tokenizer_encode skipped: $lastCodecEncodeNote")
             return null
         } finally {
             inputs.values.forEach { runCatching { it.close() } }
