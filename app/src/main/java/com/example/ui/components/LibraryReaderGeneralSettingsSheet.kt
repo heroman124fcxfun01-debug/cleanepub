@@ -895,7 +895,7 @@ private fun AudioListeningDefaultsTab(
     }
     val effectiveCloned = activeCloned ?: if (activePreset == null) clonedVoices.firstOrNull() else null
     val activeAiLabel = when {
-        effectiveCloned != null -> "✦ ${effectiveCloned.name}"
+        effectiveCloned != null -> "✦ ${effectiveCloned.displayNameWithCodeCount}"
         activePreset != null -> "★ ${activePreset.displayLabel}"
         else -> "Chưa có giọng AI (kiểm tra voices.json / Studio)"
     }
@@ -1081,7 +1081,7 @@ private fun AudioListeningDefaultsTab(
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
                                         Text(
-                                            text = "✦ ${cloned.name}",
+                                            text = "✦ ${cloned.displayNameWithCodeCount}",
                                             fontSize = 12.sp,
                                             fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                                             color = if (selected) accentBlue else primaryInk

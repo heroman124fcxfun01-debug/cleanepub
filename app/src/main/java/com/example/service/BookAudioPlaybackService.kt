@@ -754,10 +754,10 @@ class BookAudioPlaybackService : Service() {
     )
 
     /**
-     * Xây dựng danh sách phân đoạn đọc siêu gọn **80–140 ký tự** theo dấu câu tự nhiên (`.`, `?`, `!`, `;`, `,`):
-     * - Phân đoạn đầu tiên giữ gọn (~60–105 ký tự) để phát câu đầu sau ~1.5 giây.
-     * - Các phân đoạn sau duy trì 80–140 ký tự để luồng Producer luôn tính xong câu N+1, N+2, N+3
-     *   vào hàng đợi `LinkedBlockingQueue(3)` trước khi luồng Consumer đọc xong câu N.
+     * Xây dựng danh sách phân đoạn đọc siêu gọn **80–120 ký tự** theo dấu câu tự nhiên (`.`, `?`, `!`, `;`, `,`):
+     * - Phân đoạn đầu tiên giữ gọn (~55–95 ký tự) để phát câu đầu chỉ sau ~1.2–1.5 giây.
+     * - Các phân đoạn sau duy trì 80–120 ký tự để luồng Producer luôn tính xong câu N+1, N+2
+     *   vào hàng đợi `LinkedBlockingQueue(2)` trước khi luồng Consumer đọc xong câu N.
      */
     private fun buildAiChapterChunks(
         chapterParagraphs: List<String>,
@@ -768,7 +768,7 @@ class BookAudioPlaybackService : Service() {
         for (pIdx in startParagraphIndex until chapterParagraphs.size) {
             val allSentences = VietnameseTtsTextNormalizer.splitIntoSmartSentences(
                 rawText = chapterParagraphs[pIdx],
-                maxSentenceLength = 140
+                maxSentenceLength = 120
             )
             if (allSentences.isEmpty()) continue
             val sStart = if (pIdx == startParagraphIndex) {
@@ -781,8 +781,8 @@ class BookAudioPlaybackService : Service() {
             val chunkedInPara = VietnameseTtsTextNormalizer.chunkSentencesForLowLatencyAi(
                 sentences = slice,
                 minChars = 80,
-                maxChars = 140,
-                firstChunkMaxChars = 105,
+                maxChars = 120,
+                firstChunkMaxChars = 95,
                 isFirstParagraphOfStream = isOpeningPara
             )
             chunkedInPara.forEachIndexed { localIdx, (speakText, relStartIdx) ->
@@ -803,13 +803,13 @@ class BookAudioPlaybackService : Service() {
 
         if (rawChunks.size <= 1) return rawChunks
 
-        // Gộp thêm các câu thoại cực ngắn liền kề nhau (<= 140 ký tự, giữ câu đầu <= 105 ký tự)
+        // Gộp thêm các câu thoại cực ngắn liền kề nhau (<= 120 ký tự, giữ câu đầu <= 95 ký tự)
         val compact = ArrayList<AiChapterChunk>(rawChunks.size)
         var i = 0
         while (i < rawChunks.size) {
             var current = rawChunks[i]
             val isFirstChunk = compact.isEmpty()
-            val ceiling = if (isFirstChunk) 105 else 140
+            val ceiling = if (isFirstChunk) 95 else 120
             val mergeFloor = if (isFirstChunk) 55 else 80
             i++
             while (i < rawChunks.size && current.speakText.length < mergeFloor) {
@@ -831,10 +831,11 @@ class BookAudioPlaybackService : Service() {
     }
 
     /**
-     * Kiến trúc Producer-Consumer 2 luồng tách biệt hoàn toàn với `LinkedBlockingQueue<PreparedAiSegment>(3)`:
-     * - **Luồng 1 (Producer — `VieNeu-Producer`)**: Khóa sẵn prefix giọng đọc, liên tục sinh câu N+1, N+2, N+3
-     *   (80–140 ký tự) qua GGUF + NeuCodec + chuẩn hóa PCM16 24kHz (kèm nhịp thở 150ms & crossfade 15ms) và đẩy
-     *   vào hàng đợi `LinkedBlockingQueue(3)`.
+     * Kiến trúc Producer-Consumer 2 luồng tách biệt hoàn toàn với `LinkedBlockingQueue<PreparedAiSegment>(2)`:
+     * - **Giải phóng RAM thông minh**: Đảm bảo `neucodec_encoder.onnx` (>150 MB) đã được đóng trước khi đọc.
+     * - **Luồng 1 (Producer — `VieNeu-Producer`)**: Khóa sẵn prefix giọng đọc, liên tục sinh câu N+1, N+2
+     *   (80–120 ký tự) qua GGUF (n_threads=3) + NeuCodec Decoder + chuẩn hóa PCM16 24kHz (nhịp thở 150ms)
+     *   và đẩy vào hàng đợi `LinkedBlockingQueue(2)`.
      * - **Luồng 2 (Consumer — `VieNeu-AudioOut`, ưu tiên `THREAD_PRIORITY_AUDIO`)**: Lấy từng mảng `ShortArray`
      *   từ hàng đợi và ghi nối tiếp trực tiếp vào **MỘT `AudioTrack` (`MODE_STREAM`, 24kHz) duy nhất**, không bao giờ
      *   đóng/mở lại giữa các câu -> đọc nối tiếp không độ trễ!
@@ -901,6 +902,9 @@ class BookAudioPlaybackService : Service() {
                 resolvedPresetId = presetVoiceId
             }
 
+            // Giải phóng >150 MB RAM của neucodec_encoder.onnx trước khi bắt đầu luồng đọc sách
+            onnxEngine.releaseEncoderMemory()
+
             // Khóa cố định tiền tố giọng (ref_phones + ref_codes) MỘT LẦN DUY NHẤT trước khi chạy toàn bộ chương
             onnxEngine.prepareVoiceForStreaming(
                 referenceCodes = resolvedCodes,
@@ -936,11 +940,11 @@ class BookAudioPlaybackService : Service() {
                 activePrefs.speechRate
             }).coerceIn(0.8f, 1.5f)
 
-            // Bộ đệm gối đầu 3 câu sẵn sàng (capacity = 3): khi Consumer phát câu N, Producer đã tính xong N+1, N+2, N+3
-            val lookAheadQueue = LinkedBlockingQueue<PreparedAiSegment>(3)
+            // Bộ đệm gối đầu 2 câu sẵn sàng (capacity = 2): tối ưu RAM & triệt tiêu quãng nghỉ giữa các câu
+            val lookAheadQueue = LinkedBlockingQueue<PreparedAiSegment>(2)
             val isStillValid: () -> Boolean = { !stopFlag.get() && generation == activeParagraphGeneration }
 
-            // LUỒNG 1 (Producer Thread): tổng hợp GGUF + NeuCodec 24kHz liên tục vào LinkedBlockingQueue(3)
+            // LUỒNG 1 (Producer Thread): tổng hợp GGUF + NeuCodec 24kHz liên tục vào LinkedBlockingQueue(2)
             val producer = Thread({
                 Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND + Process.THREAD_PRIORITY_MORE_FAVORABLE)
                 try {

@@ -43,7 +43,10 @@ object AudioFileDecoder {
     private const val MIN_DECODE_SECONDS = 2.0
     const val CLONE_MIN_WINDOW_SECONDS = 3.0f
     const val CLONE_OPTIMAL_WINDOW_SECONDS = 6.0f
-    const val CLONE_MAX_WINDOW_SECONDS = 8.0f
+    const val CLONE_MAX_WINDOW_SECONDS = 7.0f
+    const val CLONE_MAX_SAMPLES_16K = 112_000
+    const val ABSOLUTE_SILENCE_THRESHOLD = 0.005f
+    const val MAX_EDGE_SILENCE_TRIM_SECONDS = 0.15f
 
     private data class DecodedRawMono(
         val monoFloat: FloatArray,
@@ -596,132 +599,51 @@ object AudioFileDecoder {
     }
 
     /**
-     * Trims leading/trailing silence and selects the cleanest [minSeconds]..[maxSeconds] (default 5-8s)
-     * active speech segment at [sampleRate] Hz for `neucodec_encoder.onnx` zero-shot voice cloning.
-     *
-     * Scores candidate windows by active speech ratio, consistent vocal RMS, and low silence/clipping,
-     * ensuring 250-400 clean 50Hz FSQ `ref_codes` that fit comfortably inside VieNeu-TTS GGUF's context.
+     * Prepares reference voice audio at exact `16,000 Hz` Mono Float32 (`[-1.0f, 1.0f]`) for
+     * `neucodec_encoder.onnx` zero-shot cloning:
+     * 1. Trims **only absolute silence (`abs(sample) < 0.005f`)** up to a **maximum of `0.15s`**
+     *    (2,400 samples @ 16kHz) at the start and end so initial Vietnamese syllables are NEVER clipped.
+     * 2. Caps duration strictly at **7.0 seconds (`112,000 samples` @ 16kHz)** so the extracted
+     *    NeuCodec FSQ `ref_codes` (~350 tokens) fit cleanly inside `n_ctx = 1536` aligned with `ref_text`.
      */
     fun extractCleanestSpeechWindow16k(
         samples: FloatArray,
         sampleRate: Int = SPEAKER_ENCODER_SAMPLE_RATE,
         minSeconds: Float = CLONE_MIN_WINDOW_SECONDS,
         maxSeconds: Float = CLONE_MAX_WINDOW_SECONDS,
-        trimEdgeMicNoiseSeconds: Float = 0.25f
+        trimEdgeMicNoiseSeconds: Float = MAX_EDGE_SILENCE_TRIM_SECONDS
     ): FloatArray {
         if (samples.isEmpty() || sampleRate <= 0) return samples
 
-        // 0. Strip 0.25s mic-activation / mic-stop transient ("ụp" thump) at both start & end
-        // whenever recording is long enough (> 1.5s) so mic clicks are NEVER encoded into ref_codes.
-        val edgeTrimSamples = (sampleRate * trimEdgeMicNoiseSeconds.coerceAtLeast(0f)).toInt()
-        val workingSamples = if (edgeTrimSamples > 0 && samples.size > edgeTrimSamples * 2 + sampleRate) {
-            samples.copyOfRange(edgeTrimSamples, samples.size - edgeTrimSamples)
+        // 1. Trim ONLY absolute silence (|sample| < 0.005f) capped strictly at <= 0.15s at start & end
+        val maxEdgeTrim = (sampleRate * trimEdgeMicNoiseSeconds.coerceIn(0f, MAX_EDGE_SILENCE_TRIM_SECONDS)).toInt()
+        var trimStart = 0
+        val startLimit = min(maxEdgeTrim, samples.size / 4)
+        while (trimStart < startLimit && abs(samples[trimStart]) < ABSOLUTE_SILENCE_THRESHOLD) {
+            trimStart++
+        }
+        var trimEnd = samples.size
+        val minEnd = (samples.size - min(maxEdgeTrim, samples.size / 4)).coerceAtLeast(trimStart + 1)
+        while (trimEnd > minEnd && abs(samples[trimEnd - 1]) < ABSOLUTE_SILENCE_THRESHOLD) {
+            trimEnd--
+        }
+
+        val trimmed = if (trimEnd - trimStart >= sampleRate / 2) {
+            samples.copyOfRange(trimStart, trimEnd)
         } else {
             samples
         }
 
-        val frameLen = (sampleRate / 50).coerceAtLeast(160) // 20ms frame
-        val numFrames = workingSamples.size / frameLen
-        if (numFrames < 4) return applyGentleEdgeFadeAndNormalize(workingSamples, sampleRate)
-
-        val frameRms = FloatArray(numFrames)
-        var maxRms = 0f
-        for (f in 0 until numFrames) {
-            val base = f * frameLen
-            var sq = 0.0
-            for (i in 0 until frameLen) {
-                val v = workingSamples[base + i].toDouble()
-                sq += v * v
-            }
-            val rms = kotlin.math.sqrt(sq / frameLen).toFloat()
-            frameRms[f] = rms
-            if (rms > maxRms) maxRms = rms
-        }
-
-        if (maxRms < 1e-4f) return applyGentleEdgeFadeAndNormalize(workingSamples, sampleRate)
-
-        // 1. Trim dead leading/trailing silence (keep 80ms = 4 frames natural breath margin)
-        val silenceThresh = (maxRms * 0.07f).coerceIn(0.008f, 0.025f)
-        var firstSpeechFrame = 0
-        while (firstSpeechFrame < numFrames && frameRms[firstSpeechFrame] < silenceThresh) {
-            firstSpeechFrame++
-        }
-        var lastSpeechFrame = numFrames - 1
-        while (lastSpeechFrame > firstSpeechFrame && frameRms[lastSpeechFrame] < silenceThresh) {
-            lastSpeechFrame--
-        }
-
-        val marginFrames = 4 // 80ms
-        val trimStartSample = ((firstSpeechFrame - marginFrames).coerceAtLeast(0)) * frameLen
-        val trimEndSample = (((lastSpeechFrame + 1 + marginFrames).coerceAtMost(numFrames)) * frameLen)
-            .coerceAtMost(workingSamples.size)
-
-        val trimmed = if (trimEndSample - trimStartSample >= sampleRate) {
-            workingSamples.copyOfRange(trimStartSample, trimEndSample)
-        } else {
-            workingSamples
-        }
-
-        val maxSamples = (sampleRate * maxSeconds).toInt().coerceAtLeast(sampleRate)
+        // 2. Cap strictly at 7.0 seconds (112,000 samples @ 16kHz) preserving the beginning aligned with ref_text
+        val maxSamples = min(
+            (sampleRate * maxSeconds.coerceAtMost(CLONE_MAX_WINDOW_SECONDS)).toInt().coerceAtLeast(sampleRate),
+            if (sampleRate == SPEAKER_ENCODER_SAMPLE_RATE) CLONE_MAX_SAMPLES_16K else (sampleRate * 7)
+        )
         if (trimmed.size <= maxSamples) {
             return applyGentleEdgeFadeAndNormalize(trimmed, sampleRate)
         }
-
-        // 2. Slide an optimal 6.0s window (within 3-8s range) across trimmed audio to pick the cleanest speech segment
-        val targetSeconds = CLONE_OPTIMAL_WINDOW_SECONDS.coerceIn(minSeconds, maxSeconds)
-        val winSamples = (sampleRate * targetSeconds).toInt().coerceAtMost(trimmed.size)
-        val winFrames = (winSamples / frameLen).coerceAtLeast(1)
-        val trimFrames = trimmed.size / frameLen
-        val trimFrameRms = FloatArray(trimFrames)
-        val trimFrameClip = FloatArray(trimFrames)
-        for (f in 0 until trimFrames) {
-            val base = f * frameLen
-            var sq = 0.0
-            var clips = 0
-            for (i in 0 until frameLen) {
-                val v = trimmed[base + i]
-                sq += v.toDouble() * v.toDouble()
-                if (abs(v) >= 0.985f) clips++
-            }
-            trimFrameRms[f] = kotlin.math.sqrt(sq / frameLen).toFloat()
-            trimFrameClip[f] = clips.toFloat() / frameLen.toFloat()
-        }
-
-        val activeThresh = (maxRms * 0.12f).coerceIn(0.015f, 0.04f)
-        val stepFrames = 10 // 200ms stride
-        var bestStartFrame = 0
-        var bestScore = Float.NEGATIVE_INFINITY
-
-        var startF = 0
-        val maxStartF = (trimFrames - winFrames).coerceAtLeast(0)
-        while (startF <= maxStartF) {
-            var activeCount = 0
-            var activeRmsSum = 0f
-            var clipSum = 0f
-            for (k in 0 until winFrames) {
-                val r = trimFrameRms[startF + k]
-                if (r >= activeThresh) {
-                    activeCount++
-                    activeRmsSum += r
-                }
-                clipSum += trimFrameClip[startF + k]
-            }
-            val activeRatio = activeCount.toFloat() / winFrames.toFloat()
-            val meanActiveRms = if (activeCount > 0) activeRmsSum / activeCount else 0f
-            val clipRate = clipSum / winFrames.toFloat()
-            // Favor high speech occupancy (0.65..0.95) & clear RMS; penalize clipping and long silences
-            val score = activeRatio * 2.2f + meanActiveRms * 1.5f - clipRate * 8.0f
-            if (score > bestScore) {
-                bestScore = score
-                bestStartFrame = startF
-            }
-            if (startF == maxStartF) break
-            startF = (startF + stepFrames).coerceAtMost(maxStartF)
-        }
-
-        val bestStartSample = (bestStartFrame * frameLen).coerceIn(0, (trimmed.size - winSamples).coerceAtLeast(0))
-        val bestEndSample = (bestStartSample + winSamples).coerceAtMost(trimmed.size)
-        return applyGentleEdgeFadeAndNormalize(trimmed.copyOfRange(bestStartSample, bestEndSample), sampleRate)
+        // Keep the opening 7.0s (0..maxSamples) so Ref Text stays 100% aligned with ref_codes!
+        return applyGentleEdgeFadeAndNormalize(trimmed.copyOfRange(0, maxSamples), sampleRate)
     }
 
     private fun applyGentleEdgeFadeAndNormalize(segment: FloatArray, sampleRate: Int): FloatArray {

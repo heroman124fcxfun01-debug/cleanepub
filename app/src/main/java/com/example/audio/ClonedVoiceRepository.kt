@@ -30,7 +30,11 @@ data class ClonedVoiceProfile(
     val referenceCodeCount: Int = 0,
     val usedOnnxEncoder: Boolean = true,
     val matchedPresetId: String = ""
-)
+) {
+    /** Compact display label showing authentic NeuCodec ref_codes length (e.g. "Giọng Tôi (280c)"). */
+    val displayNameWithCodeCount: String
+        get() = if (referenceCodeCount > 0) "$name (${referenceCodeCount}c)" else name
+}
 
 /**
  * 100% Offline Persistent Storage for Cloned Voices (`filesDir/book_library/cloned_voices/`).

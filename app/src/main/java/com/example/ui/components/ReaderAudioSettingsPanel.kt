@@ -147,9 +147,9 @@ fun ReaderAudioSettingsSheetContent(
         ?: activePresetVoice?.storageId
         ?: clonedVoices.firstOrNull()?.id
         ?: presetAiVoices.firstOrNull()?.storageId
-    val effectiveAiVoiceLabel = activeClonedVoice?.name
+    val effectiveAiVoiceLabel = activeClonedVoice?.displayNameWithCodeCount
         ?: activePresetVoice?.displayLabel
-        ?: clonedVoices.firstOrNull()?.name
+        ?: clonedVoices.firstOrNull()?.displayNameWithCodeCount
         ?: presetAiVoices.firstOrNull()?.displayLabel
 
     // Draft character -> voice map while the scanned character picker is open
@@ -380,7 +380,7 @@ fun ReaderAudioSettingsSheetContent(
                                                         modifier = Modifier.size(14.dp)
                                                     )
                                                     Text(
-                                                        text = cloned.name,
+                                                        text = cloned.displayNameWithCodeCount,
                                                         fontSize = 12.sp,
                                                         fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
                                                         color = if (selected) IosBlue else primaryInk

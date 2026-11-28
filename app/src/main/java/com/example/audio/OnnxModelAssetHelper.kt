@@ -424,15 +424,25 @@ object OnnxModelAssetHelper {
     ) {
         val expectedLength = runCatching {
             context.assets.openFd(assetPath).use { it.length }
-        }.getOrElse { -1L }
+        }.getOrElse {
+            // Compressed assets (e.g. voices.json, vi_espeak_ipa.tsv): compute exact uncompressed size
+            runCatching {
+                context.assets.open(assetPath).use { input ->
+                    val buf = ByteArray(16 * 1024)
+                    var total = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        total += n
+                    }
+                    total
+                }
+            }.getOrElse { -1L }
+        }
 
-        if (destFile.exists() && destFile.length() > 0L) {
-            if (expectedLength > 0L && destFile.length() == expectedLength) {
-                return
-            }
-            if (expectedLength < 0L && destFile.length() > 16L) {
-                return
-            }
+        // Only skip copying when destination exists AND matches exact byte size (auto-overwrites newly quantized ONNX!)
+        if (destFile.exists() && destFile.length() > 0L && expectedLength > 0L && destFile.length() == expectedLength) {
+            return
         }
 
         destFile.parentFile?.mkdirs()

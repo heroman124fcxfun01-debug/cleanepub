@@ -1274,7 +1274,7 @@ fun StudioVoiceCloneSection(
                             }
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = voice.name,
+                                    text = voice.displayNameWithCodeCount,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = if (isSelected) IosBlue else primaryInk,
@@ -1282,7 +1282,7 @@ fun StudioVoiceCloneSection(
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 val tokenLabel = if (voice.referenceCodeCount > 0) {
-                                    "${voice.referenceCodeCount} mã NeuCodec"
+                                    "${voice.referenceCodeCount}c NeuCodec"
                                 } else {
                                     "${voice.embeddingDim}d"
                                 }

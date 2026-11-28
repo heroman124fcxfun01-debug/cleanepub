@@ -846,7 +846,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                         sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE,
                         minSeconds = AudioFileDecoder.CLONE_MIN_WINDOW_SECONDS,
                         maxSeconds = AudioFileDecoder.CLONE_MAX_WINDOW_SECONDS,
-                        trimEdgeMicNoiseSeconds = 0.25f
+                        trimEdgeMicNoiseSeconds = AudioFileDecoder.MAX_EDGE_SILENCE_TRIM_SECONDS
                     )
                 }
                 val extracted = onnxVoiceEngine.extractSpeakerEmbedding(
@@ -929,11 +929,11 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 val codeCount = extracted.referenceCodes?.size ?: 0
                 _statusMessage.value = when {
                     usedSynthPreview ->
-                        "Đã nhân bản giọng thật \"$cleanName\" ($codeCount mã NeuCodec ONNX) — Bấm Nghe thử rồi bấm Lưu."
+                        "Đã nhân bản giọng thật \"$cleanName\" (${codeCount}c • NeuCodec ONNX) — Bấm Nghe thử rồi bấm Lưu."
                     !synthPreviewNote.isNullOrBlank() ->
-                        "Đã trích xuất $codeCount mã giọng thật, tổng hợp GGUF báo lỗi (xem log bên dưới)."
+                        "Đã trích xuất ${codeCount}c mã giọng thật, tổng hợp GGUF báo lỗi (xem log bên dưới)."
                     else ->
-                        "Đã tạo giọng thật \"$cleanName\" ($codeCount mã NeuCodec ONNX) — Bấm Nghe thử rồi bấm Lưu."
+                        "Đã tạo giọng thật \"$cleanName\" (${codeCount}c • NeuCodec ONNX) — Bấm Nghe thử rồi bấm Lưu."
                 }
                 onCreated()
             } catch (e: Throwable) {

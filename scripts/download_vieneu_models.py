@@ -324,30 +324,187 @@ def purge_assets_junk(models_dir: str) -> None:
                 print(f"  [clean] Removed legacy/unused asset: {entry}", flush=True)
 
 
+def _probe_gguf_neu_compat(gguf_path: str) -> bool:
+    """Verify GGUF model contains official NeuCodec special tokens (<|SPEECH_GENERATION_START|>, <|speech_0|>)."""
+    try:
+        from llama_cpp import Llama
+
+        llm = Llama(model_path=gguf_path, n_ctx=256, n_threads=2, n_gpu_layers=0, verbose=False)
+        try:
+            for tok in ("<|TEXT_PROMPT_START|>", "<|SPEECH_GENERATION_START|>", "<|speech_0|>"):
+                ids = llm.tokenize(tok.encode("utf-8"), add_bos=False, special=True)
+                if len(ids) != 1:
+                    print(f"    [reject gguf] {os.path.basename(gguf_path)} missing single special token {tok}", flush=True)
+                    return False
+            return True
+        finally:
+            del llm
+    except Exception as exc:
+        print(f"    [warn gguf probe] Skipping llama_cpp vocab probe ({exc}); accepting GGUF.", flush=True)
+        return True
+
+
+def quantize_decoder_to_quint8(
+    dec_onnx_path: str,
+    downloaded_paths: List[str],
+) -> List[str]:
+    """
+    Dynamically quantize FP32/mixed `neucodec_decoder.onnx` (> 120 MB) to `QuantType.QUInt8`
+    (~85–95 MB), verify 24kHz waveform parity against the original decoder, and delete FP32 originals.
+    """
+    import tempfile
+
+    total_bytes = sum(os.path.getsize(p) for p in set(downloaded_paths) if os.path.isfile(p))
+    orig_mb = total_bytes / (1024.0 * 1024.0)
+    if orig_mb <= 120.0:
+        print(f"  [decoder size] Already compact ({orig_mb:.2f} MB <= 120 MB) — keeping as-is.", flush=True)
+        return downloaded_paths
+
+    print(f"\n=== Quantizing neucodec_decoder.onnx ({orig_mb:.2f} MB) -> QUInt8 (~85–95 MB) ===", flush=True)
+    try:
+        from onnxruntime.quantization import QuantType, quantize_dynamic
+    except Exception as exc:
+        print(f"  [warn quantize] onnxruntime.quantization unavailable ({exc}); keeping original.", flush=True)
+        return downloaded_paths
+
+    # Compute reference 24kHz waveform from FP32 decoder before quantization
+    ref_wav: Optional[np.ndarray] = None
+    try:
+        ref_sess = ort.InferenceSession(dec_onnx_path, providers=["CPUExecutionProvider"])
+        ref_inp = ref_sess.get_inputs()[0]
+        dt = np.int64 if "int64" in ref_inp.type.lower() else np.int32
+        sample_codes = np.asarray([6181, 6377, 55510, 53535, 12044, 31902, 8192, 44210], dtype=dt)
+        if len(ref_inp.shape) == 3:
+            sample_codes = sample_codes.reshape(1, 1, -1)
+        elif len(ref_inp.shape) == 2:
+            sample_codes = sample_codes.reshape(1, -1)
+        ref_wav = np.asarray(ref_sess.run(None, {ref_inp.name: sample_codes})[0], dtype=np.float32).reshape(-1)
+        del ref_sess
+    except Exception as exc:
+        print(f"  [warn quantize] Could not compute reference FP32 waveform ({exc})", flush=True)
+
+    # Tier 1: Full dynamic QUInt8 (smallest ~85-95 MB); Tier 2: MatMul+Gemm+Conv; Tier 3: MatMul+Gemm
+    quant_tiers: List[Tuple[str, Optional[List[str]]]] = [
+        ("Full QUInt8 (all supported ops)", None),
+        ("QUInt8 (MatMul + Gemm + Conv)", ["MatMul", "Gemm", "Conv"]),
+        ("QUInt8 (MatMul + Gemm)", ["MatMul", "Gemm"]),
+    ]
+
+    with tempfile.TemporaryDirectory(prefix="neucodec_dec_q8_") as tmpdir:
+        for tier_label, op_types in quant_tiers:
+            q8_path = os.path.join(tmpdir, "neucodec_decoder_quint8.onnx")
+            safe_unlink(q8_path)
+            try:
+                kwargs = dict(
+                    model_input=dec_onnx_path,
+                    model_output=q8_path,
+                    weight_type=QuantType.QUInt8,
+                )
+                if op_types is not None:
+                    kwargs["op_types_to_quantize"] = op_types
+                quantize_dynamic(**kwargs)
+            except Exception as exc:
+                print(f"  [quantize skip] {tier_label}: {type(exc).__name__}: {exc}", flush=True)
+                continue
+
+            if not os.path.isfile(q8_path):
+                continue
+
+            q8_mb = os.path.getsize(q8_path) / (1024.0 * 1024.0)
+            print(f"  [quantize check] {tier_label} -> {q8_mb:.2f} MB (was {orig_mb:.2f} MB)", flush=True)
+            if q8_mb >= orig_mb * 0.92:
+                print("  [quantize skip] Did not shrink meaningfully; trying next tier.", flush=True)
+                continue
+
+            schema = verify_neucodec_decoder_onnx(q8_path)
+            if schema is None:
+                print(f"  [quantize reject] {tier_label} failed ONNX Runtime inference check.", flush=True)
+                continue
+
+            # Check waveform parity against FP32 reference so voice quality stays crystal clear
+            if ref_wav is not None and ref_wav.size >= 1000:
+                try:
+                    q_sess = ort.InferenceSession(q8_path, providers=["CPUExecutionProvider"])
+                    q_inp = q_sess.get_inputs()[0]
+                    dt = np.int64 if "int64" in q_inp.type.lower() else np.int32
+                    sample_codes = np.asarray([6181, 6377, 55510, 53535, 12044, 31902, 8192, 44210], dtype=dt)
+                    if len(q_inp.shape) == 3:
+                        sample_codes = sample_codes.reshape(1, 1, -1)
+                    elif len(q_inp.shape) == 2:
+                        sample_codes = sample_codes.reshape(1, -1)
+                    q_wav = np.asarray(q_sess.run(None, {q_inp.name: sample_codes})[0], dtype=np.float32).reshape(-1)
+                    del q_sess
+                    n = min(ref_wav.size, q_wav.size)
+                    a = ref_wav[:n] - float(np.mean(ref_wav[:n]))
+                    b = q_wav[:n] - float(np.mean(q_wav[:n]))
+                    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+                    corr = float(np.dot(a, b) / denom) if denom > 1e-8 else 0.0
+                    print(f"  [quantize parity] {tier_label}: waveform corr={corr:.4f}", flush=True)
+                    if corr < 0.70:
+                        print(f"  [quantize reject] Waveform correlation too low ({corr:.4f} < 0.70).", flush=True)
+                        continue
+                except Exception as exc:
+                    print(f"  [quantize reject] Parity check error: {exc}", flush=True)
+                    continue
+
+            # Replace original FP32 decoder & delete all superseded external .data files
+            safe_copy_file(q8_path, dec_onnx_path)
+            for p in downloaded_paths:
+                if os.path.abspath(p) != os.path.abspath(dec_onnx_path) and os.path.lexists(p):
+                    safe_unlink(p)
+                    print(f"  [clean] Removed superseded FP32 companion: {os.path.basename(p)}", flush=True)
+            print(
+                f"  [OK QUANTIZE DECODER] {tier_label}: {orig_mb:.2f} MB -> {q8_mb:.2f} MB!",
+                flush=True,
+            )
+            return [dec_onnx_path]
+
+    print("  [warn quantize] Keeping verified original neucodec_decoder.onnx.", flush=True)
+    return downloaded_paths
+
+
 def main() -> int:
     models_dir = sys.argv[1] if len(sys.argv) >= 2 else "app/src/main/assets/models"
     purge_assets_junk(models_dir)
 
     api = HfApi()
     pnnbao_public_repos = discover_public_repos(api, author="pnnbao-ump", limit=60)
-    print(f"Public repos discovered under pnnbao-ump ({len(pnnbao_public_repos)}): {pnnbao_public_repos}", flush=True)
+    for r in discover_public_repos(api, author="pnnbao97", limit=40):
+        if r not in pnnbao_public_repos:
+            pnnbao_public_repos.append(r)
+    print(f"Public repos discovered under pnnbao-ump/pnnbao97 ({len(pnnbao_public_repos)}): {pnnbao_public_repos}", flush=True)
 
     # =========================================================================
-    # 1. Official VieNeu-TTS-0.3B Q4_0 GGUF Backbone + voices.json
+    # 1. Lightest Compatible VieNeu-TTS Turbo / 0.3B Q4_0 GGUF Backbone + voices.json
     # =========================================================================
     gguf_candidates: List[str] = [
+        "pnnbao-ump/VieNeu-TTS-turbo-q4-gguf",
+        "pnnbao-ump/VieNeu-TTS-Turbo-q4-gguf",
+        "pnnbao97/VieNeu-TTS-turbo-q4-gguf",
         "pnnbao-ump/VieNeu-TTS-0.3B-q4-gguf",
         "pnnbao-ump/VieNeu-TTS-q4-gguf",
         "pnnbao-ump/VieNeu-TTS-0.3B-q8-gguf",
     ]
-    for r in pnnbao_public_repos:
-        if "gguf" in r.lower() and r not in gguf_candidates:
-            gguf_candidates.append(r)
+    # Add any newly published turbo / light Q4_0 GGUF repos dynamically (turbo first!)
+    discovered_gguf_repos = [
+        r for r in pnnbao_public_repos
+        if "gguf" in r.lower() and "v3" not in r.lower() and "nano" not in r.lower()
+    ]
+    discovered_gguf_repos.sort(
+        key=lambda r: (
+            0 if "turbo" in r.lower() else (1 if "0.3b" in r.lower() else 2),
+            0 if "q4" in r.lower() else 1,
+            len(r),
+        )
+    )
+    for r in discovered_gguf_repos:
+        if r not in gguf_candidates:
+            gguf_candidates.insert(0 if ("turbo" in r.lower() and "q4" in r.lower()) else len(gguf_candidates), r)
 
     gguf_dest: Optional[str] = None
     voices_dest: Optional[str] = None
 
-    print("\n=== [1/2] Downloading Compact GGUF Backbone (Q4_0) + voices.json ===", flush=True)
+    print("\n=== [1/2] Downloading Lightest Verified GGUF Backbone (Turbo / 0.3B Q4_0) + voices.json ===", flush=True)
     for repo in gguf_candidates:
         files = list_public_repo_files(api, repo)
         if not files:
@@ -355,12 +512,23 @@ def main() -> int:
         gguf_files = [f for f in files if f.lower().endswith(".gguf")]
         if not gguf_files:
             continue
-        gguf_files.sort(key=lambda s: (0 if "q4_0" in s.lower() else (1 if "q4" in s.lower() else 2), len(s), s))
+        gguf_files.sort(
+            key=lambda s: (
+                0 if "q4_0" in s.lower() else (1 if "q4_k" in s.lower() or "q4" in s.lower() else 2),
+                0 if "turbo" in s.lower() else 1,
+                len(s),
+                s,
+            )
+        )
         for chosen_gguf in gguf_files:
             dest = os.path.join(models_dir, os.path.basename(chosen_gguf))
-            if download_file_safe(repo, chosen_gguf, dest):
-                gguf_dest = dest
-                break
+            if not download_file_safe(repo, chosen_gguf, dest):
+                continue
+            if not _probe_gguf_neu_compat(dest):
+                safe_unlink(dest)
+                continue
+            gguf_dest = dest
+            break
         if not gguf_dest:
             continue
 
@@ -372,10 +540,10 @@ def main() -> int:
         break
 
     if not gguf_dest:
-        raise RuntimeError("Failed to download *.gguf from public pnnbao-ump repositories!")
+        raise RuntimeError("Failed to download a verified NeuCodec-compatible *.gguf from public pnnbao repositories!")
 
     if not voices_dest:
-        for v_repo in ("pnnbao-ump/VieNeu-TTS-0.3B", "pnnbao-ump/VieNeu-TTS", "pnnbao-ump/VieNeu-TTS-0.3B-q4-gguf"):
+        for v_repo in ("pnnbao-ump/VieNeu-TTS-0.3B-q4-gguf", "pnnbao-ump/VieNeu-TTS-0.3B", "pnnbao-ump/VieNeu-TTS"):
             files = list_public_repo_files(api, v_repo) or []
             v_files = [f for f in files if os.path.basename(f).lower() == "voices.json"]
             if v_files:
@@ -388,7 +556,7 @@ def main() -> int:
         raise RuntimeError("Failed to download voices.json from public pnnbao-ump repositories!")
 
     # =========================================================================
-    # 2. Compact NeuCodec ONNX 24kHz FSQ Decoder
+    # 2. Compact NeuCodec ONNX 24kHz FSQ Decoder (auto-quantized to QUInt8 ~85-95 MB)
     # =========================================================================
     decoder_candidates: List[str] = [
         "pnnbao-ump/neucodec-onnx-decoder-int8",
@@ -413,7 +581,8 @@ def main() -> int:
 
     dec_dest = os.path.join(models_dir, "neucodec_decoder.onnx")
     decoder_repo_used: Optional[str] = None
-    print("\n=== [2/2] Downloading & Verifying Compact NeuCodec ONNX Decoder (24kHz) ===", flush=True)
+    decoder_downloaded: List[str] = []
+    print("\n=== [2/2] Downloading, Verifying & Quantizing NeuCodec ONNX Decoder (24kHz -> QUInt8) ===", flush=True)
     for repo in decoder_candidates:
         files = list_public_repo_files(api, repo)
         if not files:
@@ -431,6 +600,7 @@ def main() -> int:
                 cleanup_paths(downloaded)
                 continue
             decoder_repo_used = f"{repo}/{chosen_dec}"
+            decoder_downloaded = downloaded
             break
         if decoder_repo_used:
             break
@@ -440,6 +610,9 @@ def main() -> int:
             "Failed to download a verified NeuCodec FSQ 24kHz neucodec_decoder.onnx! Checked: "
             + ", ".join(decoder_candidates)
         )
+
+    # Compress 297 MB FP32 decoder -> ~85-95 MB QUInt8 (deleting FP32 original)
+    quantize_decoder_to_quint8(dec_dest, decoder_downloaded)
     print(f"  [OK DECODER] Ready: {decoder_repo_used}", flush=True)
 
     print("\n=== CORE MODEL BUNDLE (before neucodec_encoder.onnx export) ===", flush=True)

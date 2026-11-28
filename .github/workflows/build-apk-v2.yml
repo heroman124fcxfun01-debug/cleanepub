@@ -45,7 +45,7 @@ jobs:
           python3 -m pip install --no-cache-dir -q huggingface_hub numpy onnxruntime soundfile
           python3 -m pip install --no-cache-dir -q --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu llama-cpp-python
 
-      - name: Dọn rác & tải bộ model lõi (GGUF Q4_0 + NeuCodec Decoder INT8 + voices.json)
+      - name: Dọn rác, tải GGUF Turbo/Q4_0 nhẹ nhất & nén neucodec_decoder.onnx sang QUInt8
         run: |
           python3 scripts/download_vieneu_models.py app/src/main/assets/models
           ls -lh app/src/main/assets/models/

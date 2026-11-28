@@ -234,21 +234,21 @@ object VietnameseTtsTextNormalizer {
     }
 
     /**
-     * Chia câu theo dấu câu tự nhiên thành các phân đoạn gọn **80–140 ký tự** dành riêng cho
-     * luồng đọc AI VieNeu-TTS độ trễ cực thấp (Producer-Consumer 2 luồng):
-     * - Câu đầu tiên ([isFirstParagraphOfStream]) ưu tiên ngắn gọn (~60–105 ký tự) để phát tiếng
-     *   chỉ sau ~1.5 giây kể từ lúc bấm Phát.
-     * - Các câu tiếp theo giữ trong khoảng 80–140 ký tự (gộp câu quá ngắn `< minChars` nếu tổng
+     * Chia câu theo dấu câu tự nhiên thành các phân đoạn gọn **80–120 ký tự** dành riêng cho
+     * luồng đọc AI VieNeu-TTS độ trễ cực thấp (Producer-Consumer 2 luồng, tối ưu Helio G99):
+     * - Câu đầu tiên ([isFirstParagraphOfStream]) ưu tiên ngắn gọn (~55–95 ký tự) để phát tiếng
+     *   chỉ sau ~1.2–1.5 giây kể từ lúc bấm Phát.
+     * - Các câu tiếp theo giữ trong khoảng 80–120 ký tự (gộp câu quá ngắn `< minChars` nếu tổng
      *   vẫn `<= maxChars`, cắt câu dài `> maxChars` tại `,`, `;`, `:`, hoặc ranh giới từ) giúp
-     *   luồng Producer luôn tính xong câu N+1, N+2, N+3 trước khi câu N đọc xong.
+     *   luồng Producer luôn tính xong câu N+1, N+2 trước khi câu N đọc xong.
      *
      * Trả về danh sách cặp `(speakText, firstOriginalSentenceIndex)` để tô sáng câu chính xác.
      */
     fun chunkSentencesForLowLatencyAi(
         sentences: List<String>,
         minChars: Int = 80,
-        maxChars: Int = 140,
-        firstChunkMaxChars: Int = 105,
+        maxChars: Int = 120,
+        firstChunkMaxChars: Int = 95,
         isFirstParagraphOfStream: Boolean = false
     ): List<Pair<String, Int>> {
         if (sentences.isEmpty()) return emptyList()

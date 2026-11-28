@@ -272,9 +272,9 @@ fun BookReaderScreen(
             null
         }
         when {
-            matchedCloned != null -> "✦ ${matchedCloned.name}"
+            matchedCloned != null -> "✦ ${matchedCloned.displayNameWithCodeCount}"
             matchedPreset != null -> "★ ${matchedPreset.displayLabel}"
-            clonedVoices.isNotEmpty() -> "✦ ${clonedVoices.first().name}"
+            clonedVoices.isNotEmpty() -> "✦ ${clonedVoices.first().displayNameWithCodeCount}"
             presetAiVoices.isNotEmpty() -> "★ ${presetAiVoices.first().displayLabel}"
             else -> "Chưa có AI"
         }

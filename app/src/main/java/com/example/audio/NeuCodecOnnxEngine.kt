@@ -36,6 +36,9 @@ class NeuCodecOnnxEngine(context: Context? = null) {
 
     private val appContext: Context? = context?.applicationContext
     private var env: OrtEnvironment? = null
+    private var cachedSessionOpts: OrtSession.SessionOptions? = null
+    private var encoderModelFile: File? = null
+    private var speakerEncoderModelFile: File? = null
     private var encoderSession: OrtSession? = null
     private var speakerEncoderSession: OrtSession? = null
     private var decoderSession: OrtSession? = null
@@ -47,24 +50,36 @@ class NeuCodecOnnxEngine(context: Context? = null) {
     val loadedSignatures = LinkedHashMap<String, String>()
     val loadErrors = LinkedHashMap<String, String>()
 
+    /** True when `neucodec_encoder.onnx` exists on disk (or is currently loaded) for on-demand voice cloning. */
     val hasEncoder: Boolean
+        get() = encoderSession != null || (encoderModelFile?.let { it.exists() && it.length() > 64L } == true)
+
+    val isEncoderResidentInRam: Boolean
         get() = encoderSession != null
 
     val hasSpeakerEncoder: Boolean
-        get() = speakerEncoderSession != null
+        get() = speakerEncoderSession != null || (speakerEncoderModelFile?.let { it.exists() && it.length() > 64L } == true)
 
     val hasDecoder: Boolean
         get() = decoderSession != null
 
+    /**
+     * Initializes ONNX Runtime and loads ONLY `neucodec_decoder.onnx` for low-RAM book reading.
+     * `neucodec_encoder.onnx` (>150 MB RAM) is kept on disk and loaded strictly on-demand inside
+     * [encodeReferenceAudio], then closed immediately via [closeEncoderSession] once `ref_codes` are extracted!
+     */
     @Synchronized
     fun initialize(
         encoderFile: File?,
         decoderFile: File?,
-        speakerEncoderFile: File? = null
+        speakerEncoderFile: File? = null,
+        preloadEncoder: Boolean = false
     ) {
         closeSessions()
         loadedSignatures.clear()
         loadErrors.clear()
+        encoderModelFile = encoderFile
+        speakerEncoderModelFile = speakerEncoderFile
 
         // Safely pre-probe ONNX Runtime native libraries so missing .so never crashes the process
         try {
@@ -93,7 +108,8 @@ class NeuCodecOnnxEngine(context: Context? = null) {
 
         val opts = try {
             OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 4))
+                // Fixed 3 threads for Helio G99 thermal stability (prevents thermal throttling during long books)
+                setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 3))
                 setInterOpNumThreads(1)
                 setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
@@ -106,10 +122,40 @@ class NeuCodecOnnxEngine(context: Context? = null) {
             Log.e(TAG, err, e)
             return
         }
+        cachedSessionOpts = opts
 
-        encoderSession = loadSession(ortEnv, opts, "neucodec_encoder", encoderFile)
-        speakerEncoderSession = loadSession(ortEnv, opts, "speaker_encoder", speakerEncoderFile)
+        // Keep ONLY neucodec_decoder.onnx resident in RAM during reading!
         decoderSession = loadSession(ortEnv, opts, "neucodec_decoder", decoderFile)
+
+        if (encoderFile != null && encoderFile.exists() && encoderFile.length() > 64L) {
+            if (preloadEncoder) {
+                encoderSession = loadSession(ortEnv, opts, "neucodec_encoder", encoderFile)
+                speakerEncoderSession = loadSession(ortEnv, opts, "speaker_encoder", speakerEncoderFile)
+            } else {
+                loadedSignatures["neucodec_encoder"] =
+                    "${encoderFile.name} (${AiSystemDiagnosticReport.formatMb(encoderFile.length())}) | ON-DEMAND (chỉ nạp khi tạo giọng, giải phóng >150MB RAM khi đọc sách)"
+            }
+        }
+    }
+
+    /**
+     * Immediately closes `neucodec_encoder.onnx` & optional `speaker_encoder.onnx` OrtSessions
+     * to reclaim >150 MB of native RAM right after extracting `ref_codes`.
+     */
+    @Synchronized
+    fun closeEncoderSession() {
+        val hadEncoder = encoderSession != null || speakerEncoderSession != null
+        runCatching { encoderSession?.close() }
+        runCatching { speakerEncoderSession?.close() }
+        encoderSession = null
+        speakerEncoderSession = null
+        if (hadEncoder) {
+            encoderModelFile?.takeIf { it.exists() && it.length() > 64L }?.let { f ->
+                loadedSignatures["neucodec_encoder"] =
+                    "${f.name} (${AiSystemDiagnosticReport.formatMb(f.length())}) | ON-DEMAND (đã đóng OrtSession, giải phóng >150MB RAM)"
+            }
+            Log.i(TAG, "Closed neucodec_encoder OrtSession — reclaimed >150 MB native RAM.")
+        }
     }
 
     private fun loadSession(
@@ -146,9 +192,12 @@ class NeuCodecOnnxEngine(context: Context? = null) {
     }
 
     /**
-     * Encodes the cleanest 5–8 second 16 kHz Mono Float32 reference voice window into discrete
-     * 50 Hz NeuCodec FSQ speech token IDs (`0..65535`, ~250–400 tokens) for 100% offline zero-shot
-     * voice cloning. Pads length to a multiple of 320 samples so DistilHuBERT/SQCodec aligns cleanly.
+     * On-demand zero-shot voice cloning encoder (`neucodec_encoder.onnx`):
+     * - Opens `encoderSession` lazily ONLY when encoding a newly recorded/imported voice.
+     * - Normalizes to exact 16,000 Hz Mono Float32 (`[-1.0f, 1.0f]`), trims only absolute silence
+     *   (`< 0.005f`) up to max 0.15s, caps strictly at 7.0s (`112,000` samples), pads to multiple of 320.
+     * - Extracts exact `INT32[1, 1, N]` chronological order (`(output[0].value as Array<Array<IntArray>>)[0][0]`).
+     * - **Always closes `encoderSession` in `finally`** to free >150 MB native RAM immediately!
      */
     @Synchronized
     fun encodeReferenceAudio(
@@ -157,19 +206,38 @@ class NeuCodecOnnxEngine(context: Context? = null) {
         alreadyPreprocessed: Boolean = false
     ): Result<EncodedReferenceVoice> {
         val ortEnv = env ?: return Result.failure(IllegalStateException("OrtEnvironment chưa được khởi tạo."))
-        val session = encoderSession
-            ?: return Result.failure(
-                IllegalStateException(
-                    loadErrors["neucodec_encoder"]
-                        ?: "Thiếu file neucodec_encoder.onnx trong thư mục models để trích xuất mã giọng mẫu."
-                )
-            )
+        val opts = cachedSessionOpts ?: return Result.failure(IllegalStateException("OrtSession.SessionOptions chưa sẵn sàng."))
 
         if (samples.isEmpty()) {
             return Result.failure(IllegalArgumentException("Âm thanh mẫu bị rỗng."))
         }
 
-        return runCatching {
+        val encFile = encoderModelFile
+        if (encoderSession == null) {
+            if (encFile == null || !encFile.exists() || encFile.length() <= 64L) {
+                return Result.failure(
+                    IllegalStateException(
+                        loadErrors["neucodec_encoder"]
+                            ?: "Thiếu file neucodec_encoder.onnx trong thư mục models để trích xuất mã giọng mẫu."
+                    )
+                )
+            }
+            encoderSession = loadSession(ortEnv, opts, "neucodec_encoder", encFile)
+            if (speakerEncoderSession == null && speakerEncoderModelFile != null) {
+                speakerEncoderSession = loadSession(ortEnv, opts, "speaker_encoder", speakerEncoderModelFile)
+            }
+        }
+
+        val session = encoderSession
+            ?: return Result.failure(
+                IllegalStateException(
+                    loadErrors["neucodec_encoder"]
+                        ?: "Không thể khởi tạo OrtSession cho neucodec_encoder.onnx."
+                )
+            )
+
+        return try {
+            runCatching {
             val mono16k = if (sampleRate != ENCODER_SAMPLE_RATE) {
                 AudioFileDecoder.normalizeAndResampleMonoFloat(
                     monoFloat = samples,
@@ -180,7 +248,7 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                 samples
             }
 
-            // Trim 0.25s mic-start/stop noise + pick cleanest 3-8s speech window ONCE (unless already preprocessed)
+            // Trim ONLY absolute silence (< 0.005f, max 0.15s) & cap strictly to 7.0s (112,000 samples @ 16kHz)
             val cleanest16k = if (alreadyPreprocessed) {
                 mono16k
             } else {
@@ -189,15 +257,15 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                     sampleRate = ENCODER_SAMPLE_RATE,
                     minSeconds = AudioFileDecoder.CLONE_MIN_WINDOW_SECONDS,
                     maxSeconds = MAX_REF_AUDIO_SECONDS.toFloat(),
-                    trimEdgeMicNoiseSeconds = 0.25f
+                    trimEdgeMicNoiseSeconds = AudioFileDecoder.MAX_EDGE_SILENCE_TRIM_SECONDS
                 )
             }
-            val trimmedLen = cleanest16k.size.coerceAtMost(ENCODER_SAMPLE_RATE * MAX_REF_AUDIO_SECONDS)
+            val trimmedLen = cleanest16k.size.coerceAtMost(MAX_REF_AUDIO_SAMPLES_16K)
             val paddedLen = ((trimmedLen + HOP_SAMPLES_16K - 1) / HOP_SAMPLES_16K) * HOP_SAMPLES_16K
             val padded = FloatArray(paddedLen)
             System.arraycopy(cleanest16k, 0, padded, 0, trimmedLen)
 
-            // Peak-normalize gently to 0.92 so encoder sees clean amplitude
+            // Peak-normalize cleanly within [-1.0f, 1.0f]
             var peak = 0f
             for (v in padded) {
                 val a = abs(v)
@@ -270,13 +338,18 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                     }
 
                     val rawCodesValue = result[codesIndex].value
-                    val extractedCodes = when (rawCodesValue) {
-                        is Array<*> -> {
-                            // Fast-path exact NeuCodec INT32[1, 1, N] tensor: (result[0].value as Array<Array<IntArray>>)[0][0]
-                            val direct3d = (rawCodesValue.firstOrNull() as? Array<*>)?.firstOrNull() as? IntArray
-                            direct3d ?: flattenAnyToIntArray(rawCodesValue)
+                    @Suppress("UNCHECKED_CAST")
+                    val extractedCodes: IntArray = runCatching {
+                        // Exact NeuCodec INT32[1, 1, N] chronological extraction: (output[0].value as Array<Array<IntArray>>)[0][0]
+                        (rawCodesValue as Array<Array<IntArray>>)[0][0]
+                    }.getOrElse {
+                        when (rawCodesValue) {
+                            is Array<*> -> {
+                                val direct3d = (rawCodesValue.firstOrNull() as? Array<*>)?.firstOrNull() as? IntArray
+                                direct3d ?: flattenAnyToIntArray(rawCodesValue)
+                            }
+                            else -> flattenAnyToIntArray(rawCodesValue)
                         }
-                        else -> flattenAnyToIntArray(rawCodesValue)
                     }
                     val flatCodes = extractedCodes
                         .filter { it in 0..65535 }
@@ -310,6 +383,10 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                 CrashReportStore.clearNativeOperation(appContext)
                 inputs.values.forEach { runCatching { it.close() } }
             }
+            }
+        } finally {
+            // Immediately release neucodec_encoder.onnx OrtSession to reclaim >150 MB RAM before TTS/reading!
+            closeEncoderSession()
         }
     }
 
@@ -605,12 +682,11 @@ class NeuCodecOnnxEngine(context: Context? = null) {
 
     @Synchronized
     fun closeSessions() {
-        runCatching { encoderSession?.close() }
-        runCatching { speakerEncoderSession?.close() }
+        closeEncoderSession()
         runCatching { decoderSession?.close() }
-        encoderSession = null
-        speakerEncoderSession = null
+        runCatching { cachedSessionOpts?.close() }
         decoderSession = null
+        cachedSessionOpts = null
     }
 
     companion object {
@@ -618,6 +694,7 @@ class NeuCodecOnnxEngine(context: Context? = null) {
         const val ENCODER_SAMPLE_RATE = 16_000
         const val DECODER_SAMPLE_RATE = 24_000
         private const val HOP_SAMPLES_16K = 320
-        private const val MAX_REF_AUDIO_SECONDS = 8
+        private const val MAX_REF_AUDIO_SECONDS = 7
+        const val MAX_REF_AUDIO_SAMPLES_16K = 112_000
     }
 }

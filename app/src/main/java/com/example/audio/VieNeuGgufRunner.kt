@@ -60,8 +60,8 @@ class VieNeuGgufRunner(context: Context? = null) {
     private var loadedModelPath: String? = null
     private var activeContextSize: Int = PREFERRED_CONTEXT_SIZE
     private var activeBatchSize: Int = DEFAULT_BATCH_SIZE
-    private var activeThreads: Int = 4
-    private var activeThreadsBatch: Int = 6
+    private var activeThreads: Int = HELIO_G99_THREADS
+    private var activeThreadsBatch: Int = HELIO_G99_THREADS_BATCH
 
     // Locked voice prefix cache for the active speaker across all sentences in a chapter
     @Volatile
@@ -142,12 +142,12 @@ class VieNeuGgufRunner(context: Context? = null) {
         }
 
         val cores = Runtime.getRuntime().availableProcessors()
-        // Decode is memory-bandwidth bound (4 threads optimal on big cores);
-        // prompt prefill (ref_phones + target_phones + ref_codes) is compute bound (up to 7-8 threads).
-        val threads = cores.coerceIn(2, 4)
-        val threadsBatch = (cores - 1).coerceIn(4, 8)
-        // Prefer n_ctx=1280, n_batch=512 so the entire prompt (ref_phones + target + ref_codes) evaluates
-        // in a SINGLE fused GEMM batch pass while keeping KV-cache compact and fast.
+        // Helio G99 thermal sweet spot: fixed n_threads=3, n_threads_batch=3 prevents CPU overheating
+        // and thermal throttling during long book-reading sessions.
+        val threads = cores.coerceAtMost(HELIO_G99_THREADS).coerceAtLeast(2)
+        val threadsBatch = cores.coerceAtMost(HELIO_G99_THREADS_BATCH).coerceAtLeast(2)
+        // Prefer n_ctx=1536, n_batch=512 so 7s ref_codes (~350 tokens) + ref_phones + target + speech tokens
+        // fit cleanly in a single prefill pass with full context headroom.
         val candidates = listOf(
             PREFERRED_CONTEXT_SIZE to DEFAULT_BATCH_SIZE,
             PREFERRED_CONTEXT_SIZE to FALLBACK_BATCH_SIZE_256,
@@ -169,13 +169,13 @@ class VieNeuGgufRunner(context: Context? = null) {
                     batchSize = batchSz,
                     threads = threads,
                     threadsBatch = threadsBatch,
-                    temperature = 0.8f,
-                    topP = 0.95f,
-                    topK = 50,
-                    repeatPenalty = 1.1f,
+                    temperature = DEFAULT_TEMPERATURE,
+                    topP = DEFAULT_TOP_P,
+                    topK = DEFAULT_TOP_K,
+                    repeatPenalty = DEFAULT_REPEAT_PENALTY,
                     frequencyPenalty = 0.0f,
                     presencePenalty = 0.0f,
-                    maxTokens = 440,
+                    maxTokens = 420,
                     stopSequences = STOP_MARKERS,
                     useMmap = false,
                     useMlock = false,
@@ -284,9 +284,11 @@ class VieNeuGgufRunner(context: Context? = null) {
         refPhones: String,
         targetPhones: String,
         refCodes: IntArray,
-        temperature: Double = 0.8,
-        topK: Int = 50,
-        maxNewTokens: Int = 440
+        temperature: Double = DEFAULT_TEMPERATURE.toDouble(),
+        topK: Int = DEFAULT_TOP_K,
+        topP: Double = DEFAULT_TOP_P.toDouble(),
+        repeatPenalty: Double = DEFAULT_REPEAT_PENALTY.toDouble(),
+        maxNewTokens: Int = 420
     ): GgufGenerationResult {
         val model = loadedModel
         if (model == null || !isLoaded) {
@@ -310,7 +312,7 @@ class VieNeuGgufRunner(context: Context? = null) {
             append(prefix.refCodesStr)
         }
 
-        // Estimate prompt tokens carefully so maxTokens stays inside n_ctx without triggering native truncation
+        // Estimate prompt tokens carefully so maxTokens stays inside n_ctx=1536 without native truncation
         val estTargetTokens = (cleanTargetPhones.length * 0.75f).toInt().coerceAtLeast(16) + 8
         val estPromptTokens = prefix.estimatedPrefixTokens + estTargetTokens
         val availableGenRoom = (activeContextSize - estPromptTokens - 24).coerceIn(110, 560)
@@ -323,9 +325,9 @@ class VieNeuGgufRunner(context: Context? = null) {
             threads = activeThreads,
             threadsBatch = activeThreadsBatch,
             temperature = temperature.toFloat().coerceIn(0.1f, 1.2f),
-            topP = 0.95f,
+            topP = topP.toFloat().coerceIn(0.1f, 1.0f),
             topK = topK.coerceIn(1, 200),
-            repeatPenalty = 1.1f,
+            repeatPenalty = repeatPenalty.toFloat().coerceIn(1.0f, 1.5f),
             frequencyPenalty = 0.0f,
             presencePenalty = 0.0f,
             maxTokens = safeMaxTokens,
@@ -473,11 +475,17 @@ class VieNeuGgufRunner(context: Context? = null) {
 
     companion object {
         private const val TAG = "VieNeuGgufRunner"
-        private const val PREFERRED_CONTEXT_SIZE = 1280
+        private const val PREFERRED_CONTEXT_SIZE = 1536
         private const val FALLBACK_CONTEXT_SIZE = 1024
         private const val DEFAULT_BATCH_SIZE = 512
         private const val FALLBACK_BATCH_SIZE_256 = 256
         private const val FALLBACK_BATCH_SIZE_128 = 128
+        private const val HELIO_G99_THREADS = 3
+        private const val HELIO_G99_THREADS_BATCH = 3
+        const val DEFAULT_TEMPERATURE = 0.7f
+        const val DEFAULT_TOP_K = 50
+        const val DEFAULT_TOP_P = 0.9f
+        const val DEFAULT_REPEAT_PENALTY = 1.1f
         const val SPEECH_END_TOKEN = "<|SPEECH_GENERATION_END|>"
         private val STOP_MARKERS = listOf(
             SPEECH_END_TOKEN,

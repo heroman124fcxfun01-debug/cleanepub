@@ -181,6 +181,16 @@ class OfflineOnnxVoiceEngine(context: Context) {
         }
     }
 
+    /**
+     * Frees >150 MB of native RAM by ensuring `neucodec_encoder.onnx` OrtSession is closed
+     * before book reading starts.
+     */
+    fun releaseEncoderMemory() {
+        if (neuCodecLazy.isInitialized()) {
+            runCatching { neuCodec.closeEncoderSession() }
+        }
+    }
+
     fun getPresetVoices(): List<VieNeuPresetVoice> = presetVoices
 
     fun findPresetVoiceById(presetId: String?): VieNeuPresetVoice? {
@@ -290,7 +300,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 sampleRate = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE,
                 minSeconds = AudioFileDecoder.CLONE_MIN_WINDOW_SECONDS,
                 maxSeconds = AudioFileDecoder.CLONE_MAX_WINDOW_SECONDS,
-                trimEdgeMicNoiseSeconds = 0.25f
+                trimEdgeMicNoiseSeconds = AudioFileDecoder.MAX_EDGE_SILENCE_TRIM_SECONDS
             )
         }
 
@@ -392,8 +402,9 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 resolvedRefText = fallback.referenceText
             }
         }
-        val refPhones = if (resolvedRefText.isNotBlank()) {
-            refPhonesCache.getOrPut(resolvedRefText) { espeakG2p.phonemize(resolvedRefText) }
+        val cleanRefText = VietnameseTtsTextNormalizer.normalizeForTts(resolvedRefText).trim()
+        val refPhones = if (cleanRefText.isNotBlank()) {
+            refPhonesCache.getOrPut(cleanRefText) { espeakG2p.phonemize(cleanRefText) }
         } else {
             ""
         }
@@ -494,8 +505,10 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 }
             }
 
-            val refPhones = if (resolvedRefText.isNotBlank()) {
-                refPhonesCache.getOrPut(resolvedRefText) { espeakG2p.phonemize(resolvedRefText) }
+            // Convert BOTH Ref Text and Target Text through the exact same normalizer + vi_espeak_ipa.tsv dictionary
+            val cleanRefText = VietnameseTtsTextNormalizer.normalizeForTts(resolvedRefText).trim()
+            val refPhones = if (cleanRefText.isNotBlank()) {
+                refPhonesCache.getOrPut(cleanRefText) { espeakG2p.phonemize(cleanRefText) }
             } else {
                 ""
             }
@@ -507,15 +520,17 @@ class OfflineOnnxVoiceEngine(context: Context) {
             }
 
             val wordCount = VietnameseTtsTextNormalizer.countWords(cleanTarget).coerceAtLeast(1)
-            // Tight token budget matched to 80-140 char chunks (~14-18 tokens/Vietnamese syllable)
-            val estMaxTokens = (wordCount * 18 + 64).coerceIn(110, 440)
+            // Tight token budget matched to 80-120 char chunks (~14-18 tokens/Vietnamese syllable)
+            val estMaxTokens = (wordCount * 18 + 64).coerceIn(110, 400)
 
             val genRes = ggufRunner.generateSpeechCodes(
                 refPhones = refPhones,
                 targetPhones = targetPhones,
                 refCodes = resolvedRefCodes,
-                temperature = 0.8,
-                topK = 50,
+                temperature = VieNeuGgufRunner.DEFAULT_TEMPERATURE.toDouble(),
+                topK = VieNeuGgufRunner.DEFAULT_TOP_K,
+                topP = VieNeuGgufRunner.DEFAULT_TOP_P.toDouble(),
+                repeatPenalty = VieNeuGgufRunner.DEFAULT_REPEAT_PENALTY.toDouble(),
                 maxNewTokens = estMaxTokens
             )
 
@@ -545,7 +560,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 onSuccess = { waveform24k ->
                     val durSec = waveform24k.size.toFloat() / NeuCodecOnnxEngine.DECODER_SAMPLE_RATE.toFloat()
                     val trace = buildString {
-                        appendLine("Pipeline: Official pnnbao97/VieNeu-TTS GGUF (temp=0.8) + NeuCodec ONNX (24kHz)")
+                        appendLine("Pipeline: Official pnnbao97/VieNeu-TTS GGUF (temp=0.7, top_p=0.9, repeat=1.1, threads=3) + NeuCodec ONNX (24kHz)")
                         appendLine("Voice: $voiceSourceLabel")
                         appendLine("RefText: ${resolvedRefText.take(120)}")
                         appendLine("TargetText: ${cleanTarget.take(140)}")
@@ -583,12 +598,17 @@ class OfflineOnnxVoiceEngine(context: Context) {
             val d = discoveredModels
 
             val mapped = linkedMapOf(
-                "pipeline" to "Official pnnbao97/VieNeu-TTS (GGUF temp=0.8 + NeuCodec Encoder 16kHz + Decoder 24kHz — Zero-Shot Clone thật)",
+                "pipeline" to "Official pnnbao97/VieNeu-TTS (GGUF temp=0.7/top_p=0.9/threads=3 + NeuCodec Encoder On-Demand + Decoder QUInt8 24kHz)",
                 "gguf_backbone" to (d?.ggufBackboneFile?.let { f ->
                     if (ggufRunner.isLoaded) "${f.name} (OK)" else "${f.name} (LỖI NẠP)"
                 } ?: "(không tìm thấy *.gguf)"),
                 "neucodec_encoder" to (d?.codecEncoderFile?.let { f ->
-                    if (neuCodec.hasEncoder) "${f.name} (OK)" else "${f.name} (LỖI NẠP — xem mục lỗi bên dưới)"
+                    if (neuCodec.hasEncoder) {
+                        val ramState = if (neuCodec.isEncoderResidentInRam) "Đang nạp RAM" else "On-Demand — đã giải phóng RAM"
+                        "${f.name} (OK • $ramState)"
+                    } else {
+                        "${f.name} (LỖI NẠP — xem mục lỗi bên dưới)"
+                    }
                 } ?: "(THIẾU neucodec_encoder.onnx)"),
                 "speaker_encoder" to (d?.speakerEncoderFile?.let { f ->
                     if (neuCodec.hasSpeakerEncoder) "${f.name} (OK)" else "${f.name} (LỖI NẠP)"

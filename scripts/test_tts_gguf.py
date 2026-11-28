@@ -491,9 +491,9 @@ def main() -> int:
         out = llm(
             prompt,
             max_tokens=max_new_tokens,
-            temperature=0.8,
+            temperature=0.7,
             top_k=50,
-            top_p=0.95,
+            top_p=0.9,
             repeat_penalty=1.1,
             stop=["<|SPEECH_GENERATION_END|>"],
             echo=False,
