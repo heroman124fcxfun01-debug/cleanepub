@@ -209,10 +209,15 @@ object OnnxModelAssetHelper {
 
         val hasGguf = allNames.any { it.endsWith(".gguf") }
         val hasEncoder = allNames.any { n ->
-            n.endsWith(".onnx") && (n.contains("enc") || n.contains("distill")) && !n.contains("dec")
+            val base = n.substringAfterLast('/')
+            base == "neucodec_encoder.onnx" ||
+                (base.endsWith(".onnx") && (base.contains("encoder") || base.contains("enc") || base.contains("distill")) && !base.contains("decoder"))
         }
         val hasDecoder = allNames.any { n ->
-            n.endsWith(".onnx") && !n.contains("enc") && (n.contains("dec") || n.contains("neucodec") || n.endsWith("/model.onnx") || n == "model.onnx")
+            val base = n.substringAfterLast('/')
+            base == "neucodec_decoder.onnx" ||
+                (base.endsWith(".onnx") && !base.contains("encoder") && !base.contains("enc") &&
+                    (base.contains("decoder") || base.contains("neucodec") || base == "model.onnx"))
         }
 
         val filesVoices = File(File(appCtx.filesDir, FILES_MODELS_DIR), "voices.json")
@@ -481,21 +486,35 @@ object OnnxModelAssetHelper {
 
         val onnxFiles = allFiles.filter { it.name.endsWith(".onnx", ignoreCase = true) }
 
+        val directEncoderFile = File(rootDir, "neucodec_encoder.onnx")
+            .takeIf { it.exists() && it.isFile && it.length() > 64L }
+        val directDecoderFile = File(rootDir, "neucodec_decoder.onnx")
+            .takeIf { it.exists() && it.isFile && it.length() > 64L }
+
         val speakerEncoder = onnxFiles.firstOrNull { f ->
             val n = f.name.lowercase(Locale.ROOT)
-            (n.contains("speaker") || n.contains("spk") || n.contains("ecapa") || n.contains("campplus")) &&
-                !n.contains("dec")
+            f != directEncoderFile && f != directDecoderFile &&
+                (n.contains("speaker") || n.contains("spk") || n.contains("ecapa") || n.contains("campplus")) &&
+                !n.contains("decoder")
         }
 
-        val codecEncoder = onnxFiles.firstOrNull { f ->
-            val n = f.name.lowercase(Locale.ROOT)
-            f != speakerEncoder && (n.contains("enc") || n.contains("distill")) && !n.contains("dec")
-        }
+        val codecEncoder = directEncoderFile
+            ?: onnxFiles.firstOrNull { f ->
+                val n = f.name.lowercase(Locale.ROOT)
+                f != speakerEncoder && f != directDecoderFile && n.contains("encoder") && !n.contains("decoder")
+            }
+            ?: onnxFiles.firstOrNull { f ->
+                val n = f.name.lowercase(Locale.ROOT)
+                f != speakerEncoder && f != directDecoderFile &&
+                    (n.contains("enc") || n.contains("distill")) && !n.contains("decoder")
+            }
 
-        val codecDecoder = onnxFiles.firstOrNull { f ->
-            val n = f.name.lowercase(Locale.ROOT)
-            f != codecEncoder && f != speakerEncoder && (n.contains("dec") || n.contains("neucodec") || n == "model.onnx")
-        } ?: onnxFiles.firstOrNull { it != codecEncoder && it != speakerEncoder }
+        val codecDecoder = directDecoderFile
+            ?: onnxFiles.firstOrNull { f ->
+                val n = f.name.lowercase(Locale.ROOT)
+                f != codecEncoder && f != speakerEncoder && (n.contains("decoder") || n == "model.onnx")
+            }
+            ?: onnxFiles.firstOrNull { it != codecEncoder && it != speakerEncoder }
 
         return DiscoveredOnnxModels(
             modelsRootDir = rootDir,

@@ -42,12 +42,16 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.UploadFile
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -1055,6 +1059,54 @@ fun StudioVoiceCloneSection(
                         )
                     }
                 }
+            }
+
+            var dismissedErrorText by remember { mutableStateOf<String?>(null) }
+            val activeErrorDialog = lastAiVerbatimError?.takeIf { it.isNotBlank() && it != dismissedErrorText }
+            if (activeErrorDialog != null) {
+                AlertDialog(
+                    onDismissRequest = { dismissedErrorText = activeErrorDialog },
+                    title = {
+                        Text(
+                            text = "Chi tiết lỗi nhân bản giọng AI",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = IosRed
+                        )
+                    },
+                    text = {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            SelectionContainer {
+                                Text(
+                                    text = activeErrorDialog,
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = primaryInk
+                                )
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                dismissedErrorText = activeErrorDialog
+                                onOpenAiDiagnostics()
+                            }
+                        ) {
+                            Text("Kiểm tra AI", fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { dismissedErrorText = activeErrorDialog }) {
+                            Text("Đóng")
+                        }
+                    }
+                )
             }
         }
 

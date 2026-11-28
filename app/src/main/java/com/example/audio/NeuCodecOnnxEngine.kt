@@ -198,6 +198,7 @@ class NeuCodecOnnxEngine(context: Context? = null) {
             }
 
             val inputs = LinkedHashMap<String, OnnxTensor>()
+            val fedShapeDesc = ArrayList<String>()
             try {
                 for ((name, nodeInfo) in session.inputInfo) {
                     val tInfo = nodeInfo.info as? TensorInfo
@@ -205,33 +206,34 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                     val type = tInfo?.type ?: OnnxJavaType.FLOAT
                     val lower = name.lowercase(Locale.ROOT)
 
-                    val tensor = when {
+                    val (tensor, descShape) = when {
                         type == OnnxJavaType.INT64 || type == OnnxJavaType.INT32 || lower.contains("len") -> {
                             if (type == OnnxJavaType.INT32) {
-                                OnnxTensor.createTensor(ortEnv, IntBuffer.wrap(intArrayOf(paddedLen)), longArrayOf(1L))
+                                OnnxTensor.createTensor(ortEnv, IntBuffer.wrap(intArrayOf(paddedLen)), longArrayOf(1L)) to "INT32[1]"
                             } else {
-                                OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(longArrayOf(paddedLen.toLong())), longArrayOf(1L))
+                                OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(longArrayOf(paddedLen.toLong())), longArrayOf(1L)) to "INT64[1]"
                             }
                         }
                         shape != null && shape.size == 2 -> {
-                            OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(padded), longArrayOf(1L, paddedLen.toLong()))
+                            OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(padded), longArrayOf(1L, paddedLen.toLong())) to "FLOAT[1, $paddedLen]"
                         }
                         shape != null && shape.size == 1 -> {
-                            OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(padded), longArrayOf(paddedLen.toLong()))
+                            OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(padded), longArrayOf(paddedLen.toLong())) to "FLOAT[$paddedLen]"
                         }
                         else -> {
-                            // Standard Distill-NeuCodec ONNX input: [1, 1, T]
-                            OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(padded), longArrayOf(1L, 1L, paddedLen.toLong()))
+                            // Standard NeuCodec / Distill-NeuCodec ONNX input: [1, 1, T]
+                            OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(padded), longArrayOf(1L, 1L, paddedLen.toLong())) to "FLOAT[1, 1, $paddedLen]"
                         }
                     }
                     inputs[name] = tensor
+                    fedShapeDesc.add("$name=$descShape")
                 }
 
                 val durSec = trimmedLen.toFloat() / ENCODER_SAMPLE_RATE.toFloat()
                 CrashReportStore.markNativeOperationStart(
                     context = appContext,
                     operation = "NeuCodec Encoder session.run",
-                    detail = "samples=$paddedLen (${String.format(Locale.US, "%.2fs", durSec)} @ 16kHz)"
+                    detail = "samples=$paddedLen (${String.format(Locale.US, "%.2fs", durSec)} @ 16kHz) | ${fedShapeDesc.joinToString()}"
                 )
                 session.run(inputs).use { result ->
                     if (result.size() <= 0) {
@@ -278,6 +280,10 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                         durationSeconds = durSec
                     )
                 }
+            } catch (t: Throwable) {
+                val schema = "Encoder schema: in=[${formatInputs(session)}] | out=[${formatOutputs(session)}] | fed=[${fedShapeDesc.joinToString()}]"
+                Log.e(TAG, "encodeReferenceAudio failed | $schema", t)
+                throw IllegalStateException("$schema\n${t.message ?: t.javaClass.simpleName}", t)
             } finally {
                 CrashReportStore.clearNativeOperation(appContext)
                 inputs.values.forEach { runCatching { it.close() } }

@@ -257,8 +257,13 @@ class OfflineOnnxVoiceEngine(context: Context) {
         }
 
         if (!neuCodec.hasEncoder) {
+            val foundPath = discoveredModels?.codecEncoderFile?.absolutePath
             val missingErr = neuCodec.loadErrors["neucodec_encoder"]
-                ?: "Không tìm thấy neucodec_encoder.onnx trong assets/models/ để trích xuất mã giọng thật."
+                ?: if (foundPath != null) {
+                    "Đã tìm thấy $foundPath nhưng encoderSession chưa nạp được."
+                } else {
+                    "Không tìm thấy neucodec_encoder.onnx trong ${discoveredModels?.modelsRootDir?.absolutePath ?: "filesDir/models"} để trích xuất mã giọng thật."
+                }
             return@withContext SpeakerEmbeddingResult(
                 embedding = FloatArray(0),
                 usedOnnxEncoder = false,
@@ -513,10 +518,18 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
             val mapped = linkedMapOf(
                 "pipeline" to "Official pnnbao97/VieNeu-TTS (GGUF temp=0.8 + NeuCodec Encoder 16kHz + Decoder 24kHz — Zero-Shot Clone thật)",
-                "gguf_backbone" to (d?.ggufBackboneFile?.name ?: "(không tìm thấy *.gguf)"),
-                "neucodec_encoder" to (d?.codecEncoderFile?.name ?: "(THIẾU neucodec_encoder.onnx)"),
-                "speaker_encoder" to (d?.speakerEncoderFile?.name ?: "(không cần riêng — dùng trực tiếp NeuCodec FSQ ref_codes)"),
-                "neucodec_decoder" to (d?.codecDecoderFile?.name ?: "(không tìm thấy neucodec_decoder.onnx)"),
+                "gguf_backbone" to (d?.ggufBackboneFile?.let { f ->
+                    if (ggufRunner.isLoaded) "${f.name} (OK)" else "${f.name} (LỖI NẠP)"
+                } ?: "(không tìm thấy *.gguf)"),
+                "neucodec_encoder" to (d?.codecEncoderFile?.let { f ->
+                    if (neuCodec.hasEncoder) "${f.name} (OK)" else "${f.name} (LỖI NẠP — xem mục lỗi bên dưới)"
+                } ?: "(THIẾU neucodec_encoder.onnx)"),
+                "speaker_encoder" to (d?.speakerEncoderFile?.let { f ->
+                    if (neuCodec.hasSpeakerEncoder) "${f.name} (OK)" else "${f.name} (LỖI NẠP)"
+                } ?: "(không cần riêng — dùng trực tiếp NeuCodec FSQ ref_codes)"),
+                "neucodec_decoder" to (d?.codecDecoderFile?.let { f ->
+                    if (neuCodec.hasDecoder) "${f.name} (OK)" else "${f.name} (LỖI NẠP — xem mục lỗi bên dưới)"
+                } ?: "(không tìm thấy neucodec_decoder.onnx)"),
                 "espeak_g2p_dict" to (d?.espeakDictFile?.let { "${it.name} (${espeakG2p.entryCount} âm tiết)" }
                     ?: "Dùng luật dự phòng eSpeak-NG vi (${espeakG2p.entryCount} âm tiết)"),
                 "voices.json" to (d?.voicesJsonFile?.let { "${it.name} (${presetVoices.size} giọng mẫu)" }
