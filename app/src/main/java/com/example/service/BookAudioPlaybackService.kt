@@ -38,18 +38,20 @@ import com.example.data.LibraryManager
 import com.example.data.ReaderPreferences
 import com.example.data.ReaderVoiceProfile
 import com.example.data.TtsEngineType
+import android.os.Process
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 private const val AUDIO_CHANNEL_ID = "epub_clean_book_audio_channel"
@@ -106,6 +108,12 @@ class BookAudioPlaybackService : Service() {
     private var activePresetVoiceId: String? = null
     private var activeUsingOnnxVoice = false
     private var onnxStreamJob: Job? = null
+    @Volatile
+    private var onnxPipelineStopFlag: AtomicBoolean? = null
+    @Volatile
+    private var onnxProducerThread: Thread? = null
+    @Volatile
+    private var onnxConsumerThread: Thread? = null
 
     private var activeSpeakerName: String? = null
     private var paragraphFinalUtteranceId = ""
@@ -738,17 +746,18 @@ class BookAudioPlaybackService : Service() {
     )
 
     private data class PreparedAiSegment(
-        val chunk: AiChapterChunk,
-        val pcm16: ShortArray?,
-        val sampleRate: Int,
-        val errorMessage: String? = null
+        val chunk: AiChapterChunk? = null,
+        val pcm16: ShortArray? = null,
+        val sampleRate: Int = OfflineOnnxVoiceEngine.DEFAULT_TTS_OUTPUT_SAMPLE_RATE,
+        val errorMessage: String? = null,
+        val isEndOfStream: Boolean = false
     )
 
     /**
-     * Xây dựng danh sách các phân đoạn đọc tối ưu xuyên suốt các đoạn còn lại của chương:
-     * - Chỉ chứa duy nhất văn bản sách thực tế (tuyệt đối KHÔNG nối câu mẫu / câu nghe thử).
-     * - Gộp các câu ngắn dưới 8 từ với câu kế tiếp (tối đa ~32 từ/lần sinh), bao gồm cả các đoạn hội thoại
-     *   ngắn liên tiếp để giảm số lần chạy GGUF và đảm bảo thời lượng phát lớn hơn thời gian sinh trước.
+     * Xây dựng danh sách phân đoạn đọc siêu gọn **80–140 ký tự** theo dấu câu tự nhiên (`.`, `?`, `!`, `;`, `,`):
+     * - Phân đoạn đầu tiên giữ gọn (~60–105 ký tự) để phát câu đầu sau ~1.5 giây.
+     * - Các phân đoạn sau duy trì 80–140 ký tự để luồng Producer luôn tính xong câu N+1, N+2, N+3
+     *   vào hàng đợi `LinkedBlockingQueue(3)` trước khi luồng Consumer đọc xong câu N.
      */
     private fun buildAiChapterChunks(
         chapterParagraphs: List<String>,
@@ -759,7 +768,7 @@ class BookAudioPlaybackService : Service() {
         for (pIdx in startParagraphIndex until chapterParagraphs.size) {
             val allSentences = VietnameseTtsTextNormalizer.splitIntoSmartSentences(
                 rawText = chapterParagraphs[pIdx],
-                maxSentenceLength = 210
+                maxSentenceLength = 140
             )
             if (allSentences.isEmpty()) continue
             val sStart = if (pIdx == startParagraphIndex) {
@@ -768,12 +777,15 @@ class BookAudioPlaybackService : Service() {
                 0
             }
             val slice = allSentences.subList(sStart, allSentences.size)
-            val mergedInPara = VietnameseTtsTextNormalizer.mergeShortSentencesForAiTts(
+            val isOpeningPara = rawChunks.isEmpty()
+            val chunkedInPara = VietnameseTtsTextNormalizer.chunkSentencesForLowLatencyAi(
                 sentences = slice,
-                minWords = 8,
-                maxMergedWords = 32
+                minChars = 80,
+                maxChars = 140,
+                firstChunkMaxChars = 105,
+                isFirstParagraphOfStream = isOpeningPara
             )
-            mergedInPara.forEachIndexed { localIdx, (speakText, relStartIdx) ->
+            chunkedInPara.forEachIndexed { localIdx, (speakText, relStartIdx) ->
                 val absSentenceIdx = sStart + relStartIdx
                 rawChunks.add(
                     AiChapterChunk(
@@ -783,7 +795,7 @@ class BookAudioPlaybackService : Service() {
                         sentenceIndex = absSentenceIdx,
                         displaySentenceText = allSentences.getOrElse(absSentenceIdx) { speakText },
                         speakText = speakText,
-                        endsParagraph = localIdx == mergedInPara.lastIndex
+                        endsParagraph = localIdx == chunkedInPara.lastIndex
                     )
                 )
             }
@@ -791,26 +803,26 @@ class BookAudioPlaybackService : Service() {
 
         if (rawChunks.size <= 1) return rawChunks
 
-        // Gộp thêm các đoạn hội thoại quá ngắn (< 8 từ) liền kề nhau lên tối đa 28 từ để triệt tiêu độ trễ
+        // Gộp thêm các câu thoại cực ngắn liền kề nhau (<= 140 ký tự, giữ câu đầu <= 105 ký tự)
         val compact = ArrayList<AiChapterChunk>(rawChunks.size)
         var i = 0
         while (i < rawChunks.size) {
             var current = rawChunks[i]
-            var words = VietnameseTtsTextNormalizer.countWords(current.speakText)
+            val isFirstChunk = compact.isEmpty()
+            val ceiling = if (isFirstChunk) 105 else 140
+            val mergeFloor = if (isFirstChunk) 55 else 80
             i++
-            while (i < rawChunks.size && words < 8) {
+            while (i < rawChunks.size && current.speakText.length < mergeFloor) {
                 val next = rawChunks[i]
-                val nextWords = VietnameseTtsTextNormalizer.countWords(next.speakText)
-                if (words + nextWords > 28 || current.speakText.length + 1 + next.speakText.length > 210) {
+                val sep = if (current.speakText.isNotEmpty() && current.speakText.last() !in ".!?…;:,") ". " else " "
+                if (current.speakText.length + sep.length + next.speakText.length > ceiling) {
                     break
                 }
-                val sep = if (current.speakText.isNotEmpty() && current.speakText.last() !in ".!?…;:") ". " else " "
                 current = current.copy(
                     lastParagraphIndex = next.lastParagraphIndex,
                     speakText = current.speakText + sep + next.speakText,
                     endsParagraph = next.endsParagraph
                 )
-                words += nextWords
                 i++
             }
             compact.add(current)
@@ -819,10 +831,13 @@ class BookAudioPlaybackService : Service() {
     }
 
     /**
-     * Hàng đợi sinh âm thanh trước toàn chương (Look-ahead Pre-synthesis Queue: N+1 & N+2) chạy trên [Dispatchers.IO]:
-     * - Producer liên tục chạy GGUF + NeuCodec + DSP Timbre cho câu N+1 và N+2 trong khi AudioTrack đang phát câu N.
-     * - Consumer lấy sóng âm đã sẵn sàng trong Channel(capacity = 2) và phát nối tiếp ngay lập tức (nghỉ 0.25–0.4s).
-     * - Tuyệt đối KHÔNG bao giờ fallback sang Android TTS hệ thống.
+     * Kiến trúc Producer-Consumer 2 luồng tách biệt hoàn toàn với `LinkedBlockingQueue<PreparedAiSegment>(3)`:
+     * - **Luồng 1 (Producer — `VieNeu-Producer`)**: Khóa sẵn prefix giọng đọc, liên tục sinh câu N+1, N+2, N+3
+     *   (80–140 ký tự) qua GGUF + NeuCodec + chuẩn hóa PCM16 24kHz (kèm nhịp thở 150ms & crossfade 15ms) và đẩy
+     *   vào hàng đợi `LinkedBlockingQueue(3)`.
+     * - **Luồng 2 (Consumer — `VieNeu-AudioOut`, ưu tiên `THREAD_PRIORITY_AUDIO`)**: Lấy từng mảng `ShortArray`
+     *   từ hàng đợi và ghi nối tiếp trực tiếp vào **MỘT `AudioTrack` (`MODE_STREAM`, 24kHz) duy nhất**, không bao giờ
+     *   đóng/mở lại giữa các câu -> đọc nối tiếp không độ trễ!
      */
     private fun launchPipelinedOnnxChapter(
         chapterParagraphs: List<String>,
@@ -835,8 +850,12 @@ class BookAudioPlaybackService : Service() {
         usePresetFromVoicesJson: Boolean = false,
         generation: Long
     ) {
+        val stopFlag = AtomicBoolean(false)
+        onnxPipelineStopFlag = stopFlag
+
         onnxStreamJob = serviceScope.launch {
             onnxEngine.ensureInitialized()
+            if (stopFlag.get() || generation != activeParagraphGeneration) return@launch
             if (!onnxEngine.isFullOnnxSynthesisReady()) {
                 val diag = onnxEngine.getReadinessDiagnostic()
                 withContext(Dispatchers.Main) {
@@ -869,7 +888,7 @@ class BookAudioPlaybackService : Service() {
                 resolvedCodes = preset.referenceCodes
                 resolvedRefText = preset.referenceText
                 resolvedPresetId = preset.id
-                withContext(Dispatchers.Main) {
+                mainHandler.post {
                     if (isPlaying && generation == activeParagraphGeneration) {
                         activeSpeakerName = "VieNeu ${preset.id}"
                         publishState()
@@ -882,13 +901,20 @@ class BookAudioPlaybackService : Service() {
                 resolvedPresetId = presetVoiceId
             }
 
+            // Khóa cố định tiền tố giọng (ref_phones + ref_codes) MỘT LẦN DUY NHẤT trước khi chạy toàn bộ chương
+            onnxEngine.prepareVoiceForStreaming(
+                referenceCodes = resolvedCodes,
+                referenceText = resolvedRefText,
+                matchedPresetId = resolvedPresetId
+            )
+
             val chunks = buildAiChapterChunks(
                 chapterParagraphs = chapterParagraphs,
                 startParagraphIndex = startParagraphIndex,
                 startSentenceIndex = startSentenceIndex
             )
             if (chunks.isEmpty()) {
-                withContext(Dispatchers.Main) {
+                mainHandler.post {
                     if (isPlaying && generation == activeParagraphGeneration) {
                         val bookId = activeBookId
                         if (sleepTimerEndOfChapter) {
@@ -910,16 +936,19 @@ class BookAudioPlaybackService : Service() {
                 activePrefs.speechRate
             }).coerceIn(0.8f, 1.5f)
 
-            // Look-ahead buffer 3+ đoạn (Channel capacity = 4): giữ sẵn mảng PCM 16-bit 24kHz đã cắt khoảng lặng
-            // thừa (< 0.01f), ghép 15ms crossfade & nhịp thở 135-175ms sẵn sàng xả trực tiếp vào 1 AudioTrack duy nhất!
-            val preSynthQueue = Channel<PreparedAiSegment>(capacity = 4)
+            // Bộ đệm gối đầu 3 câu sẵn sàng (capacity = 3): khi Consumer phát câu N, Producer đã tính xong N+1, N+2, N+3
+            val lookAheadQueue = LinkedBlockingQueue<PreparedAiSegment>(3)
+            val isStillValid: () -> Boolean = { !stopFlag.get() && generation == activeParagraphGeneration }
 
-            val producerJob = launch(Dispatchers.IO) {
+            // LUỒNG 1 (Producer Thread): tổng hợp GGUF + NeuCodec 24kHz liên tục vào LinkedBlockingQueue(3)
+            val producer = Thread({
+                Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND + Process.THREAD_PRIORITY_MORE_FAVORABLE)
                 try {
                     var prevTail: FloatArray? = null
-                    chunks.forEachIndexed { idx, chunk ->
-                        if (!isActive || generation != activeParagraphGeneration) return@launch
-                        val synthRes = onnxEngine.synthesizeSentenceDetailed(
+                    for (idx in chunks.indices) {
+                        if (!isStillValid() || Thread.currentThread().isInterrupted) break
+                        val chunk = chunks[idx]
+                        val synthRes = onnxEngine.synthesizeSentenceBlocking(
                             sentence = chunk.speakText,
                             speakerEmbedding = resolvedEmb,
                             speed = effectiveSpeed,
@@ -927,10 +956,10 @@ class BookAudioPlaybackService : Service() {
                             referenceText = resolvedRefText,
                             matchedPresetId = resolvedPresetId
                         )
-                        if (!isActive || generation != activeParagraphGeneration) return@launch
+                        if (!isStillValid() || Thread.currentThread().isInterrupted) break
                         val audio = synthRes.audio
                         if (audio == null) {
-                            preSynthQueue.send(
+                            lookAheadQueue.put(
                                 PreparedAiSegment(
                                     chunk = chunk,
                                     pcm16 = null,
@@ -938,10 +967,11 @@ class BookAudioPlaybackService : Service() {
                                     errorMessage = synthRes.errorMessage
                                 )
                             )
-                            return@launch
+                            return@Thread
                         }
                         val isLastChunk = idx == chunks.lastIndex
-                        val breathMs = if (chunk.endsParagraph) 175 else 135
+                        // Nhịp thở tự nhiên 150ms giữa các câu, 175ms cuối đoạn văn
+                        val breathMs = if (chunk.endsParagraph) 175 else 150
                         val (pcm16, nextTail) = OnnxAudioTrackPlayer.prepareSeamlessPcm16(
                             samples = audio.pcmFloat,
                             sampleRate = audio.sampleRate,
@@ -951,7 +981,8 @@ class BookAudioPlaybackService : Service() {
                             appendBreathPause = !isLastChunk
                         )
                         prevTail = nextTail
-                        preSynthQueue.send(
+                        if (!isStillValid() || Thread.currentThread().isInterrupted) break
+                        lookAheadQueue.put(
                             PreparedAiSegment(
                                 chunk = chunk,
                                 pcm16 = pcm16,
@@ -960,105 +991,139 @@ class BookAudioPlaybackService : Service() {
                             )
                         )
                     }
-                } finally {
-                    preSynthQueue.close()
-                }
-            }
-
-            var streamOpened = false
-            var completedCleanly = false
-            try {
-                var lastSavedPara = startParagraphIndex
-                for (prepared in preSynthQueue) {
-                    if (!isActive || generation != activeParagraphGeneration) return@launch
-                    val chunk = prepared.chunk
-                    val pcm16 = prepared.pcm16
-                    if (pcm16 == null) {
-                        val reason = prepared.errorMessage ?: "lỗi không xác định"
-                        withContext(Dispatchers.Main) {
-                            if (isPlaying && generation == activeParagraphGeneration) {
-                                activeUsingOnnxVoice = false
-                                lastPlaybackNotice = "Không thể tổng hợp âm VieNeu cho đoạn văn này: $reason"
-                                pausePlayback()
-                            }
-                        }
-                        return@launch
+                    if (isStillValid() && !Thread.currentThread().isInterrupted) {
+                        lookAheadQueue.put(PreparedAiSegment(isEndOfStream = true))
                     }
+                } catch (_: InterruptedException) {
+                    // Dừng chủ động khi Pause / chuyển câu / đổi chương
+                } catch (t: Throwable) {
+                    if (isStillValid()) {
+                        runCatching {
+                            lookAheadQueue.offer(
+                                PreparedAiSegment(
+                                    errorMessage = t.message ?: t.javaClass.simpleName
+                                )
+                            )
+                        }
+                    }
+                }
+            }, "VieNeu-Producer-$generation").apply { isDaemon = true }
 
-                    // Khởi tạo MỘT AudioTrack MODE_STREAM 24kHz duy nhất cho toàn bộ chương (không release/tạo lại!)
-                    if (!streamOpened) {
-                        streamOpened = onnxPlayer.openContinuousStream(
-                            sampleRate = prepared.sampleRate,
-                            speed = effectiveSpeed
-                        )
-                        if (!streamOpened) {
-                            withContext(Dispatchers.Main) {
+            // LUỒNG 2 (Consumer Thread - THREAD_PRIORITY_AUDIO): xả thẳng vào 1 AudioTrack MODE_STREAM duy nhất
+            val consumer = Thread({
+                Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+                var streamOpened = false
+                var completedCleanly = false
+                try {
+                    var lastSavedPara = startParagraphIndex
+                    while (isStillValid() && !Thread.currentThread().isInterrupted) {
+                        val prepared = lookAheadQueue.take()
+                        if (!isStillValid()) break
+                        if (prepared.isEndOfStream) {
+                            completedCleanly = true
+                            break
+                        }
+                        val chunk = prepared.chunk
+                        val pcm16 = prepared.pcm16
+                        if (chunk == null || pcm16 == null) {
+                            val reason = prepared.errorMessage ?: "lỗi không xác định"
+                            mainHandler.post {
                                 if (isPlaying && generation == activeParagraphGeneration) {
                                     activeUsingOnnxVoice = false
-                                    lastPlaybackNotice = "Không thể khởi tạo luồng AudioTrack 24kHz liên tục."
+                                    lastPlaybackNotice = "Không thể tổng hợp âm VieNeu cho đoạn văn này: $reason"
                                     pausePlayback()
                                 }
                             }
-                            return@launch
+                            return@Thread
+                        }
+
+                        // Mở MỘT AudioTrack MODE_STREAM 24kHz duy nhất cho toàn chương (không bao giờ đóng/mở lại!)
+                        if (!streamOpened) {
+                            streamOpened = onnxPlayer.openContinuousStream(
+                                sampleRate = prepared.sampleRate,
+                                speed = effectiveSpeed
+                            )
+                            if (!streamOpened) {
+                                mainHandler.post {
+                                    if (isPlaying && generation == activeParagraphGeneration) {
+                                        activeUsingOnnxVoice = false
+                                        lastPlaybackNotice = "Không thể khởi tạo luồng AudioTrack 24kHz liên tục."
+                                        pausePlayback()
+                                    }
+                                }
+                                return@Thread
+                            }
+                        }
+
+                        // Cập nhật tô sáng câu bất đồng bộ trên Main (KHÔNG chặn luồng âm thanh!)
+                        mainHandler.post {
+                            if (isPlaying && generation == activeParagraphGeneration) {
+                                speakingParagraphIndex = chunk.paragraphIndex
+                                currentParagraphSentences = chunk.paragraphSentences
+                                speakingSentenceIndex = chunk.sentenceIndex
+                                speakingSentenceText = chunk.displaySentenceText
+                                publishState()
+                            }
+                        }
+                        if (chunk.lastParagraphIndex != lastSavedPara) {
+                            lastSavedPara = chunk.lastParagraphIndex
+                            persistProgressAsync(activeBookId, activeChapterIndex, lastSavedPara)
+                        }
+
+                        val writtenOk = onnxPlayer.writeContinuousChunkSync(pcm16, isStillValid)
+                        if (!writtenOk || !isStillValid()) break
+                    }
+
+                    if (completedCleanly && streamOpened && isStillValid()) {
+                        onnxPlayer.finishContinuousStreamAndDrainSync(isStillValid)
+                        streamOpened = false
+                        mainHandler.post {
+                            if (isPlaying && generation == activeParagraphGeneration) {
+                                val bookId = activeBookId
+                                if (sleepTimerEndOfChapter) {
+                                    clearSleepTimerInternal(publish = false)
+                                    pausePlayback()
+                                } else if (bookId != null && activeChapterIndex + 1 < activeToc.size) {
+                                    loadChapterAndSpeak(bookId, activeChapterIndex + 1, 0)
+                                } else {
+                                    pausePlayback()
+                                }
+                            }
                         }
                     }
-
-                    withContext(Dispatchers.Main) {
-                        if (isPlaying && generation == activeParagraphGeneration) {
-                            speakingParagraphIndex = chunk.paragraphIndex
-                            currentParagraphSentences = chunk.paragraphSentences
-                            speakingSentenceIndex = chunk.sentenceIndex
-                            speakingSentenceText = chunk.displaySentenceText
-                            publishState()
-                        }
+                } catch (_: InterruptedException) {
+                    // Dừng chủ động
+                } finally {
+                    if (streamOpened && !completedCleanly && generation == activeParagraphGeneration) {
+                        onnxPlayer.stopImmediately()
                     }
-                    if (chunk.lastParagraphIndex != lastSavedPara) {
-                        lastSavedPara = chunk.lastParagraphIndex
-                        persistProgressAsync(activeBookId, activeChapterIndex, lastSavedPara)
-                    }
+                    stopFlag.set(true)
+                    producer.interrupt()
+                    lookAheadQueue.clear()
+                }
+            }, "VieNeu-AudioOut-$generation").apply { isDaemon = true }
 
-                    // Đẩy nối tiếp trực tiếp PCM16 đã cắt khoảng lặng & 15ms crossfade vào cùng 1 AudioTrack (0ms ngắt quãng!)
-                    val writtenOk = onnxPlayer.writeContinuousChunkBlocking(pcm16)
-                    if (!writtenOk || !isActive || generation != activeParagraphGeneration) return@launch
-                }
-
-                if (streamOpened) {
-                    onnxPlayer.finishContinuousStreamAndDrain()
-                    streamOpened = false
-                }
-                completedCleanly = true
-
-                // Hoàn tất toàn bộ chương -> tự chuyển chương tiếp theo (hoặc dừng nếu bật hẹn giờ hết chương)
-                withContext(Dispatchers.Main) {
-                    if (isPlaying && generation == activeParagraphGeneration) {
-                        val bookId = activeBookId
-                        if (sleepTimerEndOfChapter) {
-                            clearSleepTimerInternal(publish = false)
-                            pausePlayback()
-                        } else if (bookId != null && activeChapterIndex + 1 < activeToc.size) {
-                            loadChapterAndSpeak(bookId, activeChapterIndex + 1, 0)
-                        } else {
-                            pausePlayback()
-                        }
-                    }
-                }
-            } finally {
-                producerJob.cancel()
-                preSynthQueue.close()
-                if (streamOpened && !completedCleanly) {
-                    onnxPlayer.stopImmediately()
-                }
-            }
+            if (!isStillValid()) return@launch
+            onnxProducerThread = producer
+            onnxConsumerThread = consumer
+            producer.start()
+            consumer.start()
         }
     }
 
     private fun cancelOnnxStreamPlayback() {
+        onnxPipelineStopFlag?.set(true)
+        onnxPipelineStopFlag = null
         onnxStreamJob?.cancel()
         onnxStreamJob = null
         if (onnxEngineLazy.isInitialized()) {
             onnxEngine.cancelActiveGeneration()
         }
         onnxPlayer.stopImmediately()
+        onnxProducerThread?.interrupt()
+        onnxProducerThread = null
+        onnxConsumerThread?.interrupt()
+        onnxConsumerThread = null
     }
 
     /**

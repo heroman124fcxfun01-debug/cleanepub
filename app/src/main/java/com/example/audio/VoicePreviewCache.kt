@@ -16,13 +16,23 @@ object VoicePreviewCache {
 
     private const val TAG = "VoicePreviewCache"
     private const val PREVIEW_DIR_NAME = "voice_previews"
+    private const val CLEAN_ONSET_MARKER = ".v2_clean_onset"
     private const val MIN_VALID_WAV_BYTES = 4_800L // >= ~0.1s @ 24kHz 16-bit mono + 44-byte header
 
     const val INSTANT_PREVIEW_SENTENCE =
         "Xin chào, đây là giọng đọc của tôi trên ứng dụng đọc sách."
 
-    fun previewDir(context: Context): File =
-        File(context.applicationContext.filesDir, PREVIEW_DIR_NAME)
+    fun previewDir(context: Context): File {
+        val dir = File(context.applicationContext.filesDir, PREVIEW_DIR_NAME)
+        val marker = File(dir, CLEAN_ONSET_MARKER)
+        if (dir.exists() && !marker.exists()) {
+            runCatching {
+                dir.listFiles { f -> f.isFile && f.name.endsWith(".wav") }?.forEach { it.delete() }
+                marker.createNewFile()
+            }
+        }
+        return dir
+    }
 
     fun sanitizeVoiceId(voiceId: String): String {
         val cleaned = voiceId.trim()

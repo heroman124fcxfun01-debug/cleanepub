@@ -845,12 +845,14 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                         samples = mono16k,
                         sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE,
                         minSeconds = AudioFileDecoder.CLONE_MIN_WINDOW_SECONDS,
-                        maxSeconds = AudioFileDecoder.CLONE_MAX_WINDOW_SECONDS
+                        maxSeconds = AudioFileDecoder.CLONE_MAX_WINDOW_SECONDS,
+                        trimEdgeMicNoiseSeconds = 0.25f
                     )
                 }
                 val extracted = onnxVoiceEngine.extractSpeakerEmbedding(
                     samples = cleanSamples16k,
-                    sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
+                    sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE,
+                    alreadyPreprocessed = true
                 )
                 _voiceCloneEngineMode.value = onnxVoiceEngine.engineMode
                 _presetAiVoices.value = onnxVoiceEngine.getPresetVoices()

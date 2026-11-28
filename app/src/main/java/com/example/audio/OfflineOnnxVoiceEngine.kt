@@ -245,7 +245,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
      */
     suspend fun extractSpeakerEmbedding(
         samples: FloatArray,
-        sampleRate: Int
+        sampleRate: Int,
+        alreadyPreprocessed: Boolean = false
     ): SpeakerEmbeddingResult = withContext(Dispatchers.IO) {
         ensureInitialized()
         if (samples.isEmpty()) {
@@ -281,16 +282,22 @@ class OfflineOnnxVoiceEngine(context: Context) {
             samples
         }
 
-        val cleanWindow16k = AudioFileDecoder.extractCleanestSpeechWindow16k(
-            samples = samples16k,
-            sampleRate = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE,
-            minSeconds = AudioFileDecoder.CLONE_MIN_WINDOW_SECONDS,
-            maxSeconds = AudioFileDecoder.CLONE_MAX_WINDOW_SECONDS
-        )
+        val cleanWindow16k = if (alreadyPreprocessed) {
+            samples16k
+        } else {
+            AudioFileDecoder.extractCleanestSpeechWindow16k(
+                samples = samples16k,
+                sampleRate = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE,
+                minSeconds = AudioFileDecoder.CLONE_MIN_WINDOW_SECONDS,
+                maxSeconds = AudioFileDecoder.CLONE_MAX_WINDOW_SECONDS,
+                trimEdgeMicNoiseSeconds = 0.25f
+            )
+        }
 
         val encodedRes = neuCodec.encodeReferenceAudio(
             samples = cleanWindow16k,
-            sampleRate = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE
+            sampleRate = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE,
+            alreadyPreprocessed = true
         )
         val encoded = encodedRes.getOrNull()
         if (encoded != null && encoded.codes.size >= 8) {
@@ -357,6 +364,43 @@ class OfflineOnnxVoiceEngine(context: Context) {
     }
 
     /**
+     * Pre-phonemizes `ref_text` and locks the active voice prefix (`ref_phones` + `ref_codes`)
+     * ONCE before streaming a chapter so the Producer thread never recomputes voice prefix state.
+     */
+    fun prepareVoiceForStreaming(
+        referenceCodes: IntArray? = null,
+        referenceText: String? = null,
+        matchedPresetId: String? = null
+    ) {
+        if (!ggufRunner.isLoaded) return
+        val explicitPreset = matchedPresetId?.takeIf { it.isNotBlank() }?.let { findPresetVoiceById(it) }
+        val inferredPreset = explicitPreset ?: findPresetMatchingCodes(referenceCodes)
+        val resolvedRefCodes: IntArray
+        val resolvedRefText: String
+        when {
+            inferredPreset != null -> {
+                resolvedRefCodes = inferredPreset.referenceCodes
+                resolvedRefText = inferredPreset.referenceText
+            }
+            referenceCodes != null && referenceCodes.size >= 8 -> {
+                resolvedRefCodes = referenceCodes
+                resolvedRefText = referenceText?.trim().orEmpty()
+            }
+            else -> {
+                val fallback = presetVoices.firstOrNull { it.referenceCodes.size >= 8 } ?: return
+                resolvedRefCodes = fallback.referenceCodes
+                resolvedRefText = fallback.referenceText
+            }
+        }
+        val refPhones = if (resolvedRefText.isNotBlank()) {
+            refPhonesCache.getOrPut(resolvedRefText) { espeakG2p.phonemize(resolvedRefText) }
+        } else {
+            ""
+        }
+        ggufRunner.lockVoicePrefix(refPhones = refPhones, refCodes = resolvedRefCodes)
+    }
+
+    /**
      * Synthesizes a single Vietnamese text chunk using official `pnnbao97/VieNeu-TTS` GGUF + NeuCodec 24kHz:
      * 1. Passes the authentic cloned `(ref_text, ref_codes, speaker_embedding)` directly into the prompt
      *    (or the selected built-in preset if reading with a `voices.json` preset).
@@ -372,18 +416,39 @@ class OfflineOnnxVoiceEngine(context: Context) {
         referenceText: String? = null,
         matchedPresetId: String? = null
     ): OnnxSynthesisResult = withContext(Dispatchers.IO) {
+        ensureInitialized()
+        synthesizeSentenceBlocking(
+            sentence = sentence,
+            speakerEmbedding = speakerEmbedding,
+            speed = speed,
+            referenceCodes = referenceCodes,
+            referenceText = referenceText,
+            matchedPresetId = matchedPresetId
+        )
+    }
+
+    /**
+     * Direct blocking synthesis entry point for the dedicated Producer OS thread
+     * (zero coroutine context-switch overhead between sentences).
+     */
+    fun synthesizeSentenceBlocking(
+        sentence: String,
+        speakerEmbedding: FloatArray = FloatArray(0),
+        speed: Float = 1.0f,
+        referenceCodes: IntArray? = null,
+        referenceText: String? = null,
+        matchedPresetId: String? = null
+    ): OnnxSynthesisResult {
         activeOpsCount.incrementAndGet()
         try {
-            ensureInitialized()
-
             if (!ggufRunner.isLoaded) {
-                return@withContext OnnxSynthesisResult(
+                return OnnxSynthesisResult(
                     errorMessage = ggufRunner.lastLoadError
                         ?: "Chưa nạp được model VieNeu-TTS GGUF (${discoveredModels?.describeSummary()})."
                 )
             }
             if (!neuCodec.hasDecoder) {
-                return@withContext OnnxSynthesisResult(
+                return OnnxSynthesisResult(
                     errorMessage = neuCodec.loadErrors["neucodec_decoder"]
                         ?: "Thiếu file neucodec_decoder.onnx để giải mã sóng âm 24kHz."
                 )
@@ -391,7 +456,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
             val cleanTarget = VietnameseTtsTextNormalizer.normalizeForTts(sentence).trim()
             if (cleanTarget.isEmpty()) {
-                return@withContext OnnxSynthesisResult(errorMessage = "Câu văn bản trống sau khi chuẩn hóa.")
+                return OnnxSynthesisResult(errorMessage = "Câu văn bản trống sau khi chuẩn hóa.")
             }
 
             val explicitPreset = matchedPresetId?.takeIf { it.isNotBlank() }?.let { findPresetVoiceById(it) }
@@ -418,7 +483,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 else -> {
                     val fallbackPreset = presetVoices.firstOrNull { it.referenceCodes.size >= 8 }
                     if (fallbackPreset == null) {
-                        return@withContext OnnxSynthesisResult(
+                        return OnnxSynthesisResult(
                             errorMessage = "Chưa có mã giọng mẫu (ref_codes). Vui lòng tạo giọng nhân bản mới."
                         )
                     }
@@ -436,13 +501,14 @@ class OfflineOnnxVoiceEngine(context: Context) {
             }
             val targetPhones = espeakG2p.phonemize(cleanTarget)
             if (targetPhones.isBlank()) {
-                return@withContext OnnxSynthesisResult(
+                return OnnxSynthesisResult(
                     errorMessage = "Bộ chuyển âm vị tiếng Việt không tạo được chuỗi IPA cho câu này."
                 )
             }
 
             val wordCount = VietnameseTtsTextNormalizer.countWords(cleanTarget).coerceAtLeast(1)
-            val estMaxTokens = (wordCount * 20 + 90).coerceIn(150, 680)
+            // Tight token budget matched to 80-140 char chunks (~14-18 tokens/Vietnamese syllable)
+            val estMaxTokens = (wordCount * 18 + 64).coerceIn(110, 440)
 
             val genRes = ggufRunner.generateSpeechCodes(
                 refPhones = refPhones,
@@ -454,7 +520,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
             )
 
             if (genRes.errorMessage != null || genRes.speechCodes.size < 4) {
-                return@withContext OnnxSynthesisResult(
+                return OnnxSynthesisResult(
                     audio = null,
                     errorMessage = genRes.errorMessage ?: "GGUF không sinh ra mã âm thanh hợp lệ.",
                     traceLog = buildString {
@@ -475,7 +541,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
             )
             val decodeMs = System.currentTimeMillis() - decodeStart
 
-            decoded.fold(
+            return decoded.fold(
                 onSuccess = { waveform24k ->
                     val durSec = waveform24k.size.toFloat() / NeuCodecOnnxEngine.DECODER_SAMPLE_RATE.toFloat()
                     val trace = buildString {

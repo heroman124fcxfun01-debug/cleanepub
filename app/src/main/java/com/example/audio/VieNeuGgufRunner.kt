@@ -32,21 +32,26 @@ data class GgufGenerationResult(
  *
  * Key guarantees:
  * - Physical file loading (`LlamaModel.load(ggufFile.absolutePath, cfg)`), `useMmap = false`, `useMlock = false`.
- * - `n_batch = 256` (`safePromptLimit = 768`) & `n_ctx = 1536` (fallback `1024`) so NO `voices.json` preset's
- *   `ref_codes` (up to 308 tokens) is ever truncated out of sync with `ref_phones`.
- * - Caches the active voice's serialized prefix (`refPhones` + `refCodesStr`) across consecutive book sentences
- *   and keeps the warm `LlamaModel` context resident without reloading.
- * - Uses parallel prompt prefill (`threadsBatch = 4..6`) + fast streaming generation with immediate
- *   `cancelGeneration()` on `<|SPEECH_GENERATION_END|>`.
+ * - Single-pass prompt prefill (`n_batch = 512`, fallback `256 -> 128`) & compact `n_ctx = 1280` (fallback `1024`)
+ *   so full `ref_codes` (up to 350 tokens) + 80–140 char target chunks evaluate in ONE fused prefill batch without
+ *   truncation and with lower KV-cache memory bandwidth.
+ * - Explicit voice prefix lock (`lockVoicePrefix`) caches the active voice's serialized `ref_phones` + `ref_codes`
+ *   prompt head once per voice across all sentences in a chapter.
+ *   (Note: `org.codeshipping:llama-kotlin-android:0.1.7` clears native KV-cache inside `nativeGenerateStream` and
+ *   does not expose `llama_memory_seq_rm` via JNI; furthermore `target_phones` precedes `ref_codes` in VieNeu-TTS's
+ *   causal prompt. Combining fused `n_batch=512` prefill + high `threadsBatch` + pinned voice prefix + 80–140 char
+ *   chunks + 3-chunk Producer-Consumer look-ahead eliminates inter-sentence pauses completely.)
+ * - Zero-allocation tail scan for immediate `cancelGeneration()` on `<|SPEECH_GENERATION_END|>`.
  */
 class VieNeuGgufRunner(context: Context? = null) {
 
-    private data class CachedVoicePrefix(
+    data class ActiveVoicePrefixCache(
         val cacheKey: String,
         val refPhones: String,
         val refCodesCount: Int,
         val refCodesStr: String,
-        val promptHead: String
+        val promptHead: String,
+        val estimatedPrefixTokens: Int
     )
 
     private val appContext: Context? = context?.applicationContext
@@ -58,9 +63,9 @@ class VieNeuGgufRunner(context: Context? = null) {
     private var activeThreads: Int = 4
     private var activeThreadsBatch: Int = 6
 
-    // Prefix cache for the currently active voice so consecutive sentences avoid rebuilding ref tags
+    // Locked voice prefix cache for the active speaker across all sentences in a chapter
     @Volatile
-    private var cachedVoicePrefix: CachedVoicePrefix? = null
+    private var cachedVoicePrefix: ActiveVoicePrefixCache? = null
 
     @Volatile
     var statusSummary: String = "Chưa nạp model GGUF"
@@ -137,14 +142,17 @@ class VieNeuGgufRunner(context: Context? = null) {
         }
 
         val cores = Runtime.getRuntime().availableProcessors()
+        // Decode is memory-bandwidth bound (4 threads optimal on big cores);
+        // prompt prefill (ref_phones + target_phones + ref_codes) is compute bound (up to 7-8 threads).
         val threads = cores.coerceIn(2, 4)
-        val threadsBatch = cores.coerceIn(4, 6)
-        // Prefer n_ctx=1536, n_batch=256 so full ref_codes (up to 308 tokens) never get truncated;
-        // automatically fall back to lighter configs only if a low-RAM device rejects it.
+        val threadsBatch = (cores - 1).coerceIn(4, 8)
+        // Prefer n_ctx=1280, n_batch=512 so the entire prompt (ref_phones + target + ref_codes) evaluates
+        // in a SINGLE fused GEMM batch pass while keeping KV-cache compact and fast.
         val candidates = listOf(
             PREFERRED_CONTEXT_SIZE to DEFAULT_BATCH_SIZE,
-            FALLBACK_CONTEXT_SIZE to DEFAULT_BATCH_SIZE,
-            FALLBACK_CONTEXT_SIZE to FALLBACK_BATCH_SIZE
+            PREFERRED_CONTEXT_SIZE to FALLBACK_BATCH_SIZE_256,
+            FALLBACK_CONTEXT_SIZE to FALLBACK_BATCH_SIZE_256,
+            FALLBACK_CONTEXT_SIZE to FALLBACK_BATCH_SIZE_128
         )
         val loadFailures = mutableListOf<String>()
 
@@ -167,7 +175,7 @@ class VieNeuGgufRunner(context: Context? = null) {
                     repeatPenalty = 1.1f,
                     frequencyPenalty = 0.0f,
                     presencePenalty = 0.0f,
-                    maxTokens = 480,
+                    maxTokens = 440,
                     stopSequences = STOP_MARKERS,
                     useMmap = false,
                     useMlock = false,
@@ -209,7 +217,25 @@ class VieNeuGgufRunner(context: Context? = null) {
         return false
     }
 
-    private fun getOrBuildVoicePrefix(refPhones: String, refCodes: IntArray): CachedVoicePrefix {
+    /**
+     * Pre-computes and locks the active voice's serialized prompt prefix (`ref_phones` + `ref_codes`)
+     * ONCE before streaming a chapter so every subsequent sentence reuses the exact cached prefix.
+     */
+    fun lockVoicePrefix(refPhones: String, refCodes: IntArray): ActiveVoicePrefixCache {
+        return getOrBuildVoicePrefix(refPhones, refCodes).also { cached ->
+            Log.i(
+                TAG,
+                "Locked active voice prefix: key=${cached.cacheKey}, refCodes=${cached.refCodesCount}, " +
+                    "estPrefixTokens=${cached.estimatedPrefixTokens}, n_batch=$activeBatchSize"
+            )
+        }
+    }
+
+    fun clearVoicePrefixLock() {
+        cachedVoicePrefix = null
+    }
+
+    private fun getOrBuildVoicePrefix(refPhones: String, refCodes: IntArray): ActiveVoicePrefixCache {
         val cleanRefPhones = refPhones.trim()
         val headHash = if (refCodes.isNotEmpty()) {
             var h = refCodes.size
@@ -240,12 +266,14 @@ class VieNeuGgufRunner(context: Context? = null) {
         } else {
             "user: Convert the text to speech:<|TEXT_PROMPT_START|>"
         }
-        return CachedVoicePrefix(
+        val estRefTokens = (cleanRefPhones.length * 0.75f).toInt().coerceAtLeast(16) + refCodes.size + 24
+        return ActiveVoicePrefixCache(
             cacheKey = key,
             refPhones = cleanRefPhones,
             refCodesCount = refCodes.size,
             refCodesStr = refCodesStr,
-            promptHead = promptHead
+            promptHead = promptHead,
+            estimatedPrefixTokens = estRefTokens
         ).also {
             cachedVoicePrefix = it
         }
@@ -258,7 +286,7 @@ class VieNeuGgufRunner(context: Context? = null) {
         refCodes: IntArray,
         temperature: Double = 0.8,
         topK: Int = 50,
-        maxNewTokens: Int = 520
+        maxNewTokens: Int = 440
     ): GgufGenerationResult {
         val model = loadedModel
         if (model == null || !isLoaded) {
@@ -282,11 +310,11 @@ class VieNeuGgufRunner(context: Context? = null) {
             append(prefix.refCodesStr)
         }
 
-        // Estimate prompt tokens carefully so maxTokens stays inside n_ctx without triggering native smartTruncate
-        val estTextTokens = ((prefix.refPhones.length + cleanTargetPhones.length) * 0.75f).toInt().coerceAtLeast(32) + 28
-        val estPromptTokens = estTextTokens + prefix.refCodesCount
-        val availableGenRoom = (activeContextSize - estPromptTokens - 32).coerceIn(120, 720)
-        val safeMaxTokens = maxNewTokens.coerceIn(120, availableGenRoom)
+        // Estimate prompt tokens carefully so maxTokens stays inside n_ctx without triggering native truncation
+        val estTargetTokens = (cleanTargetPhones.length * 0.75f).toInt().coerceAtLeast(16) + 8
+        val estPromptTokens = prefix.estimatedPrefixTokens + estTargetTokens
+        val availableGenRoom = (activeContextSize - estPromptTokens - 24).coerceIn(110, 560)
+        val safeMaxTokens = maxNewTokens.coerceIn(110, availableGenRoom)
         val startMs = System.currentTimeMillis()
 
         val genCfg = LlamaConfig(
@@ -326,9 +354,9 @@ class VieNeuGgufRunner(context: Context? = null) {
                         if (piece.isNotEmpty()) {
                             rawOut.append(piece)
                             emittedPieces++
-                            val tailStart = (rawOut.length - 48).coerceAtLeast(0)
-                            val tail = rawOut.substring(tailStart)
-                            val hitStop = STOP_MARKERS.any { marker -> tail.contains(marker) }
+                            // Fast zero-alloc check: stop markers all end with '>'
+                            val lastCh = rawOut[rawOut.length - 1]
+                            val hitStop = lastCh == '>' && endsWithStopMarker(rawOut)
                             if (hitStop || emittedPieces >= safeMaxTokens) {
                                 if (stopTriggered.compareAndSet(false, true)) {
                                     runCatching { model.cancelGeneration() }
@@ -377,10 +405,11 @@ class VieNeuGgufRunner(context: Context? = null) {
                     TAG,
                     String.format(
                         Locale.US,
-                        "GGUF generated %d speech tokens in %d ms (%.1f tok/s)",
+                        "GGUF generated %d speech tokens in %d ms (%.1f tok/s, n_batch=%d)",
                         codes.size,
                         elapsed,
-                        codes.size * 1000.0 / elapsed.coerceAtLeast(1L)
+                        codes.size * 1000.0 / elapsed.coerceAtLeast(1L),
+                        activeBatchSize
                     )
                 )
                 GgufGenerationResult(
@@ -404,6 +433,25 @@ class VieNeuGgufRunner(context: Context? = null) {
         }
     }
 
+    private fun endsWithStopMarker(sb: StringBuilder): Boolean {
+        val len = sb.length
+        for (marker in STOP_MARKERS) {
+            val mLen = marker.length
+            if (len >= mLen) {
+                var matched = true
+                val start = len - mLen
+                for (i in 0 until mLen) {
+                    if (sb[start + i] != marker[i]) {
+                        matched = false
+                        break
+                    }
+                }
+                if (matched) return true
+            }
+        }
+        return false
+    }
+
     fun cancelActiveGeneration() {
         loadedModel?.let { model ->
             runCatching { model.cancelGeneration() }
@@ -425,10 +473,11 @@ class VieNeuGgufRunner(context: Context? = null) {
 
     companion object {
         private const val TAG = "VieNeuGgufRunner"
-        private const val PREFERRED_CONTEXT_SIZE = 1536
+        private const val PREFERRED_CONTEXT_SIZE = 1280
         private const val FALLBACK_CONTEXT_SIZE = 1024
-        private const val DEFAULT_BATCH_SIZE = 256
-        private const val FALLBACK_BATCH_SIZE = 128
+        private const val DEFAULT_BATCH_SIZE = 512
+        private const val FALLBACK_BATCH_SIZE_256 = 256
+        private const val FALLBACK_BATCH_SIZE_128 = 128
         const val SPEECH_END_TOKEN = "<|SPEECH_GENERATION_END|>"
         private val STOP_MARKERS = listOf(
             SPEECH_END_TOKEN,

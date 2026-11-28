@@ -94,7 +94,11 @@ class NeuCodecOnnxEngine(context: Context? = null) {
         val opts = try {
             OrtSession.SessionOptions().apply {
                 setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 4))
+                setInterOpNumThreads(1)
+                setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                // Prevent idle ORT worker threads from busy-spinning while llama.cpp runs GGUF decode
+                runCatching { addConfigEntry("session.intra_op.allow_spinning", "0") }
             }
         } catch (e: Throwable) {
             val err = "OrtSession.SessionOptions thất bại:\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
@@ -147,7 +151,11 @@ class NeuCodecOnnxEngine(context: Context? = null) {
      * voice cloning. Pads length to a multiple of 320 samples so DistilHuBERT/SQCodec aligns cleanly.
      */
     @Synchronized
-    fun encodeReferenceAudio(samples: FloatArray, sampleRate: Int): Result<EncodedReferenceVoice> {
+    fun encodeReferenceAudio(
+        samples: FloatArray,
+        sampleRate: Int,
+        alreadyPreprocessed: Boolean = false
+    ): Result<EncodedReferenceVoice> {
         val ortEnv = env ?: return Result.failure(IllegalStateException("OrtEnvironment chưa được khởi tạo."))
         val session = encoderSession
             ?: return Result.failure(
@@ -172,13 +180,18 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                 samples
             }
 
-            // Pick the cleanest 5-8s speech segment (~250-400 FSQ tokens @ 50Hz) and pad to multiple of 320
-            val cleanest16k = AudioFileDecoder.extractCleanestSpeechWindow16k(
-                samples = mono16k,
-                sampleRate = ENCODER_SAMPLE_RATE,
-                minSeconds = AudioFileDecoder.CLONE_MIN_WINDOW_SECONDS,
-                maxSeconds = MAX_REF_AUDIO_SECONDS.toFloat()
-            )
+            // Trim 0.25s mic-start/stop noise + pick cleanest 3-8s speech window ONCE (unless already preprocessed)
+            val cleanest16k = if (alreadyPreprocessed) {
+                mono16k
+            } else {
+                AudioFileDecoder.extractCleanestSpeechWindow16k(
+                    samples = mono16k,
+                    sampleRate = ENCODER_SAMPLE_RATE,
+                    minSeconds = AudioFileDecoder.CLONE_MIN_WINDOW_SECONDS,
+                    maxSeconds = MAX_REF_AUDIO_SECONDS.toFloat(),
+                    trimEdgeMicNoiseSeconds = 0.25f
+                )
+            }
             val trimmedLen = cleanest16k.size.coerceAtMost(ENCODER_SAMPLE_RATE * MAX_REF_AUDIO_SECONDS)
             val paddedLen = ((trimmedLen + HOP_SAMPLES_16K - 1) / HOP_SAMPLES_16K) * HOP_SAMPLES_16K
             val padded = FloatArray(paddedLen)
@@ -256,7 +269,16 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                         }
                     }
 
-                    val flatCodes = flattenAnyToIntArray(result[codesIndex].value)
+                    val rawCodesValue = result[codesIndex].value
+                    val extractedCodes = when (rawCodesValue) {
+                        is Array<*> -> {
+                            // Fast-path exact NeuCodec INT32[1, 1, N] tensor: (result[0].value as Array<Array<IntArray>>)[0][0]
+                            val direct3d = (rawCodesValue.firstOrNull() as? Array<*>)?.firstOrNull() as? IntArray
+                            direct3d ?: flattenAnyToIntArray(rawCodesValue)
+                        }
+                        else -> flattenAnyToIntArray(rawCodesValue)
+                    }
+                    val flatCodes = extractedCodes
                         .filter { it in 0..65535 }
                         .toIntArray()
                     if (flatCodes.size < 8) {
@@ -415,7 +437,9 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                     if (result.size() <= 0) {
                         throw IllegalStateException("neucodec_decoder.onnx không trả về sóng âm đầu ra.")
                     }
-                    val raw = flattenAnyToFloatArray(result[0].value)
+                    val outVal = result[0].value
+                    val direct3d = ((outVal as? Array<*>)?.firstOrNull() as? Array<*>)?.firstOrNull() as? FloatArray
+                    val raw = direct3d ?: flattenAnyToFloatArray(outVal)
                     if (raw.isEmpty()) {
                         throw IllegalStateException("Sóng âm giải mã từ neucodec_decoder.onnx bị rỗng.")
                     }
@@ -474,11 +498,21 @@ class NeuCodecOnnxEngine(context: Context? = null) {
     }
 
     private fun cleanAndNormalizeWaveform(raw: FloatArray): FloatArray {
-        val out = FloatArray(raw.size)
+        if (raw.isEmpty()) return FloatArray(0)
+
+        // 1. Strip initial 20ms (480 samples @ 24kHz) DC / ISTFT startup spike from neucodec_decoder.onnx
+        val startupTrimSamples = (DECODER_SAMPLE_RATE * 20) / 1000 // 480 samples @ 24000 Hz
+        val trimmedRaw = if (raw.size > startupTrimSamples * 4) {
+            raw.copyOfRange(startupTrimSamples, raw.size)
+        } else {
+            raw
+        }
+
+        val out = FloatArray(trimmedRaw.size)
         var sum = 0.0
         var finiteCount = 0
-        for (i in raw.indices) {
-            val v = raw[i]
+        for (i in trimmedRaw.indices) {
+            val v = trimmedRaw[i]
             if (v.isFinite()) {
                 out[i] = v
                 sum += v
@@ -486,6 +520,8 @@ class NeuCodecOnnxEngine(context: Context? = null) {
             }
         }
         if (finiteCount == 0) return FloatArray(0)
+
+        // 2. Remove DC offset and compute peak amplitude
         val dc = (sum / finiteCount).toFloat()
         var peak = 0f
         for (i in out.indices) {
@@ -494,22 +530,29 @@ class NeuCodecOnnxEngine(context: Context? = null) {
             val a = abs(v)
             if (a > peak) peak = a
         }
+
+        // 3. Normalize gently and clamp strictly within [-1.0f, 1.0f]
         val gain = when {
             peak > 0.96f -> 0.94f / peak
             peak in 1e-4f..0.20f -> (0.65f / peak).coerceAtMost(4.0f)
             else -> 1.0f
         }
-        if (gain != 1.0f) {
-            for (i in out.indices) {
-                out[i] = (out[i] * gain).coerceIn(-0.98f, 0.98f)
-            }
+        for (i in out.indices) {
+            out[i] = (out[i] * gain).coerceIn(-1.0f, 1.0f)
         }
-        // Apply 8ms edge fade-in/fade-out to avoid audible clicks between sentences
-        val fade = (DECODER_SAMPLE_RATE * 8 / 1000).coerceAtMost(out.size / 4)
-        for (i in 0 until fade) {
-            val w = i.toFloat() / fade.coerceAtLeast(1).toFloat()
-            out[i] *= w
-            out[out.lastIndex - i] *= w
+
+        // 4. Apply 20ms linear fade-in (0.0 -> 1.0 over first 480 samples @ 24000 Hz)
+        //    so the speaker diaphragm ramps smoothly with ZERO opening "ụp" pop, plus 15ms fade-out.
+        val fadeInSamples = ((DECODER_SAMPLE_RATE * 20) / 1000).coerceAtMost(out.size / 3)
+        for (i in 0 until fadeInSamples) {
+            val w = i.toFloat() / fadeInSamples.coerceAtLeast(1).toFloat()
+            out[i] = (out[i] * w).coerceIn(-1.0f, 1.0f)
+        }
+        val fadeOutSamples = ((DECODER_SAMPLE_RATE * 15) / 1000).coerceAtMost(out.size / 4)
+        for (i in 0 until fadeOutSamples) {
+            val w = i.toFloat() / fadeOutSamples.coerceAtLeast(1).toFloat()
+            val idx = out.lastIndex - i
+            out[idx] = (out[idx] * w).coerceIn(-1.0f, 1.0f)
         }
         return out
     }

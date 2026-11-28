@@ -233,6 +233,68 @@ object VietnameseTtsTextNormalizer {
         return result
     }
 
+    /**
+     * Chia câu theo dấu câu tự nhiên thành các phân đoạn gọn **80–140 ký tự** dành riêng cho
+     * luồng đọc AI VieNeu-TTS độ trễ cực thấp (Producer-Consumer 2 luồng):
+     * - Câu đầu tiên ([isFirstParagraphOfStream]) ưu tiên ngắn gọn (~60–105 ký tự) để phát tiếng
+     *   chỉ sau ~1.5 giây kể từ lúc bấm Phát.
+     * - Các câu tiếp theo giữ trong khoảng 80–140 ký tự (gộp câu quá ngắn `< minChars` nếu tổng
+     *   vẫn `<= maxChars`, cắt câu dài `> maxChars` tại `,`, `;`, `:`, hoặc ranh giới từ) giúp
+     *   luồng Producer luôn tính xong câu N+1, N+2, N+3 trước khi câu N đọc xong.
+     *
+     * Trả về danh sách cặp `(speakText, firstOriginalSentenceIndex)` để tô sáng câu chính xác.
+     */
+    fun chunkSentencesForLowLatencyAi(
+        sentences: List<String>,
+        minChars: Int = 80,
+        maxChars: Int = 140,
+        firstChunkMaxChars: Int = 105,
+        isFirstParagraphOfStream: Boolean = false
+    ): List<Pair<String, Int>> {
+        if (sentences.isEmpty()) return emptyList()
+
+        // Bước 1: Đảm bảo không có đơn vị nào vượt quá maxChars (cắt gọn theo dấu phẩy/chấm phẩy/khoảng trắng)
+        val pieces = ArrayList<Pair<String, Int>>(sentences.size)
+        sentences.forEachIndexed { idx, raw ->
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty() || trimmed.none { it.isLetterOrDigit() }) return@forEachIndexed
+            val targetLimit = if (isFirstParagraphOfStream && pieces.isEmpty()) firstChunkMaxChars else maxChars
+            if (trimmed.length <= targetLimit) {
+                pieces.add(trimmed to idx)
+            } else {
+                val subParts = mutableListOf<String>()
+                splitOverlongSentence(trimmed, targetLimit, subParts)
+                subParts.forEach { part ->
+                    pieces.add(part to idx)
+                }
+            }
+        }
+        if (pieces.isEmpty()) return emptyList()
+
+        // Bước 2: Gộp các mẩu ngắn (< minChars) với mẩu kế tiếp miễn tổng <= maxChars
+        // (nhưng giữ nguyên mẩu đầu tiên <= firstChunkMaxChars để phát âm tức thì!)
+        val result = ArrayList<Pair<String, Int>>(pieces.size)
+        var i = 0
+        while (i < pieces.size) {
+            val (firstText, startIdx) = pieces[i]
+            val sb = StringBuilder(firstText)
+            val isOpeningChunk = isFirstParagraphOfStream && result.isEmpty()
+            val ceiling = if (isOpeningChunk) firstChunkMaxChars else maxChars
+            val mergeFloor = if (isOpeningChunk) minOf(55, minChars) else minChars
+            i++
+
+            while (i < pieces.size && sb.length < mergeFloor) {
+                val nextText = pieces[i].first
+                val sep = if (sb.isNotEmpty() && sb[sb.length - 1] !in ".!?…;:,") ". " else " "
+                if (sb.length + sep.length + nextText.length > ceiling) break
+                sb.append(sep).append(nextText)
+                i++
+            }
+            result.add(sb.toString() to startIdx)
+        }
+        return result
+    }
+
     private fun splitOverlongSentence(
         sentence: String,
         maxLength: Int,

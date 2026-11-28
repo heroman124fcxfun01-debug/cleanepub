@@ -606,13 +606,23 @@ object AudioFileDecoder {
         samples: FloatArray,
         sampleRate: Int = SPEAKER_ENCODER_SAMPLE_RATE,
         minSeconds: Float = CLONE_MIN_WINDOW_SECONDS,
-        maxSeconds: Float = CLONE_MAX_WINDOW_SECONDS
+        maxSeconds: Float = CLONE_MAX_WINDOW_SECONDS,
+        trimEdgeMicNoiseSeconds: Float = 0.25f
     ): FloatArray {
         if (samples.isEmpty() || sampleRate <= 0) return samples
 
+        // 0. Strip 0.25s mic-activation / mic-stop transient ("ụp" thump) at both start & end
+        // whenever recording is long enough (> 1.5s) so mic clicks are NEVER encoded into ref_codes.
+        val edgeTrimSamples = (sampleRate * trimEdgeMicNoiseSeconds.coerceAtLeast(0f)).toInt()
+        val workingSamples = if (edgeTrimSamples > 0 && samples.size > edgeTrimSamples * 2 + sampleRate) {
+            samples.copyOfRange(edgeTrimSamples, samples.size - edgeTrimSamples)
+        } else {
+            samples
+        }
+
         val frameLen = (sampleRate / 50).coerceAtLeast(160) // 20ms frame
-        val numFrames = samples.size / frameLen
-        if (numFrames < 4) return samples
+        val numFrames = workingSamples.size / frameLen
+        if (numFrames < 4) return applyGentleEdgeFadeAndNormalize(workingSamples, sampleRate)
 
         val frameRms = FloatArray(numFrames)
         var maxRms = 0f
@@ -620,7 +630,7 @@ object AudioFileDecoder {
             val base = f * frameLen
             var sq = 0.0
             for (i in 0 until frameLen) {
-                val v = samples[base + i].toDouble()
+                val v = workingSamples[base + i].toDouble()
                 sq += v * v
             }
             val rms = kotlin.math.sqrt(sq / frameLen).toFloat()
@@ -628,7 +638,7 @@ object AudioFileDecoder {
             if (rms > maxRms) maxRms = rms
         }
 
-        if (maxRms < 1e-4f) return samples
+        if (maxRms < 1e-4f) return applyGentleEdgeFadeAndNormalize(workingSamples, sampleRate)
 
         // 1. Trim dead leading/trailing silence (keep 80ms = 4 frames natural breath margin)
         val silenceThresh = (maxRms * 0.07f).coerceIn(0.008f, 0.025f)
@@ -644,12 +654,12 @@ object AudioFileDecoder {
         val marginFrames = 4 // 80ms
         val trimStartSample = ((firstSpeechFrame - marginFrames).coerceAtLeast(0)) * frameLen
         val trimEndSample = (((lastSpeechFrame + 1 + marginFrames).coerceAtMost(numFrames)) * frameLen)
-            .coerceAtMost(samples.size)
+            .coerceAtMost(workingSamples.size)
 
         val trimmed = if (trimEndSample - trimStartSample >= sampleRate) {
-            samples.copyOfRange(trimStartSample, trimEndSample)
+            workingSamples.copyOfRange(trimStartSample, trimEndSample)
         } else {
-            samples
+            workingSamples
         }
 
         val maxSamples = (sampleRate * maxSeconds).toInt().coerceAtLeast(sampleRate)
@@ -716,9 +726,14 @@ object AudioFileDecoder {
 
     private fun applyGentleEdgeFadeAndNormalize(segment: FloatArray, sampleRate: Int): FloatArray {
         if (segment.isEmpty()) return segment
-        val out = segment.copyOf()
+        val out = FloatArray(segment.size)
+        var sum = 0.0
+        for (v in segment) sum += if (v.isFinite()) v.toDouble() else 0.0
+        val dc = (sum / segment.size).toFloat()
         var peak = 0f
-        for (v in out) {
+        for (i in segment.indices) {
+            val v = (if (segment[i].isFinite()) segment[i] else 0f) - dc
+            out[i] = v
             val a = abs(v)
             if (a > peak) peak = a
         }
@@ -728,7 +743,8 @@ object AudioFileDecoder {
                 out[i] = (out[i] * gain).coerceIn(-1f, 1f)
             }
         }
-        val fade = (sampleRate * 5 / 1000).coerceAtMost(out.size / 8)
+        // Apply 15ms smooth linear fade-in/out on the 16kHz reference window before NeuCodec encoding
+        val fade = (sampleRate * 15 / 1000).coerceAtMost(out.size / 8)
         for (i in 0 until fade) {
             val w = i.toFloat() / fade.coerceAtLeast(1).toFloat()
             out[i] *= w

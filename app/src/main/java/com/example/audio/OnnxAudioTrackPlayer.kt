@@ -71,7 +71,8 @@ class OnnxAudioTrackPlayer {
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT
         ).coerceAtLeast(4096)
-        val streamBufBytes = maxOf(minBuf * 3, 16_384)
+        // Larger ~0.5s ring buffer at 24kHz PCM16 absorbs OS scheduling jitter while llama.cpp runs
+        val streamBufBytes = maxOf(minBuf * 4, 24_576)
 
         val track = runCatching {
             AudioTrack.Builder()
@@ -179,6 +180,67 @@ class OnnxAudioTrackPlayer {
         }
     }
 
+    /**
+     * Direct blocking write for the dedicated `THREAD_PRIORITY_AUDIO` Consumer thread
+     * (zero coroutine suspension overhead between consecutive 24kHz PCM16 sentences).
+     */
+    fun writeContinuousChunkSync(
+        pcm16: ShortArray,
+        shouldContinue: () -> Boolean
+    ): Boolean {
+        if (pcm16.isEmpty()) return true
+        val track = continuousTrack ?: return false
+        return try {
+            var offset = 0
+            val chunkSize = 1024
+            while (!stopped && shouldContinue() && offset < pcm16.size) {
+                if (continuousTrack !== track) return false
+                val toWrite = min(chunkSize, pcm16.size - offset)
+                val written = track.write(pcm16, offset, toWrite, AudioTrack.WRITE_BLOCKING)
+                if (written <= 0) return false
+                offset += written
+                continuousFramesWritten += written.toLong()
+            }
+            !stopped && shouldContinue() && continuousTrack === track
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Direct blocking drain & close for the dedicated Consumer thread at end-of-chapter.
+     */
+    fun finishContinuousStreamAndDrainSync(shouldContinue: () -> Boolean) {
+        val track = continuousTrack ?: return
+        try {
+            if (!stopped && shouldContinue() && continuousFramesWritten > 0L) {
+                val padSamples = (continuousSampleRate * 60 / 1000).coerceIn(480, 2400)
+                val silencePad = ShortArray(padSamples)
+                val writtenPad = runCatching {
+                    track.write(silencePad, 0, silencePad.size, AudioTrack.WRITE_BLOCKING)
+                }.getOrDefault(0)
+                if (writtenPad > 0) continuousFramesWritten += writtenPad.toLong()
+
+                val expectedDrainMs = ((continuousBufferBytes / 2L) * 1000L /
+                    (continuousSampleRate * continuousSpeed)).toLong().coerceIn(100L, 950L)
+                val deadline = System.currentTimeMillis() + expectedDrainMs + 220L
+                val targetHead = continuousFramesWritten
+                while (!stopped && shouldContinue() &&
+                    (track.playbackHeadPosition.toLong() and 0xFFFFFFFFL) < targetHead &&
+                    System.currentTimeMillis() < deadline
+                ) {
+                    try {
+                        Thread.sleep(12L)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
+                }
+            }
+        } finally {
+            closeContinuousTrackOnly()
+        }
+    }
+
     private fun closeContinuousTrackOnly() {
         val track = continuousTrack
         continuousTrack = null
@@ -203,7 +265,12 @@ class OnnxAudioTrackPlayer {
     ): Boolean {
         if (samples.isEmpty() || sampleRate <= 0) return false
         stopped = false
-        val pcm16 = VoiceSampleRecorder.floatToPcm16(samples)
+        val conditioned = FloatArray(samples.size) { i -> samples[i].coerceIn(-1.0f, 1.0f) }
+        val fadeInSamples = ((sampleRate * 20) / 1000).coerceAtMost(conditioned.size / 3)
+        for (i in 0 until fadeInSamples) {
+            conditioned[i] *= (i.toFloat() / fadeInSamples.coerceAtLeast(1).toFloat())
+        }
+        val pcm16 = VoiceSampleRecorder.floatToPcm16(conditioned)
         val minBuf = AudioTrack.getMinBufferSize(
             sampleRate,
             AudioFormat.CHANNEL_OUT_MONO,
@@ -404,13 +471,20 @@ class OnnxAudioTrackPlayer {
 
             val trimmed = FloatArray(trimmedLen) { idx -> samples[trimStart + idx] }
 
-            // 2. 15ms Smooth Raised-Cosine Crossfade & Edge Conditioning
+            // 2. Smooth 20ms linear fade-in on opening chunk (prevTail == null) or 15ms raised-cosine crossfade between chunks
+            val fadeInMs = if (prevTail == null) maxOf(crossfadeMs, 20) else crossfadeMs
+            val fadeInLen = ((sampleRate * fadeInMs) / 1000)
+                .coerceIn(48, (trimmedLen / 3).coerceAtLeast(1))
             val fadeLen = ((sampleRate * crossfadeMs) / 1000)
                 .coerceIn(48, (trimmedLen / 3).coerceAtLeast(1))
 
-            for (i in 0 until fadeLen) {
-                val t = i.toDouble() / fadeLen.toDouble()
-                val fadeIn = (0.5 * (1.0 - cos(PI * t))).toFloat()
+            for (i in 0 until fadeInLen) {
+                val fadeIn = if (prevTail == null) {
+                    i.toFloat() / fadeInLen.coerceAtLeast(1).toFloat()
+                } else {
+                    val t = i.toDouble() / fadeInLen.toDouble()
+                    (0.5 * (1.0 - cos(PI * t))).toFloat()
+                }
                 val tailSample = if (prevTail != null && i < prevTail.size) {
                     prevTail[i] * (1.0f - fadeIn)
                 } else {
