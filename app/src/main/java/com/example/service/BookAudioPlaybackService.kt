@@ -772,7 +772,7 @@ class BookAudioPlaybackService : Service() {
         for (pIdx in startParagraphIndex until chapterParagraphs.size) {
             val allSentences = VietnameseTtsTextNormalizer.splitIntoSmartSentences(
                 rawText = chapterParagraphs[pIdx],
-                maxSentenceLength = 120
+                maxSentenceLength = 185
             )
             if (allSentences.isEmpty()) continue
             val sStart = if (pIdx == startParagraphIndex) {
@@ -784,9 +784,9 @@ class BookAudioPlaybackService : Service() {
             val isOpeningPara = rawChunks.isEmpty()
             val chunkedInPara = VietnameseTtsTextNormalizer.chunkSentencesForLowLatencyAi(
                 sentences = slice,
-                minChars = 80,
-                maxChars = 120,
-                firstChunkMaxChars = 95,
+                minChars = 125,
+                maxChars = 185,
+                firstChunkMaxChars = 85,
                 isFirstParagraphOfStream = isOpeningPara
             )
             chunkedInPara.forEachIndexed { localIdx, (speakText, relStartIdx) ->
@@ -807,14 +807,15 @@ class BookAudioPlaybackService : Service() {
 
         if (rawChunks.size <= 1) return rawChunks
 
-        // Gộp thêm các câu thoại cực ngắn liền kề nhau (<= 120 ký tự, giữ câu đầu <= 95 ký tự)
+        // Gộp thêm các câu/đoạn cực ngắn liền kề nhau để giảm số lần nạp lại ref_codes:
+        // Câu đầu giữ gọn (<= 85 ký tự) để phát nhanh, các câu sau 130–190 ký tự (~6-8s tiếng) giúp Producer luôn nhanh hơn tốc độ đọc!
         val compact = ArrayList<AiChapterChunk>(rawChunks.size)
         var i = 0
         while (i < rawChunks.size) {
             var current = rawChunks[i]
             val isFirstChunk = compact.isEmpty()
-            val ceiling = if (isFirstChunk) 95 else 120
-            val mergeFloor = if (isFirstChunk) 55 else 80
+            val ceiling = if (isFirstChunk) 85 else 190
+            val mergeFloor = if (isFirstChunk) 48 else 130
             i++
             while (i < rawChunks.size && current.speakText.length < mergeFloor) {
                 val next = rawChunks[i]
@@ -964,13 +965,14 @@ class BookAudioPlaybackService : Service() {
                 activePrefs.speechRate
             }).coerceIn(0.8f, 1.5f)
 
-            // Bộ đệm gối đầu 2 câu sẵn sàng (capacity = 2): tối ưu RAM & triệt tiêu quãng nghỉ giữa các câu
-            val lookAheadQueue = LinkedBlockingQueue<PreparedAiSegment>(2)
+            // Bộ đệm gối đầu 4 đoạn (~20-30s âm thanh, chỉ tốn ~1.5 MB RAM): hấp thụ hoàn toàn dao động CPU
+            val lookAheadQueue = LinkedBlockingQueue<PreparedAiSegment>(4)
             val isStillValid: () -> Boolean = { !stopFlag.get() && generation == activeParagraphGeneration }
 
-            // LUỒNG 1 (Producer Thread): tổng hợp GGUF + NeuCodec 24kHz liên tục vào LinkedBlockingQueue(2)
+            // LUỒNG 1 (Producer Thread): GIỮ THREAD_PRIORITY_DEFAULT (tuyệt đối KHÔNG dùng BACKGROUND cgroup
+            // vì Android sẽ ép llama.cpp xuống nhân LITTLE A55 chậm gấp 3 lần gây khựng 5 giây giữa các đoạn!)
             val producer = Thread({
-                Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND + Process.THREAD_PRIORITY_MORE_FAVORABLE)
+                Process.setThreadPriority(Process.THREAD_PRIORITY_DEFAULT)
                 try {
                     var prevTail: FloatArray? = null
                     for (idx in chunks.indices) {

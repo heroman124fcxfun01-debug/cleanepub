@@ -60,8 +60,8 @@ class VieNeuGgufRunner(context: Context? = null) {
     private var loadedModelPath: String? = null
     private var activeContextSize: Int = PREFERRED_CONTEXT_SIZE
     private var activeBatchSize: Int = DEFAULT_BATCH_SIZE
-    private var activeThreads: Int = HELIO_G99_THREADS
-    private var activeThreadsBatch: Int = HELIO_G99_THREADS_BATCH
+    private var activeThreads: Int = DEFAULT_DECODE_THREADS
+    private var activeThreadsBatch: Int = DEFAULT_BATCH_THREADS
 
     // Locked voice prefix cache + active cached voice ID across sentences/previews
     @Volatile
@@ -154,10 +154,10 @@ class VieNeuGgufRunner(context: Context? = null) {
         }
 
         val cores = Runtime.getRuntime().availableProcessors()
-        // Helio G99 thermal sweet spot: fixed n_threads=3, n_threads_batch=3 prevents CPU overheating
-        // and thermal throttling during long book-reading sessions.
-        val threads = cores.coerceAtMost(HELIO_G99_THREADS).coerceAtLeast(2)
-        val threadsBatch = cores.coerceAtMost(HELIO_G99_THREADS_BATCH).coerceAtLeast(2)
+        // Use 4 decode threads & 6 batch-prefill threads (clamped to device cores) so 400-token
+        // ref_codes prompt prefill + speech generation stay faster than real-time on Helio G99.
+        val threads = cores.coerceAtMost(DEFAULT_DECODE_THREADS).coerceAtLeast(2)
+        val threadsBatch = cores.coerceAtMost(DEFAULT_BATCH_THREADS).coerceAtLeast(threads)
         // Prefer n_ctx=1536, n_batch=512 so 7s ref_codes (~350 tokens) + ref_phones + target + speech tokens
         // fit cleanly in a single prefill pass with full context headroom.
         val candidates = listOf(
@@ -429,7 +429,7 @@ class VieNeuGgufRunner(context: Context? = null) {
         // Estimate prompt tokens carefully so maxTokens stays inside n_ctx=1536 without native truncation
         val estTargetTokens = (cleanTargetPhones.length * 0.75f).toInt().coerceAtLeast(16) + 8
         val estPromptTokens = prefix.estimatedPrefixTokens + estTargetTokens
-        val availableGenRoom = (activeContextSize - estPromptTokens - 24).coerceIn(110, 560)
+        val availableGenRoom = (activeContextSize - estPromptTokens - 24).coerceIn(110, 680)
         val safeMaxTokens = maxNewTokens.coerceIn(110, availableGenRoom)
         val startMs = System.currentTimeMillis()
 
@@ -596,8 +596,8 @@ class VieNeuGgufRunner(context: Context? = null) {
         private const val DEFAULT_BATCH_SIZE = 512
         private const val FALLBACK_BATCH_SIZE_256 = 256
         private const val FALLBACK_BATCH_SIZE_128 = 128
-        private const val HELIO_G99_THREADS = 3
-        private const val HELIO_G99_THREADS_BATCH = 3
+        private const val DEFAULT_DECODE_THREADS = 4
+        private const val DEFAULT_BATCH_THREADS = 6
         // Official pnnbao97/VieNeu-TTS (0.3B GGUF / NeuTTS-Air) sampling parameters:
         // CRITICAL: repeat_penalty MUST be 1.0f because llama.cpp penalizes tokens in the prompt
         // context too — repeat_penalty > 1.0 actively suppresses the cloned speaker's ref_codes!

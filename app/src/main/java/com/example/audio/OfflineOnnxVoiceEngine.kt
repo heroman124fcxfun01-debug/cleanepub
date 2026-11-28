@@ -676,8 +676,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
             }
 
             val wordCount = VietnameseTtsTextNormalizer.countWords(cleanTarget).coerceAtLeast(1)
-            // Generous token ceiling (up to 480 tokens) so 18-20 word sentences never clip their ending
-            val estMaxTokens = (wordCount * 19 + 72).coerceIn(110, 480)
+            // Generous token ceiling (up to 640 tokens ~ 12.8s) so 130-190 char chunks never clip their ending
+            val estMaxTokens = (wordCount * 19 + 72).coerceIn(110, 640)
 
             val resolvedVoiceId = voiceId.trim().ifEmpty {
                 inferredPreset?.storageId

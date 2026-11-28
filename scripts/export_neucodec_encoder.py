@@ -61,10 +61,10 @@ def resample_blackman_sinc(samples: np.ndarray, src_rate: int, dst_rate: int) ->
     cutoff = min(0.98, max(0.05, 0.92 / ratio))
     half_width = max(12, min(48, int(round(12.0 * ratio))))
     centers = np.arange(out_len, dtype=np.float64) * ratio
-    offsets = np.arange(-half_width, half_width + 1, dtype=np.float64)
+    offsets = np.arange(-half_width, half_width + 1, dtype=np.int64)
     base_idx = np.floor(centers).astype(np.int64)[:, None] + offsets[None, :]
     valid = (base_idx >= 0) & (base_idx < wav.size)
-    clamped = np.clip(base_idx, 0, wav.size - 1)
+    clamped = np.clip(base_idx, 0, wav.size - 1).astype(np.int64)
     d = base_idx.astype(np.float64) - centers[:, None]
     norm = (d + half_width) / (2.0 * half_width)
     in_win = valid & (norm >= 0.0) & (norm <= 1.0)
