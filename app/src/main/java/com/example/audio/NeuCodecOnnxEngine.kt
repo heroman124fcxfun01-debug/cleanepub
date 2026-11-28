@@ -18,7 +18,13 @@ import kotlin.math.abs
 data class EncodedReferenceVoice(
     val codes: IntArray,
     val voiceEmbedding: FloatArray? = null,
-    val durationSeconds: Float = 0f
+    val durationSeconds: Float = 0f,
+    val refSpeechTokens: String = "",
+    val first10Tokens: IntArray = IntArray(0),
+    val minToken: Int = 0,
+    val maxToken: Int = 0,
+    val uniqueTokenCount: Int = 0,
+    val encoderIoSummary: String = ""
 )
 
 /**
@@ -295,6 +301,8 @@ class NeuCodecOnnxEngine(context: Context? = null) {
 
             val inputs = LinkedHashMap<String, OnnxTensor>()
             val fedShapeDesc = ArrayList<String>()
+            val ioContractSummary = "in=[${formatInputs(session)}] | out=[${formatOutputs(session)}]"
+            Log.i(TAG, "neucodec_encoder.onnx metadata: $ioContractSummary")
             try {
                 for ((name, nodeInfo) in session.inputInfo) {
                     val tInfo = nodeInfo.info as? TensorInfo
@@ -317,7 +325,7 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                             OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(padded), longArrayOf(paddedLen.toLong())) to "FLOAT[$paddedLen]"
                         }
                         else -> {
-                            // Standard NeuCodec / Distill-NeuCodec ONNX input: [1, 1, T]
+                            // Standard NeuCodec / Distill-NeuCodec ONNX input: FLOAT[1, 1, numSamples] @ 16000 Hz Mono
                             OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(padded), longArrayOf(1L, 1L, paddedLen.toLong())) to "FLOAT[1, 1, $paddedLen]"
                         }
                     }
@@ -352,7 +360,9 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                         }
                     }
 
-                    val rawCodesValue = result[codesIndex].value
+                    val codesOutNode = result[codesIndex]
+                    val codesOutShape = (codesOutNode.info as? TensorInfo)?.shape?.contentToString() ?: "?"
+                    val rawCodesValue = codesOutNode.value
                     @Suppress("UNCHECKED_CAST")
                     val extractedCodes: IntArray = runCatching {
                         // Exact NeuCodec INT32[1, 1, N] chronological extraction: (output[0].value as Array<Array<IntArray>>)[0][0]
@@ -369,12 +379,26 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                     val flatCodes = extractedCodes
                         .filter { it in 0..65535 }
                         .toIntArray()
+                    val first10 = flatCodes.take(10).toIntArray()
+                    val uniqueCount = flatCodes.distinct().size
+                    val minTok = flatCodes.minOrNull() ?: 0
+                    val maxTok = flatCodes.maxOrNull() ?: 0
+                    val countIn1024 = flatCodes.count { it in 0..1023 }
+
+                    Log.i(
+                        TAG,
+                        "Encoder output: shape=$codesOutShape | len=${flatCodes.size} | unique=$uniqueCount | " +
+                            "range=$minTok..$maxTok (in0..1023=$countIn1024) | first10=${first10.contentToString()} | " +
+                            "first5Tags=${VieNeuGgufRunner.formatRefSpeechTokens(flatCodes, 5)}"
+                    )
+
                     val invalidCodes = flatCodes.size < MIN_VALID_REF_CODES ||
                         flatCodes.all { it == 0 } ||
-                        flatCodes.distinct().size <= 1
+                        uniqueCount < MIN_UNIQUE_REF_CODES
                     if (invalidCodes) {
                         throw IllegalArgumentException(
-                            "${AudioFileDecoder.INVALID_AUDIO_USER_MESSAGE} (${flatCodes.size}c)."
+                            "${AudioFileDecoder.INVALID_AUDIO_USER_MESSAGE} " +
+                                "(len=${flatCodes.size}c, unique=$uniqueCount, first10=${first10.contentToString()})."
                         )
                     }
                     val optionalVoiceEmb = if (embIndex in 0 until result.size()) {
@@ -382,22 +406,29 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                     } else {
                         runSpeakerEncoderIfLoaded(ortEnv, padded)
                     }
+                    val canonicalTokensStr = VieNeuGgufRunner.formatRefSpeechTokens(flatCodes)
                     Log.i(
                         TAG,
                         "Encoded reference voice (${String.format(Locale.US, "%.2fs", durSec)} @ 16kHz) -> " +
-                            "${flatCodes.size} FSQ codes (unique=${flatCodes.toSet().size}, embDim=${optionalVoiceEmb?.size ?: 0})"
+                            "${flatCodes.size} FSQ codes (unique=$uniqueCount, range=$minTok..$maxTok, embDim=${optionalVoiceEmb?.size ?: 0})"
                     )
                     EncodedReferenceVoice(
                         codes = flatCodes,
                         voiceEmbedding = optionalVoiceEmb,
-                        durationSeconds = durSec
+                        durationSeconds = durSec,
+                        refSpeechTokens = canonicalTokensStr,
+                        first10Tokens = first10,
+                        minToken = minTok,
+                        maxToken = maxTok,
+                        uniqueTokenCount = uniqueCount,
+                        encoderIoSummary = "fed=[${fedShapeDesc.joinToString()}] -> out=$codesOutShape"
                     )
                 }
             } catch (t: Throwable) {
                 if (t is IllegalArgumentException && t.message?.startsWith(AudioFileDecoder.INVALID_AUDIO_USER_MESSAGE) == true) {
                     throw t
                 }
-                val schema = "Encoder schema: in=[${formatInputs(session)}] | out=[${formatOutputs(session)}] | fed=[${fedShapeDesc.joinToString()}]"
+                val schema = "Encoder schema: $ioContractSummary | fed=[${fedShapeDesc.joinToString()}]"
                 Log.e(TAG, "encodeReferenceAudio failed | $schema", t)
                 throw IllegalStateException("$schema\n${t.message ?: t.javaClass.simpleName}", t)
             } finally {
@@ -715,6 +746,7 @@ class NeuCodecOnnxEngine(context: Context? = null) {
         const val ENCODER_SAMPLE_RATE = 16_000
         const val DECODER_SAMPLE_RATE = 24_000
         const val MIN_VALID_REF_CODES = 30
+        const val MIN_UNIQUE_REF_CODES = 8
         private const val HOP_SAMPLES_16K = 320
         private const val MIN_REF_AUDIO_SECONDS = 4
         const val MIN_REF_AUDIO_SAMPLES_16K = 64_000

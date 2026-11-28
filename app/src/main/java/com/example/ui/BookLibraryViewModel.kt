@@ -82,7 +82,14 @@ data class PendingDraftClonedVoice(
     val durationSeconds: Float,
     val embedding: FloatArray,
     val referenceCodes: IntArray? = null,
+    val refSpeechTokens: String = "",
     val referenceText: String = "",
+    val referenceTextIpa: String = "",
+    val first10Tokens: IntArray = IntArray(0),
+    val minToken: Int = 0,
+    val maxToken: Int = 0,
+    val uniqueTokenCount: Int = 0,
+    val encoderIoSummary: String = "",
     val usedOnnxEncoder: Boolean = true,
     val acousticSummary: String = "",
     val previewWavPath: String? = null,
@@ -845,22 +852,28 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 }
 
                 val cleanSamples16k = withContext(Dispatchers.IO) {
-                    val mono16k = if (sampleRate != AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE) {
-                        AudioFileDecoder.normalizeAndResampleMonoFloat(
-                            monoFloat = samples,
-                            sourceRate = sampleRate,
-                            targetRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
-                        )
-                    } else {
+                    val alreadyPrepared16k = sampleRate == AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE &&
+                        samples.size in AudioFileDecoder.CLONE_MIN_SAMPLES_16K..AudioFileDecoder.CLONE_MAX_SAMPLES_16K
+                    if (alreadyPrepared16k) {
                         samples
+                    } else {
+                        val mono16k = if (sampleRate != AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE) {
+                            AudioFileDecoder.normalizeAndResampleMonoFloat(
+                                monoFloat = samples,
+                                sourceRate = sampleRate,
+                                targetRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
+                            )
+                        } else {
+                            samples
+                        }
+                        AudioFileDecoder.extractCleanestSpeechWindow16k(
+                            samples = mono16k,
+                            sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE,
+                            minSeconds = AudioFileDecoder.CLONE_MIN_WINDOW_SECONDS,
+                            maxSeconds = AudioFileDecoder.CLONE_MAX_WINDOW_SECONDS,
+                            trimEdgeMicNoiseSeconds = AudioFileDecoder.MAX_EDGE_SILENCE_TRIM_SECONDS
+                        )
                     }
-                    AudioFileDecoder.extractCleanestSpeechWindow16k(
-                        samples = mono16k,
-                        sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE,
-                        minSeconds = AudioFileDecoder.CLONE_MIN_WINDOW_SECONDS,
-                        maxSeconds = AudioFileDecoder.CLONE_MAX_WINDOW_SECONDS,
-                        trimEdgeMicNoiseSeconds = AudioFileDecoder.MAX_EDGE_SILENCE_TRIM_SECONDS
-                    )
                 }
                 val extracted = onnxVoiceEngine.extractSpeakerEmbedding(
                     samples = cleanSamples16k,
@@ -877,7 +890,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     refCodes == null ||
                     refCodes.size < com.example.audio.NeuCodecOnnxEngine.MIN_VALID_REF_CODES ||
                     refCodes.all { it == 0 } ||
-                    refCodes.distinct().size <= 1
+                    extracted.uniqueTokenCount < com.example.audio.NeuCodecOnnxEngine.MIN_UNIQUE_REF_CODES
                 if (invalidCodes) {
                     _draftClonedVoice.value = null
                     val err = extracted.errorMessage ?: AudioFileDecoder.INVALID_AUDIO_USER_MESSAGE
@@ -886,12 +899,19 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     return@launch
                 }
 
+                val computedRefTextIpa = withContext(Dispatchers.IO) {
+                    onnxVoiceEngine.phonemizeReferenceText(userRefText)
+                }
+                val canonicalRefSpeechTokens = extracted.refSpeechTokens.ifBlank {
+                    com.example.audio.VieNeuGgufRunner.formatRefSpeechTokens(refCodes)
+                }
+
                 val cleanName = name.trim().ifBlank {
                     "Giọng nhân bản #${_clonedVoices.value.size + 1}"
                 }.take(36)
                 val durationSec = extracted.durationSeconds.takeIf { it > 0.5f }
                     ?: (cleanSamples16k.size.toFloat() / AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE.toFloat())
-                        .coerceIn(2.0f, 12.0f)
+                        .coerceIn(4.0f, 7.0f)
 
                 var synthPreviewNote: String? = null
                 var usedSynthPreview = false
@@ -937,7 +957,14 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     durationSeconds = durationSec,
                     embedding = extracted.embedding,
                     referenceCodes = refCodes,
+                    refSpeechTokens = canonicalRefSpeechTokens,
                     referenceText = userRefText,
+                    referenceTextIpa = computedRefTextIpa,
+                    first10Tokens = extracted.first10Tokens,
+                    minToken = extracted.minToken,
+                    maxToken = extracted.maxToken,
+                    uniqueTokenCount = extracted.uniqueTokenCount,
+                    encoderIoSummary = extracted.encoderIoSummary,
                     usedOnnxEncoder = true,
                     acousticSummary = extracted.acousticSummary,
                     previewWavPath = draftWavPath,
@@ -1176,6 +1203,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                         usedOnnxEncoder = draft.usedOnnxEncoder,
                         referenceCodes = draftCodes,
                         referenceText = draft.referenceText,
+                        referenceTextIpa = draft.referenceTextIpa,
                         matchedPresetId = ""
                     )
                     if (draft.synthesizedPreview) {

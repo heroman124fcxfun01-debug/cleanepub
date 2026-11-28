@@ -26,7 +26,9 @@ data class ClonedVoiceProfile(
     val referenceAudioPath: String,
     val referenceWavPath: String = "",
     val referenceCodesPath: String = "",
+    val refSpeechTokens: String = "",
     val referenceText: String = "",
+    val referenceTextIpa: String = "",
     val referenceCodeCount: Int = 0,
     val usedOnnxEncoder: Boolean = true,
     val matchedPresetId: String = ""
@@ -73,7 +75,9 @@ class ClonedVoiceRepository(private val rootDir: File) {
                         referenceAudioPath = obj.optString("referenceAudioPath").trim(),
                         referenceWavPath = obj.optString("referenceWavPath").trim(),
                         referenceCodesPath = obj.optString("referenceCodesPath").trim(),
+                        refSpeechTokens = obj.optString("refSpeechTokens").trim(),
                         referenceText = obj.optString("referenceText").trim(),
+                        referenceTextIpa = obj.optString("referenceTextIpa").trim(),
                         referenceCodeCount = obj.optInt("referenceCodeCount", 0),
                         usedOnnxEncoder = obj.optBoolean("usedOnnxEncoder", true),
                         matchedPresetId = obj.optString("matchedPresetId", "").trim()
@@ -99,6 +103,7 @@ class ClonedVoiceRepository(private val rootDir: File) {
         usedOnnxEncoder: Boolean,
         referenceCodes: IntArray? = null,
         referenceText: String = "",
+        referenceTextIpa: String = "",
         matchedPresetId: String = ""
     ): ClonedVoiceProfile {
         rootDir.mkdirs()
@@ -116,6 +121,12 @@ class ClonedVoiceRepository(private val rootDir: File) {
         val savedCodesPath = if (referenceCodes != null && referenceCodes.isNotEmpty()) {
             writeIntArrayBinary(refCodesFile, referenceCodes)
             refCodesFile.absolutePath
+        } else {
+            ""
+        }
+        // Canonical `<|speech_12|><|speech_345|>...` string (zero commas, zero spaces) identical to voices.json
+        val canonicalSpeechTokens = if (referenceCodes != null && referenceCodes.isNotEmpty()) {
+            VieNeuGgufRunner.formatRefSpeechTokens(referenceCodes)
         } else {
             ""
         }
@@ -137,7 +148,9 @@ class ClonedVoiceRepository(private val rootDir: File) {
             referenceAudioPath = refAudioFile.absolutePath,
             referenceWavPath = refWavFile.absolutePath,
             referenceCodesPath = savedCodesPath,
+            refSpeechTokens = canonicalSpeechTokens,
             referenceText = cleanRefText,
+            referenceTextIpa = referenceTextIpa.trim(),
             referenceCodeCount = referenceCodes?.size ?: 0,
             usedOnnxEncoder = usedOnnxEncoder,
             matchedPresetId = matchedPresetId
@@ -175,8 +188,14 @@ class ClonedVoiceRepository(private val rootDir: File) {
     fun loadReferenceCodes(profile: ClonedVoiceProfile): IntArray? {
         val file = profile.referenceCodesPath.takeIf { it.isNotBlank() }?.let { File(it) }
             ?: File(rootDir, "${profile.id}.neucodes")
-        if (!file.exists()) return null
-        return readIntArrayBinary(file)
+        if (file.exists()) {
+            readIntArrayBinary(file)?.takeIf { it.isNotEmpty() }?.let { return it }
+        }
+        if (profile.refSpeechTokens.isNotBlank()) {
+            val parsed = VieNeuGgufRunner.extractSpeechIds(profile.refSpeechTokens)
+            if (parsed.isNotEmpty()) return parsed
+        }
+        return null
     }
 
     fun loadReferenceAudio(profile: ClonedVoiceProfile): FloatArray? {
@@ -217,7 +236,9 @@ class ClonedVoiceRepository(private val rootDir: File) {
                     put("referenceAudioPath", p.referenceAudioPath)
                     put("referenceWavPath", p.referenceWavPath)
                     put("referenceCodesPath", p.referenceCodesPath)
+                    put("refSpeechTokens", p.refSpeechTokens)
                     put("referenceText", p.referenceText)
+                    put("referenceTextIpa", p.referenceTextIpa)
                     put("referenceCodeCount", p.referenceCodeCount)
                     put("usedOnnxEncoder", p.usedOnnxEncoder)
                     put("matchedPresetId", p.matchedPresetId)

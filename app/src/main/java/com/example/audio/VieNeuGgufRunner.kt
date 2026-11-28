@@ -201,6 +201,7 @@ class VieNeuGgufRunner(context: Context? = null) {
                     activeBatchSize = batchSz
                     activeThreads = threads
                     activeThreadsBatch = threadsBatch
+                    probeSpecialTokensParsing(model)
                     statusSummary = "OK (${ggufFile.name} • ${AiSystemDiagnosticReport.formatMb(ggufFile.length())} • " +
                         "n_ctx=$ctxSize • n_batch=$batchSz • threads=$threads/$threadsBatch • mmap=off)"
                     Log.i(TAG, "Loaded GGUF backbone via file path: $statusSummary")
@@ -223,6 +224,43 @@ class VieNeuGgufRunner(context: Context? = null) {
         statusSummary = "LỖI NẠP GGUF"
         Log.e(TAG, fullErr)
         return false
+    }
+
+    /**
+     * Verifies `parse_special = true` support on loaded LlamaModel when a `tokenize` method is exposed,
+     * confirming `<|speech_0|>` and `<|SPEECH_GENERATION_START|>` map to single special token IDs.
+     */
+    private fun probeSpecialTokensParsing(model: LlamaModel) {
+        runCatching {
+            val methods = model.javaClass.methods.filter { it.name == "tokenize" }
+            val probeSpeech = "<|speech_0|>"
+            for (m in methods) {
+                val pTypes = m.parameterTypes
+                val res = when {
+                    pTypes.size == 3 && pTypes[0] == String::class.java &&
+                        pTypes[1] == Boolean::class.javaPrimitiveType &&
+                        pTypes[2] == Boolean::class.javaPrimitiveType ->
+                        m.invoke(model, probeSpeech, false, true)
+                    pTypes.size == 2 && pTypes[0] == String::class.java &&
+                        pTypes[1] == Boolean::class.javaPrimitiveType ->
+                        m.invoke(model, probeSpeech, true)
+                    pTypes.size == 1 && pTypes[0] == String::class.java ->
+                        m.invoke(model, probeSpeech)
+                    else -> null
+                }
+                val count = when (res) {
+                    is IntArray -> res.size
+                    is List<*> -> res.size
+                    else -> -1
+                }
+                if (count > 0) {
+                    specialTokenCheckSummary =
+                        "$specialTokenCheckSummary • <|speech_0|>->${count}tok"
+                    Log.i(TAG, "Special token probe '$probeSpeech' -> $count token(s) (parse_special=true)")
+                    break
+                }
+            }
+        }
     }
 
     /**
@@ -308,14 +346,9 @@ class VieNeuGgufRunner(context: Context? = null) {
             return existing
         }
 
-        // Preserve FULL refCodes aligned 1-to-1 with refPhones (NEVER chop refCodes out of sync with refPhones!)
-        val refCodesStr = buildString(refCodes.size * 14) {
-            for (code in refCodes) {
-                append("<|speech_")
-                append(code)
-                append("|>")
-            }
-        }
+        // Preserve FULL refCodes aligned 1-to-1 with refPhones using the EXACT single canonical formatter
+        // (`<|speech_12|><|speech_345|>...`, zero commas, zero spaces) for BOTH voices.json and cloned voices!
+        val refCodesStr = formatRefSpeechTokens(refCodes)
         val promptHead = if (cleanRefPhones.isNotEmpty()) {
             "user: Convert the text to speech:<|TEXT_PROMPT_START|>$cleanRefPhones "
         } else {
@@ -365,14 +398,18 @@ class VieNeuGgufRunner(context: Context? = null) {
         }
         val prefix = getOrBuildVoicePrefix(resolvedVoiceId, refPhones, refCodes)
 
-        // Exact official pnnbao97/VieNeu-TTS & scripts/test_tts_gguf.py prompt format:
-        // ONLY {ref_phones} {target_phones} inside TEXT_PROMPT, followed by FULL {ref_codes_str}.
-        val prompt = buildString(prefix.promptHead.length + cleanTargetPhones.length + prefix.refCodesStr.length + 64) {
-            append(prefix.promptHead)
-            append(cleanTargetPhones)
-            append("<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>")
-            append(prefix.refCodesStr)
-        }
+        // Single unified prompt builder shared 100% identically by BOTH voices.json presets AND cloned voices
+        val prompt = buildUnifiedSpeechPrompt(
+            refTextIpa = prefix.refPhones,
+            targetTextIpa = cleanTargetPhones,
+            refSpeechTokens = prefix.refCodesStr
+        )
+        Log.i(
+            TAG,
+            "Unified prompt [voiceId=$resolvedVoiceId]: refIpaLen=${prefix.refPhones.length}, " +
+                "targetIpaLen=${cleanTargetPhones.length}, refCodes=${prefix.refCodesCount}, " +
+                "first5Tokens=${prefix.refCodesStr.take(72)}"
+        )
 
         // Estimate prompt tokens carefully so maxTokens stays inside n_ctx=1536 without native truncation
         val estTargetTokens = (cleanTargetPhones.length * 0.75f).toInt().coerceAtLeast(16) + 8
@@ -550,6 +587,7 @@ class VieNeuGgufRunner(context: Context? = null) {
         const val DEFAULT_TOP_K = 40
         const val DEFAULT_TOP_P = 0.85f
         const val DEFAULT_REPEAT_PENALTY = 1.15f
+        const val SPEECH_START_TOKEN = "<|SPEECH_GENERATION_START|>"
         const val SPEECH_END_TOKEN = "<|SPEECH_GENERATION_END|>"
         private val WHITESPACE_REGEX = Regex("\\s+")
         private val STOP_MARKERS = listOf(
@@ -559,6 +597,47 @@ class VieNeuGgufRunner(context: Context? = null) {
             "</s>"
         )
         private val SPEECH_TOKEN_REGEX = Regex("<\\|speech_(\\d+)\\|>")
+
+        /**
+         * Canonical speech-token serializer shared 100% identically by BOTH `voices.json` presets
+         * and newly cloned voices: `<|speech_12|><|speech_345|>...` (NO commas, NO spaces).
+         */
+        fun formatRefSpeechTokens(codes: IntArray, maxCount: Int = Int.MAX_VALUE): String {
+            if (codes.isEmpty() || maxCount <= 0) return ""
+            val limit = minOf(codes.size, maxCount)
+            return buildString(limit * 14) {
+                for (i in 0 until limit) {
+                    val code = codes[i]
+                    if (code in 0..65535) {
+                        append("<|speech_")
+                        append(code)
+                        append("|>")
+                    }
+                }
+            }
+        }
+
+        /**
+         * Single unified VieNeu-TTS GGUF prompt builder shared 100% identically by BOTH official
+         * `voices.json` presets AND newly cloned voices (`neucodec_encoder.onnx`).
+         */
+        fun buildUnifiedSpeechPrompt(
+            refTextIpa: String,
+            targetTextIpa: String,
+            refSpeechTokens: String
+        ): String {
+            val cleanRef = refTextIpa.replace(WHITESPACE_REGEX, " ").trim()
+            val cleanTarget = targetTextIpa.replace(WHITESPACE_REGEX, " ").trim()
+            val cleanTokens = refSpeechTokens.replace(WHITESPACE_REGEX, "").replace(",", "")
+            val joinedIpa = if (cleanRef.isNotEmpty()) "$cleanRef $cleanTarget" else cleanTarget
+            return buildString(joinedIpa.length + cleanTokens.length + 96) {
+                append("user: Convert the text to speech:<|TEXT_PROMPT_START|>")
+                append(joinedIpa)
+                append("<|TEXT_PROMPT_END|>\nassistant:")
+                append(SPEECH_START_TOKEN)
+                append(cleanTokens)
+            }
+        }
 
         fun extractSpeechIds(text: String): IntArray {
             val ids = ArrayList<Int>(256)

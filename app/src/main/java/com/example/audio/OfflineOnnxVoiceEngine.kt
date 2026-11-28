@@ -21,6 +21,12 @@ data class SpeakerEmbeddingResult(
     val embedding: FloatArray,
     val usedOnnxEncoder: Boolean,
     val referenceCodes: IntArray? = null,
+    val refSpeechTokens: String = "",
+    val first10Tokens: IntArray = IntArray(0),
+    val minToken: Int = 0,
+    val maxToken: Int = 0,
+    val uniqueTokenCount: Int = 0,
+    val encoderIoSummary: String = "",
     val durationSeconds: Float = 0f,
     val acousticSummary: String = "",
     val errorMessage: String? = null
@@ -205,6 +211,16 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
     fun getPresetVoices(): List<VieNeuPresetVoice> = presetVoices
 
+    /**
+     * Converts raw Vietnamese `Ref Text` into the exact `refTextIpa` fed into the unified GGUF prompt
+     * (lowercase + Vietnamese number-to-words + `vi_espeak_ipa.tsv` lookup).
+     */
+    fun phonemizeReferenceText(rawRefText: String): String {
+        val cleanRefText = VietnameseTtsTextNormalizer.normalizeForPhonemizer(rawRefText)
+        if (cleanRefText.isBlank()) return ""
+        return refPhonesCache.getOrPut(cleanRefText) { espeakG2p.phonemize(cleanRefText) }
+    }
+
     fun findPresetVoiceById(presetId: String?): VieNeuPresetVoice? {
         if (presetId.isNullOrBlank()) return presetVoices.firstOrNull { it.referenceCodes.size >= 8 }
         return presetVoices.firstOrNull { it.id.equals(presetId, ignoreCase = true) && it.referenceCodes.size >= 8 }
@@ -333,15 +349,18 @@ class OfflineOnnxVoiceEngine(context: Context) {
         val hasValidCodes = encoded != null &&
             encoded.codes.size >= NeuCodecOnnxEngine.MIN_VALID_REF_CODES &&
             !encoded.codes.all { it == 0 } &&
-            encoded.codes.distinct().size > 1
+            encoded.uniqueTokenCount >= NeuCodecOnnxEngine.MIN_UNIQUE_REF_CODES
         if (hasValidCodes && encoded != null) {
             val realEmbedding = encoded.voiceEmbedding?.takeIf { it.isNotEmpty() }
                 ?: OnnxModelAssetHelper.computeAcousticFingerprint(cleanWindow16k)
             val spkTag = if (encoded.voiceEmbedding != null) " • speaker_emb=${encoded.voiceEmbedding.size}D" else ""
             val summary = String.format(
                 Locale.US,
-                "NeuCodec Encoder ONNX: %dc mã giọng thật (%.1fs @ 16kHz)%s",
+                "NeuCodec Encoder ONNX: %dc mã giọng thật (%d unique, dải %d..%d, %.1fs @ 16kHz)%s",
                 encoded.codes.size,
+                encoded.uniqueTokenCount,
+                encoded.minToken,
+                encoded.maxToken,
                 encoded.durationSeconds,
                 spkTag
             )
@@ -350,6 +369,12 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 embedding = realEmbedding,
                 usedOnnxEncoder = true,
                 referenceCodes = encoded.codes,
+                refSpeechTokens = encoded.refSpeechTokens,
+                first10Tokens = encoded.first10Tokens,
+                minToken = encoded.minToken,
+                maxToken = encoded.maxToken,
+                uniqueTokenCount = encoded.uniqueTokenCount,
+                encoderIoSummary = encoded.encoderIoSummary,
                 durationSeconds = encoded.durationSeconds,
                 acousticSummary = summary,
                 errorMessage = null

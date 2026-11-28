@@ -699,7 +699,7 @@ fun StudioVoiceCloneSection(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Lời thoại mẫu (ref_text — khuyên nhập)",
+                        text = "Lời thoại mẫu (Ref Text — bắt buộc để đúng tông giọng)",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = primaryInk,
@@ -951,28 +951,116 @@ fun StudioVoiceCloneSection(
                 }
             }
 
-            // Thông báo trạng thái bản nháp vừa tạo (chờ bấm Lưu)
+            // Thông báo trạng thái bản nháp vừa tạo + Khung "Kiểm tra mã giọng" ngay dưới nút Nghe thử
             AnimatedVisibility(visible = draftClonedVoice != null) {
                 draftClonedVoice?.let { draft ->
-                    val tokenCount = draft.referenceCodes?.size ?: 0
+                    val codes = draft.referenceCodes ?: IntArray(0)
+                    val tokenCount = codes.size
+                    val first5SpeechTags = com.example.audio.VieNeuGgufRunner.formatRefSpeechTokens(codes, 5)
+                    val first10Str = if (draft.first10Tokens.isNotEmpty()) {
+                        draft.first10Tokens.joinToString(", ")
+                    } else {
+                        codes.take(10).joinToString(", ")
+                    }
+                    val formatMatchesVoicesJson = first5SpeechTags.startsWith("<|speech_") &&
+                        !first5SpeechTags.contains(',') &&
+                        !first5SpeechTags.contains(' ')
+                    val hasRefIpa = draft.referenceTextIpa.isNotBlank()
                     val modeBadge = if (draft.synthesizedPreview) {
                         "NeuCodec Encoder ONNX • GGUF 24kHz"
                     } else {
                         "NeuCodec Encoder ONNX"
                     }
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         Text(
                             text = "✓ Đã tạo \"${draft.name} (${tokenCount}c)\" • $modeBadge — Bấm Nghe thử để kiểm tra, rồi bấm Lưu.",
                             fontSize = 10.5.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = IosGreen
                         )
-                        if (draft.acousticSummary.isNotBlank()) {
-                            Text(
-                                text = draft.acousticSummary,
-                                fontSize = 9.5.sp,
-                                color = secondaryInk
-                            )
+
+                        // Khung "Kiểm tra mã giọng" hiển thị số token, 5 thẻ <|speech_X|> đầu tiên và refTextIpa
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(paperBg)
+                                .border(
+                                    width = 1.3.dp,
+                                    color = if (hasRefIpa && formatMatchesVoicesJson) IosBlue else IosOrange,
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                .padding(horizontal = 10.dp, vertical = 8.dp)
+                                .testTag("studio_voice_code_diagnostics_box"),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "Kiểm tra mã giọng (${tokenCount}c)",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = primaryInk
+                                )
+                                Text(
+                                    text = if (formatMatchesVoicesJson) "Khớp chuẩn voices.json" else "Sai định dạng mã",
+                                    fontSize = 9.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (formatMatchesVoicesJson) IosGreen else IosRed
+                                )
+                            }
+
+                            SelectionContainer {
+                                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Text(
+                                        text = "Số token: ${tokenCount}c • unique=${draft.uniqueTokenCount} • dải ${draft.minToken}..${draft.maxToken}",
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = primaryInk
+                                    )
+                                    Text(
+                                        text = "5 thẻ đầu: ${first5SpeechTags.ifBlank { "(trống)" }}",
+                                        fontSize = 9.5.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = IosBlue
+                                    )
+                                    Text(
+                                        text = "10 giá trị đầu: [$first10Str]",
+                                        fontSize = 9.5.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = secondaryInk
+                                    )
+                                    if (hasRefIpa) {
+                                        Text(
+                                            text = "refTextIpa: ${draft.referenceTextIpa}",
+                                            fontSize = 9.5.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = primaryInk
+                                        )
+                                    } else {
+                                        Text(
+                                            text = "⚠ refTextIpa RỖNG! Bạn chưa nhập Lời thoại mẫu (Ref Text) khớp với file âm thanh nên tông giọng sẽ bị lệch. Hãy nhập đúng lời đọc rồi bấm Tạo lại.",
+                                            fontSize = 9.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = IosRed
+                                        )
+                                    }
+                                    if (draft.encoderIoSummary.isNotBlank()) {
+                                        Text(
+                                            text = "Encoder IO: ${draft.encoderIoSummary}",
+                                            fontSize = 9.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = secondaryInk
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
