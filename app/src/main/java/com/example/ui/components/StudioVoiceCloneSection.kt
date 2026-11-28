@@ -157,7 +157,7 @@ fun StudioVoiceCloneSection(
             BookAudioPlaybackService.stopPreview(context)
             recorder.startRecording(targetSampleRate)
         } else {
-            permissionDeniedNote = "Cần cấp quyền Micro để ghi âm mẫu giọng 3–8 giây."
+            permissionDeniedNote = "Cần cấp quyền Micro để ghi âm mẫu giọng 4–7 giây."
         }
     }
 
@@ -751,7 +751,7 @@ fun StudioVoiceCloneSection(
                 ) {
                     if (referenceText.isEmpty()) {
                         Text(
-                            text = "Nhập đúng câu nói trong đoạn ghi âm 3–8 giây (hoặc bấm \"Điền câu mẫu để đọc\" rồi thu âm) để NeuCodec Encoder ONNX trích xuất & nhân bản giọng thật chuẩn nhất.",
+                            text = "Nhập đúng câu nói trong đoạn ghi âm 4–7 giây (hoặc bấm \"Điền câu mẫu để đọc\" rồi thu âm) để NeuCodec Encoder ONNX trích xuất & nhân bản giọng thật chuẩn nhất.",
                             fontSize = 11.sp,
                             lineHeight = 15.sp,
                             color = secondaryInk.copy(alpha = 0.72f)

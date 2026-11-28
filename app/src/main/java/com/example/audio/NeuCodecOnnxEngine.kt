@@ -261,6 +261,12 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                 )
             }
             val trimmedLen = cleanest16k.size.coerceAtMost(MAX_REF_AUDIO_SAMPLES_16K)
+            if (trimmedLen < MIN_REF_AUDIO_SAMPLES_16K) {
+                val sec = trimmedLen.toFloat() / ENCODER_SAMPLE_RATE.toFloat()
+                throw IllegalArgumentException(
+                    "Âm thanh mẫu quá ngắn (${String.format(Locale.US, "%.1f", sec)}s). Vui lòng dùng đoạn ghi âm rõ tiếng dài từ 4 đến 7 giây."
+                )
+            }
             // Block silent/corrupt reference audio (RMS < 0.001f) BEFORE peak normalization
             val inputRms = AudioFileDecoder.computeRms(
                 if (trimmedLen == cleanest16k.size) cleanest16k else cleanest16k.copyOf(trimmedLen)
@@ -273,14 +279,15 @@ class NeuCodecOnnxEngine(context: Context? = null) {
             val padded = FloatArray(paddedLen)
             System.arraycopy(cleanest16k, 0, padded, 0, trimmedLen)
 
-            // Peak-normalize cleanly within [-1.0f, 1.0f]
+            // Peak-normalize 16kHz Mono Float32 input evenly to 0.9f before neucodec_encoder.onnx
             var peak = 0f
             for (v in padded) {
                 val a = abs(v)
                 if (a > peak) peak = a
             }
             if (peak > 1e-4f) {
-                val gain = (0.92f / peak).coerceAtMost(6.0f)
+                val gain = (AudioFileDecoder.ENCODER_PEAK_NORMALIZE_TARGET / peak)
+                    .coerceAtMost(AudioFileDecoder.MAX_PEAK_NORMALIZE_GAIN)
                 for (i in padded.indices) {
                     padded[i] = (padded[i] * gain).coerceIn(-1f, 1f)
                 }
@@ -709,6 +716,8 @@ class NeuCodecOnnxEngine(context: Context? = null) {
         const val DECODER_SAMPLE_RATE = 24_000
         const val MIN_VALID_REF_CODES = 30
         private const val HOP_SAMPLES_16K = 320
+        private const val MIN_REF_AUDIO_SECONDS = 4
+        const val MIN_REF_AUDIO_SAMPLES_16K = 64_000
         private const val MAX_REF_AUDIO_SECONDS = 7
         const val MAX_REF_AUDIO_SAMPLES_16K = 112_000
     }

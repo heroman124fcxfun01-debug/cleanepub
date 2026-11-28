@@ -25,7 +25,7 @@ class VietnameseEspeakG2p private constructor(
         get() = syllableDict.size
 
     fun phonemize(rawText: String): String {
-        val normalized = VietnameseTtsTextNormalizer.normalizeForTts(rawText).trim()
+        val normalized = VietnameseTtsTextNormalizer.normalizeForPhonemizer(rawText).trim()
         if (normalized.isEmpty()) return ""
 
         val out = StringBuilder(normalized.length * 2)

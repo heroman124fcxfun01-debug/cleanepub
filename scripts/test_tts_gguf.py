@@ -491,10 +491,10 @@ def main() -> int:
         out = llm(
             prompt,
             max_tokens=max_new_tokens,
-            temperature=0.7,
-            top_k=50,
-            top_p=0.9,
-            repeat_penalty=1.1,
+            temperature=0.6,
+            top_k=40,
+            top_p=0.85,
+            repeat_penalty=1.15,
             stop=["<|SPEECH_GENERATION_END|>"],
             echo=False,
         )

@@ -62,7 +62,7 @@ class VoiceSampleRecorder(context: Context? = null) {
     private val appContext: Context? = context?.applicationContext
 
     companion object {
-        const val MIN_DURATION_MS = 3_000L
+        const val MIN_DURATION_MS = 4_000L
         const val MAX_DURATION_MS = 12_000L
         const val DEFAULT_TARGET_SAMPLE_RATE = 16_000
         const val HIGH_TARGET_SAMPLE_RATE = 24_000
@@ -255,7 +255,7 @@ class VoiceSampleRecorder(context: Context? = null) {
                     recordedSamples = null,
                     previewWavPath = null,
                     sampleRate = safeTargetRate,
-                    errorMessage = "Mẫu giọng cần tối thiểu 3 giây để trích xuất đặc trưng rõ nét."
+                    errorMessage = "Mẫu giọng cần dài từ 4 đến 7 giây để trích xuất đặc trưng rõ nét."
                 )
                 return@launch
             }
@@ -422,7 +422,7 @@ class VoiceSampleRecorder(context: Context? = null) {
                 finished = true
                 true
             }
-            val durationMs = player.duration.coerceIn(500, 30_000).toLong()
+            val durationMs = player.duration.coerceIn(500, 60_000).toLong()
             val deadline = System.currentTimeMillis() + durationMs + 1_200L
             player.start()
             while (currentCoroutineContext().isActive && !finished && System.currentTimeMillis() < deadline) {

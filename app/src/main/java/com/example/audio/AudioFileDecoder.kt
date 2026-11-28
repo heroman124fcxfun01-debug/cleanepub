@@ -44,17 +44,20 @@ object AudioFileDecoder {
 
     const val SPEAKER_ENCODER_SAMPLE_RATE = 16_000
     private const val MAX_DECODE_SECONDS = 25.0
-    private const val MIN_DECODE_SECONDS = 2.0
-    const val CLONE_MIN_WINDOW_SECONDS = 3.0f
+    private const val MIN_DECODE_SECONDS = 4.0
+    const val CLONE_MIN_WINDOW_SECONDS = 4.0f
+    const val CLONE_MIN_SAMPLES_16K = 64_000
     const val CLONE_OPTIMAL_WINDOW_SECONDS = 6.0f
     const val CLONE_MAX_WINDOW_SECONDS = 7.0f
     const val CLONE_MAX_SAMPLES_16K = 112_000
+    const val ENCODER_PEAK_NORMALIZE_TARGET = 0.9f
+    const val MAX_PEAK_NORMALIZE_GAIN = 25.0f
     const val ABSOLUTE_SILENCE_THRESHOLD = 0.005f
     const val MAX_EDGE_SILENCE_TRIM_SECONDS = 0.15f
     const val MIN_VALID_AUDIO_RMS = 0.001f
 
     const val INVALID_AUDIO_USER_MESSAGE =
-        "Không giải mã được âm thanh từ file này, vui lòng chọn file rõ tiếng dài 5-8 giây"
+        "Không giải mã được âm thanh từ file này, vui lòng chọn file rõ tiếng dài 4-7 giây"
 
     private data class DecodedRawMono(
         val monoFloat: FloatArray,
@@ -112,7 +115,7 @@ object AudioFileDecoder {
             val rawDurationSec = rawDecoded.monoFloat.size.toFloat() /
                 rawDecoded.sampleRate.coerceAtLeast(8_000).toFloat()
             if (rawDurationSec < MIN_DECODE_SECONDS) {
-                error("Tệp âm thanh quá ngắn (${String.format("%.1f", rawDurationSec)}s — vui lòng chọn file rõ tiếng dài 5-8 giây).")
+                error("Tệp âm thanh quá ngắn (${String.format("%.1f", rawDurationSec)}s — vui lòng chọn file rõ tiếng dài từ 4 đến 7 giây).")
             }
 
             // Cap to MAX_DECODE_SECONDS, remove DC offset, normalize [-1f, 1f], and linear-resample to exact 16kHz Mono
@@ -144,6 +147,9 @@ object AudioFileDecoder {
             }
 
             val finalDuration = cleanest16k.size.toFloat() / safeTargetRate.toFloat()
+            if (finalDuration < CLONE_MIN_WINDOW_SECONDS - 0.05f) {
+                error("Đoạn âm thanh sau khi lọc khoảng lặng chỉ dài ${String.format("%.1f", finalDuration)}s — vui lòng chọn file rõ tiếng dài từ 4 đến 7 giây.")
+            }
 
             // Write a standard 16-bit PCM Mono WAV file with full 44-byte RIFF/WAVE header for clean preview playback
             val previewDir = File(context.applicationContext.cacheDir, "voice_previews").apply { mkdirs() }
@@ -571,9 +577,9 @@ object AudioFileDecoder {
             val a = abs(v)
             if (a > peak) peak = a
         }
-        // Normalize quietly recorded voices gently, or clamp hot signals cleanly to 0.92
-        if (peak > 0.005f) {
-            val gain = (0.92f / peak).coerceAtMost(5.0f)
+        // Peak-normalize evenly to 0.9f so quiet recordings reach clean level without clipping
+        if (peak > 1e-4f) {
+            val gain = (ENCODER_PEAK_NORMALIZE_TARGET / peak).coerceAtMost(MAX_PEAK_NORMALIZE_GAIN)
             for (i in centered.indices) {
                 centered[i] = (centered[i] * gain).coerceIn(-1f, 1f)
             }
@@ -629,7 +635,13 @@ object AudioFileDecoder {
             trimEnd--
         }
 
-        val trimmed = if (trimEnd - trimStart >= sampleRate / 2) {
+        val minKeepSamples = (sampleRate * minSeconds.coerceAtLeast(1.0f)).toInt()
+        val trimmed = if (trimEnd - trimStart >= minKeepSamples) {
+            samples.copyOfRange(trimStart, trimEnd)
+        } else if (samples.size >= minKeepSamples) {
+            // Preserve at least 4.0s if the raw file is right around the 4.0s lower bound
+            samples
+        } else if (trimEnd - trimStart >= sampleRate / 2) {
             samples.copyOfRange(trimStart, trimEnd)
         } else {
             samples
@@ -661,7 +673,7 @@ object AudioFileDecoder {
             if (a > peak) peak = a
         }
         if (peak > 1e-4f) {
-            val gain = (0.92f / peak).coerceAtMost(5.0f)
+            val gain = (ENCODER_PEAK_NORMALIZE_TARGET / peak).coerceAtMost(MAX_PEAK_NORMALIZE_GAIN)
             for (i in out.indices) {
                 out[i] = (out[i] * gain).coerceIn(-1f, 1f)
             }

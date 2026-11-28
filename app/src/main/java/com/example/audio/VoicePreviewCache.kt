@@ -16,11 +16,11 @@ object VoicePreviewCache {
 
     private const val TAG = "VoicePreviewCache"
     private const val PREVIEW_DIR_NAME = "voice_previews"
-    private const val CLEAN_ONSET_MARKER = ".v2_clean_onset"
+    private const val CLEAN_ONSET_MARKER = ".v3_preview_35w"
     private const val MIN_VALID_WAV_BYTES = 4_800L // >= ~0.1s @ 24kHz 16-bit mono + 44-byte header
 
     const val INSTANT_PREVIEW_SENTENCE =
-        "Xin chào, đây là giọng đọc của tôi trên ứng dụng đọc sách."
+        "Xin chào, đây là giọng đọc thử nghiệm được tạo riêng cho ứng dụng đọc sách của tôi. Hy vọng âm sắc tự nhiên này sẽ mang lại cho bạn những giờ phút thư giãn thật thoải mái."
 
     fun previewDir(context: Context): File {
         val dir = File(context.applicationContext.filesDir, PREVIEW_DIR_NAME)

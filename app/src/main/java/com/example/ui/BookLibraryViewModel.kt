@@ -902,8 +902,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     // Xóa sạch KV-Cache của giọng cũ trước khi tổng hợp câu nghe thử cho giọng mới!
                     onnxVoiceEngine.clearVoiceKvCache("create_draft_$draftVoiceId")
                     if (onnxVoiceEngine.isFullOnnxSynthesisReady()) {
-                        val synthRes = onnxVoiceEngine.synthesizeSentenceDetailed(
-                            sentence = OnnxModelAssetHelper.AI_VOICE_QUICK_PREVIEW_SENTENCE,
+                        val synthRes = onnxVoiceEngine.synthesizeMultiSentencePreviewDetailed(
+                            passage = OnnxModelAssetHelper.AI_VOICE_QUICK_PREVIEW_SENTENCE,
                             speakerEmbedding = extracted.embedding,
                             speed = 1.0f,
                             referenceCodes = refCodes,
@@ -1251,13 +1251,14 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 if (VoicePreviewCache.hasValidPreview(appCtx, clone.id)) continue
                 val emb = clonedVoiceRepository.loadEmbedding(clone) ?: FloatArray(0)
                 val codes = clonedVoiceRepository.loadReferenceCodes(clone)
-                val synth = onnxVoiceEngine.synthesizeSentenceDetailed(
-                    sentence = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
+                val synth = onnxVoiceEngine.synthesizeMultiSentencePreviewDetailed(
+                    passage = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
                     speakerEmbedding = emb,
                     speed = 1.0f,
                     referenceCodes = codes,
                     referenceText = clone.referenceText,
-                    matchedPresetId = clone.matchedPresetId.takeIf { it.isNotBlank() }
+                    matchedPresetId = clone.matchedPresetId.takeIf { it.isNotBlank() },
+                    voiceId = clone.id
                 )
                 synth.audio?.let { audio ->
                     VoicePreviewCache.savePreviewPcm(appCtx, clone.id, audio.pcmFloat, audio.sampleRate)
@@ -1283,13 +1284,14 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
             if (!onnxVoiceEngine.isFullOnnxSynthesisReady()) return@launch
             val emb = clonedVoiceRepository.loadEmbedding(profile) ?: FloatArray(0)
             val codes = clonedVoiceRepository.loadReferenceCodes(profile)
-            val synth = onnxVoiceEngine.synthesizeSentenceDetailed(
-                sentence = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
+            val synth = onnxVoiceEngine.synthesizeMultiSentencePreviewDetailed(
+                passage = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
                 speakerEmbedding = emb,
                 speed = 1.0f,
                 referenceCodes = codes,
                 referenceText = profile.referenceText,
-                matchedPresetId = profile.matchedPresetId.takeIf { it.isNotBlank() }
+                matchedPresetId = profile.matchedPresetId.takeIf { it.isNotBlank() },
+                voiceId = profile.id
             )
             synth.audio?.let { audio ->
                 VoicePreviewCache.savePreviewPcm(appCtx, profile.id, audio.pcmFloat, audio.sampleRate)

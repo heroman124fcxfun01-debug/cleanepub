@@ -1425,6 +1425,10 @@ class BookAudioPlaybackService : Service() {
         activePreviewTag = tag
         publishState()
 
+        if (onnxEngineLazy.isInitialized()) {
+            onnxEngine.clearVoiceKvCache("preview_tap_$tag")
+        }
+
         previewAudioJob = serviceScope.launch {
             try {
                 // 1. LUỒNG PHÁT NGAY LẬP TỨC (<50ms, 0ms suy luận AI):
@@ -1474,7 +1478,7 @@ class BookAudioPlaybackService : Service() {
                     // Chặn giọng lỗi thiếu ref_codes (<30c) hoặc toàn số 0 trước khi sinh âm
                     if (refCodes == null || refCodes.size < com.example.audio.NeuCodecOnnxEngine.MIN_VALID_REF_CODES || refCodes.all { it == 0 }) {
                         mainHandler.post {
-                            lastPlaybackNotice = "Giọng \"${targetClone.name}\" thiếu mã giọng hợp lệ (${refCodes?.size ?: 0}c). Vui lòng xóa và tạo lại từ file rõ tiếng 5-8 giây."
+                            lastPlaybackNotice = "Giọng \"${targetClone.name}\" thiếu mã giọng hợp lệ (${refCodes?.size ?: 0}c). Vui lòng xóa và tạo lại từ file rõ tiếng 4-7 giây."
                             publishState()
                         }
                         return@launch
@@ -1507,8 +1511,8 @@ class BookAudioPlaybackService : Service() {
                 // Bắt buộc xóa sạch toàn bộ KV-Cache cũ mỗi khi nghe thử giọng khác hoặc bắt đầu nghe thử mới!
                 onnxEngine.clearVoiceKvCache("preview_voice_$resolvedCacheId")
 
-                val synthResult = onnxEngine.synthesizeSentenceDetailed(
-                    sentence = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
+                val synthResult = onnxEngine.synthesizeMultiSentencePreviewDetailed(
+                    passage = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
                     speakerEmbedding = embedding,
                     speed = 1.0f,
                     referenceCodes = refCodes,

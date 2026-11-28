@@ -249,14 +249,13 @@ object OnnxModelAssetHelper {
     }
 
     /**
-     * Sample Vietnamese sentence used when running full AI diagnostics.
+     * Sample 35-word Vietnamese 2-sentence passage used when previewing & testing cloned voices.
      */
     const val AI_VOICE_TEST_SENTENCE =
-        "Nó vẫn hiển thị rất nhiều, vì thế tôi đã bay ra ngoài hà nội để cảm nhận sắc xuân ở đây thật là tươi đẹp."
+        VoicePreviewCache.INSTANT_PREVIEW_SENTENCE
 
     /**
-     * Short Vietnamese preview sentence used right after tapping "Tạo" so preview synthesis
-     * finishes fast with minimal KV-cache & RAM overhead on mobile devices.
+     * Preview passage synthesized after tapping "Tạo" or "Nghe thử" (2 full sentences).
      */
     const val AI_VOICE_QUICK_PREVIEW_SENTENCE =
         VoicePreviewCache.INSTANT_PREVIEW_SENTENCE

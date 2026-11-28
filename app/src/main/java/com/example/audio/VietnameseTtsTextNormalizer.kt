@@ -1,6 +1,7 @@
 package com.example.audio
 
 import java.text.Normalizer
+import java.util.Locale
 
 /**
  * Bộ tiền xử lý và chuẩn hóa văn bản tiếng Việt chuyên dụng cho Android Offline Text-to-Speech.
@@ -129,6 +130,177 @@ object VietnameseTtsTextNormalizer {
         text = whitespaceRegex.replace(text, " ").trim()
 
         return text
+    }
+
+    // Regex phát hiện số phần trăm, số có phân cách hàng nghìn (10.000), số thập phân (3,5 / 3.14), và số nguyên
+    private val percentNumberRegex = Regex("""(?<!\d)(\d{1,3}(?:\.\d{3})+|\d+(?:[.,]\d+)?)\s*%""")
+    private val thousandGroupedIntRegex = Regex("""(?<!\d)\d{1,3}(?:\.\d{3})+(?!\d)""")
+    private val decimalNumberRegex = Regex("""(?<!\d)(\d+)[.,](\d+)(?!\d)""")
+    private val plainIntegerRegex = Regex("""(?<!\d)(\d+)(?!\d)""")
+
+    private val VI_DIGITS = arrayOf(
+        "không", "một", "hai", "ba", "bốn", "năm", "sáu", "bảy", "tám", "chín"
+    )
+    private val VI_SCALES = arrayOf("", "nghìn", "triệu", "tỷ")
+
+    /**
+     * Chuẩn hóa văn bản (cả `Ref Text` và `Target Text`) trước khi tra từ điển `vi_espeak_ipa.tsv`:
+     * 1. Làm sạch & mở rộng viết tắt qua [normalizeForTts].
+     * 2. Đổi toàn bộ số (số nguyên, số thập phân, phần trăm, phân cách hàng nghìn) sang chữ tiếng Việt đầy đủ.
+     * 3. Chuyển sang chữ thường chuẩn tiếng Việt (`Locale.forLanguageTag("vi")`) và gom khoảng trắng.
+     */
+    fun normalizeForPhonemizer(rawText: String): String {
+        val cleaned = normalizeForTts(rawText)
+        if (cleaned.isEmpty()) return ""
+        val expandedNumbers = convertNumbersToVietnameseWords(cleaned)
+        return whitespaceRegex.replace(
+            expandedNumbers.lowercase(Locale.forLanguageTag("vi")),
+            " "
+        ).trim()
+    }
+
+    /**
+     * Chuyển đổi các con số trong chuỗi tiếng Việt thành chữ đọc tự nhiên
+     * (ví dụ: "2025" -> "hai nghìn không trăm hai mươi lăm", "3,5%" -> "ba phẩy năm phần trăm").
+     */
+    fun convertNumbersToVietnameseWords(input: String): String {
+        if (input.isEmpty() || input.none { it.isDigit() }) return input
+        var text = input
+
+        // 1. Phần trăm: 12,5% / 50% / 1.000%
+        text = percentNumberRegex.replace(text) { m ->
+            val rawNum = m.groupValues[1]
+            "${convertSingleNumericToken(rawNum)} phần trăm"
+        }
+
+        // 2. Số có dấu chấm phân cách hàng nghìn kiểu Việt Nam: 10.000, 1.500.000
+        text = thousandGroupedIntRegex.replace(text) { m ->
+            val digitsOnly = m.value.replace(".", "")
+            readVietnameseIntegerString(digitsOnly)
+        }
+
+        // 3. Số thập phân (3,14 hoặc 3.5)
+        text = decimalNumberRegex.replace(text) { m ->
+            val intPart = m.groupValues[1]
+            val fracPart = m.groupValues[2]
+            val intWords = readVietnameseIntegerString(intPart)
+            val fracWords = if (fracPart.startsWith("0") || fracPart.length > 3) {
+                spellDigitsIndividually(fracPart)
+            } else {
+                readVietnameseIntegerString(fracPart)
+            }
+            "$intWords phẩy $fracWords"
+        }
+
+        // 4. Số nguyên thông thường
+        text = plainIntegerRegex.replace(text) { m ->
+            readVietnameseIntegerString(m.groupValues[1])
+        }
+
+        return whitespaceRegex.replace(text, " ").trim()
+    }
+
+    private fun convertSingleNumericToken(rawNum: String): String {
+        if (thousandGroupedIntRegex.matches(rawNum)) {
+            return readVietnameseIntegerString(rawNum.replace(".", ""))
+        }
+        val decMatch = decimalNumberRegex.matchEntire(rawNum)
+        if (decMatch != null) {
+            val intWords = readVietnameseIntegerString(decMatch.groupValues[1])
+            val fracPart = decMatch.groupValues[2]
+            val fracWords = if (fracPart.startsWith("0") || fracPart.length > 3) {
+                spellDigitsIndividually(fracPart)
+            } else {
+                readVietnameseIntegerString(fracPart)
+            }
+            return "$intWords phẩy $fracWords"
+        }
+        return readVietnameseIntegerString(rawNum)
+    }
+
+    private fun readVietnameseIntegerString(digits: String): String {
+        if (digits.isEmpty()) return ""
+        // Mã có số 0 đứng đầu (ví dụ số điện thoại 09..., mã 007) hoặc số quá dài (>12 chữ số): đọc từng chữ số
+        if ((digits.length > 1 && digits[0] == '0') || digits.length > 12) {
+            return spellDigitsIndividually(digits)
+        }
+        val value = digits.toLongOrNull() ?: return spellDigitsIndividually(digits)
+        return numberToVietnameseWords(value)
+    }
+
+    private fun spellDigitsIndividually(digits: String): String {
+        return digits.mapNotNull { ch ->
+            val d = ch - '0'
+            if (d in 0..9) VI_DIGITS[d] else null
+        }.joinToString(" ")
+    }
+
+    private fun numberToVietnameseWords(number: Long): String {
+        if (number == 0L) return "không"
+        if (number < 0L) return "âm ${numberToVietnameseWords(-number)}"
+
+        val groups = ArrayList<Int>(4)
+        var rem = number
+        while (rem > 0L) {
+            groups.add((rem % 1000L).toInt())
+            rem /= 1000L
+        }
+
+        val parts = ArrayList<String>(groups.size * 2)
+        for (i in groups.lastIndex downTo 0) {
+            val g = groups[i]
+            if (g == 0) continue
+            val isHighestGroup = (i == groups.lastIndex)
+            val groupText = readThreeDigitGroup(g, readLeadingZeroHundred = !isHighestGroup)
+            if (groupText.isNotEmpty()) {
+                parts.add(groupText)
+                val scale = VI_SCALES.getOrElse(i) { "" }
+                if (scale.isNotEmpty()) {
+                    parts.add(scale)
+                }
+            }
+        }
+        return parts.joinToString(" ")
+    }
+
+    private fun readThreeDigitGroup(group: Int, readLeadingZeroHundred: Boolean): String {
+        val hundreds = group / 100
+        val tens = (group % 100) / 10
+        val ones = group % 10
+        val sb = StringBuilder()
+
+        if (hundreds > 0 || readLeadingZeroHundred) {
+            sb.append(VI_DIGITS[hundreds]).append(" trăm")
+        }
+
+        when {
+            tens > 1 -> {
+                if (sb.isNotEmpty()) sb.append(' ')
+                sb.append(VI_DIGITS[tens]).append(" mươi")
+                when (ones) {
+                    1 -> sb.append(" mốt")
+                    4 -> sb.append(" tư")
+                    5 -> sb.append(" lăm")
+                    in 2..9 -> sb.append(' ').append(VI_DIGITS[ones])
+                }
+            }
+            tens == 1 -> {
+                if (sb.isNotEmpty()) sb.append(' ')
+                sb.append("mười")
+                when (ones) {
+                    5 -> sb.append(" lăm")
+                    in 1..9 -> sb.append(' ').append(VI_DIGITS[ones])
+                }
+            }
+            tens == 0 && ones > 0 -> {
+                if (sb.isNotEmpty()) {
+                    sb.append(" lẻ ").append(VI_DIGITS[ones])
+                } else {
+                    sb.append(VI_DIGITS[ones])
+                }
+            }
+        }
+        return sb.toString()
     }
 
     /**

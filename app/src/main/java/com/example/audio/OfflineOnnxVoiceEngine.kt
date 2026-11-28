@@ -379,8 +379,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
         if (!isFullOnnxSynthesisReady() || isBusy) return@withContext null
 
         val preset = findPresetVoiceById(presetId) ?: return@withContext null
-        val synth = synthesizeSentenceDetailed(
-            sentence = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
+        val synth = synthesizeMultiSentencePreviewDetailed(
+            passage = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
             speakerEmbedding = preset.voiceEmbedding ?: FloatArray(0),
             speed = 1.0f,
             referenceCodes = preset.referenceCodes,
@@ -431,7 +431,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 resolvedVoiceId = voiceId.ifBlank { fallback.storageId }
             }
         }
-        val cleanRefText = VietnameseTtsTextNormalizer.normalizeForTts(resolvedRefText).trim()
+        val cleanRefText = VietnameseTtsTextNormalizer.normalizeForPhonemizer(resolvedRefText)
         val refPhones = if (cleanRefText.isNotBlank()) {
             refPhonesCache.getOrPut(cleanRefText) { espeakG2p.phonemize(cleanRefText) }
         } else {
@@ -441,6 +441,93 @@ class OfflineOnnxVoiceEngine(context: Context) {
             refPhones = refPhones,
             refCodes = resolvedRefCodes,
             voiceId = resolvedVoiceId
+        )
+    }
+
+    /**
+     * Synthesizes a multi-sentence preview passage (such as the 35-word 2-sentence Vietnamese sample):
+     * - Clears stale KV-cache & voice prefix ONCE before sentence 1 so tone matches the target voice.
+     * - Splits cleanly into natural sentences and synthesizes every sentence completely without truncation.
+     * - Concatenates the 24kHz PCM segments with a natural 220ms inter-sentence pause.
+     */
+    suspend fun synthesizeMultiSentencePreviewDetailed(
+        passage: String,
+        speakerEmbedding: FloatArray = FloatArray(0),
+        speed: Float = 1.0f,
+        referenceCodes: IntArray? = null,
+        referenceText: String? = null,
+        matchedPresetId: String? = null,
+        voiceId: String = ""
+    ): OnnxSynthesisResult = withContext(Dispatchers.IO) {
+        ensureInitialized()
+        val sentences = VietnameseTtsTextNormalizer.splitIntoSmartSentences(
+            rawText = passage,
+            maxSentenceLength = 140
+        ).ifEmpty {
+            listOf(passage.trim()).filter { it.isNotEmpty() }
+        }
+        if (sentences.isEmpty()) {
+            return@withContext OnnxSynthesisResult(errorMessage = "Đoạn văn nghe thử bị trống.")
+        }
+
+        // Always wipe previous voice KV-cache before starting a fresh preview synthesis
+        clearVoiceKvCache("multi_sentence_preview_$voiceId")
+
+        val segments = ArrayList<FloatArray>(sentences.size)
+        val traces = ArrayList<String>(sentences.size)
+        var outRate = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE
+
+        for ((idx, sent) in sentences.withIndex()) {
+            val res = synthesizeSentenceBlocking(
+                sentence = sent,
+                speakerEmbedding = speakerEmbedding,
+                speed = speed,
+                referenceCodes = referenceCodes,
+                referenceText = referenceText,
+                matchedPresetId = matchedPresetId,
+                voiceId = voiceId
+            )
+            val audio = res.audio
+            if (audio == null || audio.pcmFloat.isEmpty()) {
+                return@withContext OnnxSynthesisResult(
+                    audio = null,
+                    errorMessage = res.errorMessage ?: "Không thể tổng hợp câu ${idx + 1}/${sentences.size} của đoạn nghe thử.",
+                    traceLog = (traces + listOfNotNull(res.traceLog)).joinToString("\n---\n")
+                )
+            }
+            outRate = audio.sampleRate
+            segments.add(audio.pcmFloat)
+            res.traceLog?.let { traces.add("Câu ${idx + 1}/${sentences.size}:\n$it") }
+        }
+
+        if (segments.size == 1) {
+            return@withContext OnnxSynthesisResult(
+                audio = SynthesizedSentenceAudio(pcmFloat = segments[0], sampleRate = outRate),
+                errorMessage = null,
+                traceLog = traces.joinToString("\n")
+            )
+        }
+
+        val pauseSamples = (outRate * 220) / 1000 // 220ms natural inter-sentence pause
+        var totalLen = 0
+        for (i in segments.indices) {
+            totalLen += segments[i].size
+            if (i < segments.lastIndex) totalLen += pauseSamples
+        }
+        val combined = FloatArray(totalLen)
+        var cursor = 0
+        for (i in segments.indices) {
+            val seg = segments[i]
+            System.arraycopy(seg, 0, combined, cursor, seg.size)
+            cursor += seg.size
+            if (i < segments.lastIndex) {
+                cursor += pauseSamples // already zero-initialized silence
+            }
+        }
+        OnnxSynthesisResult(
+            audio = SynthesizedSentenceAudio(pcmFloat = combined, sampleRate = outRate),
+            errorMessage = null,
+            traceLog = traces.joinToString("\n---\n")
         )
     }
 
@@ -536,8 +623,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 }
             }
 
-            // Convert BOTH Ref Text and Target Text through the exact same normalizer + vi_espeak_ipa.tsv dictionary
-            val cleanRefText = VietnameseTtsTextNormalizer.normalizeForTts(resolvedRefText).trim()
+            // Convert BOTH Ref Text and Target Text through the exact same normalizer (lowercase + numbers-to-words) + vi_espeak_ipa.tsv
+            val cleanRefText = VietnameseTtsTextNormalizer.normalizeForPhonemizer(resolvedRefText)
             val refPhones = if (cleanRefText.isNotBlank()) {
                 refPhonesCache.getOrPut(cleanRefText) { espeakG2p.phonemize(cleanRefText) }
             } else {
@@ -551,8 +638,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
             }
 
             val wordCount = VietnameseTtsTextNormalizer.countWords(cleanTarget).coerceAtLeast(1)
-            // Tight token budget matched to 80-120 char chunks (~14-18 tokens/Vietnamese syllable)
-            val estMaxTokens = (wordCount * 18 + 64).coerceIn(110, 400)
+            // Generous token ceiling (up to 480 tokens) so 18-20 word sentences never clip their ending
+            val estMaxTokens = (wordCount * 19 + 72).coerceIn(110, 480)
 
             val resolvedVoiceId = voiceId.trim().ifEmpty {
                 inferredPreset?.storageId
@@ -597,7 +684,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 onSuccess = { waveform24k ->
                     val durSec = waveform24k.size.toFloat() / NeuCodecOnnxEngine.DECODER_SAMPLE_RATE.toFloat()
                     val trace = buildString {
-                        appendLine("Pipeline: Official pnnbao97/VieNeu-TTS GGUF (temp=0.7, top_p=0.9, repeat=1.1, threads=3) + NeuCodec ONNX (24kHz)")
+                        appendLine("Pipeline: Official pnnbao97/VieNeu-TTS GGUF (temp=0.6, top_k=40, top_p=0.85, repeat=1.15, threads=3) + NeuCodec ONNX (24kHz)")
                         appendLine("Voice: $voiceSourceLabel")
                         appendLine("RefText: ${resolvedRefText.take(120)}")
                         appendLine("TargetText: ${cleanTarget.take(140)}")
@@ -635,7 +722,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
             val d = discoveredModels
 
             val mapped = linkedMapOf(
-                "pipeline" to "Official pnnbao97/VieNeu-TTS (GGUF temp=0.7/top_p=0.9/threads=3 + NeuCodec Encoder On-Demand + Decoder QUInt8 24kHz)",
+                "pipeline" to "Official pnnbao97/VieNeu-TTS (GGUF temp=0.6/top_k=40/top_p=0.85/repeat=1.15/threads=3 + NeuCodec Encoder On-Demand + Decoder QUInt8 24kHz)",
                 "gguf_backbone" to (d?.ggufBackboneFile?.let { f ->
                     if (ggufRunner.isLoaded) "${f.name} (OK)" else "${f.name} (LỖI NẠP)"
                 } ?: "(không tìm thấy *.gguf)"),
@@ -703,7 +790,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
         val startMs = System.currentTimeMillis()
         try {
             ensureInitialized()
-            val inputSamples = sampleFloat16k?.takeIf { it.isNotEmpty() } ?: FloatArray(16_000 * 4) { i ->
+            val inputSamples = sampleFloat16k?.takeIf { it.isNotEmpty() } ?: FloatArray(16_000 * 5) { i ->
                 val t = i.toDouble() / 16_000.0
                 (0.35 * kotlin.math.sin(2.0 * kotlin.math.PI * 185.0 * t) +
                     0.18 * kotlin.math.sin(2.0 * kotlin.math.PI * 370.0 * t)).toFloat()
@@ -753,13 +840,14 @@ class OfflineOnnxVoiceEngine(context: Context) {
         val startMs = System.currentTimeMillis()
         try {
             ensureInitialized()
-            val synth = synthesizeSentenceDetailed(
-                sentence = sentence,
+            val synth = synthesizeMultiSentencePreviewDetailed(
+                passage = sentence,
                 speakerEmbedding = speakerEmbedding ?: FloatArray(0),
                 speed = 1.0f,
                 referenceCodes = referenceCodes,
                 referenceText = referenceText,
-                matchedPresetId = matchedPresetId
+                matchedPresetId = matchedPresetId,
+                voiceId = matchedPresetId ?: "diag_voice"
             )
             val elapsed = System.currentTimeMillis() - startMs
             val audio = synth.audio

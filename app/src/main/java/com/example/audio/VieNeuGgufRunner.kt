@@ -300,7 +300,7 @@ class VieNeuGgufRunner(context: Context? = null) {
         refPhones: String,
         refCodes: IntArray
     ): ActiveVoicePrefixCache {
-        val cleanRefPhones = refPhones.trim()
+        val cleanRefPhones = refPhones.replace(WHITESPACE_REGEX, " ").trim()
         val contentKey = computeVoiceContentKey(cleanRefPhones, refCodes)
         val key = "$voiceId|$contentKey"
         val existing = cachedVoicePrefix
@@ -354,7 +354,7 @@ class VieNeuGgufRunner(context: Context? = null) {
                 errorMessage = lastLoadError ?: "Chưa nạp được model VieNeu-TTS GGUF."
             )
         }
-        val cleanTargetPhones = targetPhones.trim()
+        val cleanTargetPhones = targetPhones.replace(WHITESPACE_REGEX, " ").trim()
         if (cleanTargetPhones.isBlank()) {
             return GgufGenerationResult(errorMessage = "Chuỗi âm vị mục tiêu trống.")
         }
@@ -546,11 +546,12 @@ class VieNeuGgufRunner(context: Context? = null) {
         private const val FALLBACK_BATCH_SIZE_128 = 128
         private const val HELIO_G99_THREADS = 3
         private const val HELIO_G99_THREADS_BATCH = 3
-        const val DEFAULT_TEMPERATURE = 0.7f
-        const val DEFAULT_TOP_K = 50
-        const val DEFAULT_TOP_P = 0.9f
-        const val DEFAULT_REPEAT_PENALTY = 1.1f
+        const val DEFAULT_TEMPERATURE = 0.6f
+        const val DEFAULT_TOP_K = 40
+        const val DEFAULT_TOP_P = 0.85f
+        const val DEFAULT_REPEAT_PENALTY = 1.15f
         const val SPEECH_END_TOKEN = "<|SPEECH_GENERATION_END|>"
+        private val WHITESPACE_REGEX = Regex("\\s+")
         private val STOP_MARKERS = listOf(
             SPEECH_END_TOKEN,
             "<|im_end|>",
