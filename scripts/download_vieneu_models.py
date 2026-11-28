@@ -62,12 +62,36 @@ def list_public_repo_files(api: HfApi, repo_id: str) -> Optional[List[str]]:
     return files
 
 
+def safe_unlink(path: str) -> None:
+    """Remove regular files, read-only files, symlinks, and broken symlinks safely."""
+    if os.path.lexists(path):
+        if not os.path.islink(path):
+            try:
+                os.chmod(path, 0o777)
+            except OSError:
+                pass
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def safe_copy_file(src: str, dst: str) -> None:
+    """Safely write `dst` without inheriting read-only permissions from Hugging Face cache."""
+    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+    safe_unlink(dst)
+    shutil.copyfile(src, dst)
+    try:
+        os.chmod(dst, 0o644)
+    except OSError:
+        pass
+
+
 def download_file_safe(repo_id: str, filename: str, dest_path: str) -> bool:
     try:
         cached = hf_hub_download(repo_id=repo_id, filename=filename)
         assert_not_lfs_pointer(cached)
-        os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
-        shutil.copy2(cached, dest_path)
+        safe_copy_file(cached, dest_path)
         size_mb = os.path.getsize(dest_path) / (1024.0 * 1024.0)
         print(
             f"    -> saved {os.path.basename(dest_path)} ({size_mb:.2f} MB) from {repo_id}/{filename}",
@@ -76,11 +100,7 @@ def download_file_safe(repo_id: str, filename: str, dest_path: str) -> bool:
         return True
     except Exception as exc:
         print(f"  [warn] Download failed for {repo_id}/{filename}: {exc}", flush=True)
-        if os.path.exists(dest_path):
-            try:
-                os.remove(dest_path)
-            except OSError:
-                pass
+        safe_unlink(dest_path)
         return False
 
 
@@ -139,11 +159,7 @@ def find_external_data_files(
 
 def cleanup_paths(paths: List[str]) -> None:
     for p in paths:
-        if os.path.exists(p):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+        safe_unlink(p)
 
 
 def download_onnx_with_companions(
@@ -254,10 +270,29 @@ def rank_decoder_onnx_candidates(files: List[str]) -> List[str]:
     return candidates
 
 
+def _make_tree_writable(root_dir: str) -> None:
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        try:
+            os.chmod(dirpath, 0o777)
+        except OSError:
+            pass
+        for fn in filenames:
+            fp = os.path.join(dirpath, fn)
+            if not os.path.islink(fp):
+                try:
+                    os.chmod(fp, 0o777)
+                except OSError:
+                    pass
+
+
 def purge_assets_junk(models_dir: str) -> None:
     """Clean out `models_dir` and delete any legacy/unused model folders or junk files in parent `assets/`."""
-    if os.path.exists(models_dir):
-        shutil.rmtree(models_dir)
+    if os.path.lexists(models_dir):
+        if os.path.isdir(models_dir) and not os.path.islink(models_dir):
+            _make_tree_writable(models_dir)
+            shutil.rmtree(models_dir)
+        else:
+            safe_unlink(models_dir)
     os.makedirs(models_dir, exist_ok=True)
 
     assets_dir = os.path.dirname(os.path.abspath(models_dir))
@@ -281,10 +316,11 @@ def purge_assets_junk(models_dir: str) -> None:
                 or low.endswith((".wav", ".zip", ".tar", ".gz", ".md", ".onnx", ".gguf", ".bin", ".data"))
             )
             if is_legacy:
-                if os.path.isdir(full):
+                if os.path.isdir(full) and not os.path.islink(full):
+                    _make_tree_writable(full)
                     shutil.rmtree(full)
-                elif os.path.isfile(full):
-                    os.remove(full)
+                else:
+                    safe_unlink(full)
                 print(f"  [clean] Removed legacy/unused asset: {entry}", flush=True)
 
 

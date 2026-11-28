@@ -67,13 +67,34 @@ def make_speech_like_signal_16k(duration_sec: float = 3.0) -> np.ndarray:
     return wav
 
 
-def cleanup_paths(paths: List[str]) -> None:
-    for p in paths:
-        if os.path.exists(p):
+def safe_unlink(path: str) -> None:
+    """Remove regular files, read-only files, symlinks, and broken symlinks safely."""
+    if os.path.lexists(path):
+        if not os.path.islink(path):
             try:
-                os.remove(p)
+                os.chmod(path, 0o777)
             except OSError:
                 pass
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def safe_copy_file(src: str, dst: str) -> None:
+    """Safely overwrite `dst` without inheriting read-only permissions from Hugging Face cache."""
+    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+    safe_unlink(dst)
+    shutil.copyfile(src, dst)
+    try:
+        os.chmod(dst, 0o644)
+    except OSError:
+        pass
+
+
+def cleanup_paths(paths: List[str]) -> None:
+    for p in paths:
+        safe_unlink(p)
 
 
 def describe_io(nodes) -> List[Dict[str, object]]:
@@ -476,6 +497,7 @@ def _export_module_to_onnx(
 
     for attempt_name, use_dynamo in export_attempts:
         try:
+            safe_unlink(out_onnx_path)
             with torch.no_grad():
                 pt_out = module(dummy_3s)
                 print(
@@ -697,7 +719,12 @@ def _ensure_int32_3d_output_onnx(onnx_path: str) -> bool:
         new_out = helper.make_tensor_value_info("codes", TensorProto.INT32, [1, 1, "frames"])
         model.graph.output.pop(0)
         model.graph.output.insert(0, new_out)
+        safe_unlink(onnx_path)
         onnx.save(model, onnx_path)
+        try:
+            os.chmod(onnx_path, 0o644)
+        except OSError:
+            pass
         print("  [patch] Normalized pre-exported encoder output to codes: int32[1, 1, frames]", flush=True)
         return True
     except Exception as exc:
@@ -744,7 +771,7 @@ def fallback_download_public_hf_encoder(
             created: List[str] = []
             try:
                 cached = hf_hub_download(repo_id=repo, filename=chosen)
-                shutil.copy2(cached, out_onnx_path)
+                safe_copy_file(cached, out_onnx_path)
                 created.append(out_onnx_path)
                 # Download companion external data if any
                 chosen_dir = os.path.dirname(chosen)
@@ -752,7 +779,7 @@ def fallback_download_public_hf_encoder(
                     if os.path.dirname(extra) == chosen_dir and extra.lower().endswith((".onnx.data", ".onnx_data", ".data")):
                         ex_cached = hf_hub_download(repo_id=repo, filename=extra)
                         ex_dest = os.path.join(out_dir, os.path.basename(extra))
-                        shutil.copy2(ex_cached, ex_dest)
+                        safe_copy_file(ex_cached, ex_dest)
                         created.append(ex_dest)
 
                 _ensure_int32_3d_output_onnx(out_onnx_path)
@@ -812,14 +839,11 @@ def try_quantize_for_mobile(
             print("  [quantize] Quantized model failed verification; keeping verified FP32.", flush=True)
             return created_files
 
-        shutil.copy2(q8_path, encoder_onnx_path)
+        safe_copy_file(q8_path, encoder_onnx_path)
         for p in created_files:
-            if os.path.abspath(p) != os.path.abspath(encoder_onnx_path) and os.path.exists(p):
-                try:
-                    os.remove(p)
-                    print(f"  [clean] Removed superseded external weights: {os.path.basename(p)}", flush=True)
-                except OSError:
-                    pass
+            if os.path.abspath(p) != os.path.abspath(encoder_onnx_path) and os.path.lexists(p):
+                safe_unlink(p)
+                print(f"  [clean] Removed superseded external weights: {os.path.basename(p)}", flush=True)
         print(f"  [OK QUANTIZE] Compact single-file neucodec_encoder.onnx saved ({q8_mb:.2f} MB)!", flush=True)
         return [encoder_onnx_path]
 
@@ -839,12 +863,13 @@ def main() -> int:
     print(f"Decoder verify: {decoder_onnx or '(not provided)'}", flush=True)
 
     # Check if already present & valid
-    if os.path.isfile(out_onnx):
-        print("Found existing neucodec_encoder.onnx — verifying...", flush=True)
-        if verify_encoder_onnx(out_onnx, decoder_onnx_path=decoder_onnx, require_int32_3d=False):
-            print("Existing neucodec_encoder.onnx passed all checks!", flush=True)
-            return 0
-        os.remove(out_onnx)
+    if os.path.lexists(out_onnx):
+        if os.path.isfile(out_onnx):
+            print("Found existing neucodec_encoder.onnx — verifying...", flush=True)
+            if verify_encoder_onnx(out_onnx, decoder_onnx_path=decoder_onnx, require_int32_3d=False):
+                print("Existing neucodec_encoder.onnx passed all checks!", flush=True)
+                return 0
+        safe_unlink(out_onnx)
 
     created: Optional[List[str]] = None
     try:
