@@ -125,6 +125,7 @@ fun StudioVoiceCloneSection(
 
     var voiceName by remember { mutableStateOf("") }
     var referenceText by remember { mutableStateOf("") }
+    var refTextValidationError by remember { mutableStateOf<String?>(null) }
     var importedSample by remember { mutableStateOf<ImportedVoiceSample?>(null) }
     var localPreviewTarget by remember { mutableStateOf<String?>(null) }
     var permissionDeniedNote by remember { mutableStateOf<String?>(null) }
@@ -711,6 +712,7 @@ fun StudioVoiceCloneSection(
                         onClick = {
                             if (sectionEnabled && !isExtractingEmbedding) {
                                 referenceText = com.example.audio.OnnxModelAssetHelper.SUGGESTED_RECORDING_SCRIPT
+                                refTextValidationError = null
                             }
                         },
                         enabled = sectionEnabled && !isExtractingEmbedding,
@@ -737,21 +739,22 @@ fun StudioVoiceCloneSection(
                     }
                 }
 
+                val showRefTextError = !refTextValidationError.isNullOrBlank()
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
                         .background(paperBg)
                         .border(
-                            width = 1.3.dp,
-                            color = borderCol,
+                            width = if (showRefTextError) 1.8.dp else 1.3.dp,
+                            color = if (showRefTextError) IosRed else borderCol,
                             shape = RoundedCornerShape(10.dp)
                         )
                         .padding(horizontal = 10.dp, vertical = 8.dp)
                 ) {
                     if (referenceText.isEmpty()) {
                         Text(
-                            text = "Nhập đúng câu nói trong đoạn ghi âm 4–7 giây (hoặc bấm \"Điền câu mẫu để đọc\" rồi thu âm) để NeuCodec Encoder ONNX trích xuất & nhân bản giọng thật chuẩn nhất.",
+                            text = "Bắt buộc nhập đúng câu nói trong đoạn âm thanh 4–7 giây (hoặc bấm \"Điền câu mẫu để đọc\" rồi thu âm) để tạo refPhones chuẩn cho GGUF.",
                             fontSize = 11.sp,
                             lineHeight = 15.sp,
                             color = secondaryInk.copy(alpha = 0.72f)
@@ -759,7 +762,12 @@ fun StudioVoiceCloneSection(
                     }
                     BasicTextField(
                         value = referenceText,
-                        onValueChange = { if (sectionEnabled && it.length <= 500) referenceText = it },
+                        onValueChange = {
+                            if (sectionEnabled && it.length <= 500) {
+                                referenceText = it
+                                if (it.isNotBlank()) refTextValidationError = null
+                            }
+                        },
                         enabled = sectionEnabled && !isExtractingEmbedding,
                         minLines = 2,
                         maxLines = 4,
@@ -775,6 +783,16 @@ fun StudioVoiceCloneSection(
                             .testTag("studio_clone_ref_text_input")
                     )
                 }
+
+                AnimatedVisibility(visible = showRefTextError) {
+                    Text(
+                        text = refTextValidationError.orEmpty(),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = IosRed,
+                        modifier = Modifier.testTag("studio_clone_ref_text_error")
+                    )
+                }
             }
 
             // 3. Hàng 3 nút theo đúng quy trình: [ Tạo ] -> [ Nghe thử (sáng lên sau khi tạo) ] -> [ Lưu ]
@@ -787,6 +805,12 @@ fun StudioVoiceCloneSection(
                 NeoBrutalistPressBox(
                     onClick = {
                         val samples = activeInputSamples ?: return@NeoBrutalistPressBox
+                        val cleanRef = referenceText.trim()
+                        if (cleanRef.isBlank() || com.example.audio.VietnameseTtsTextNormalizer.countWords(cleanRef) < 2) {
+                            refTextValidationError = "⚠ Bắt buộc nhập đầy đủ Lời thoại mẫu (Ref Text) khớp với đoạn ghi âm/file mẫu trước khi bấm Tạo!"
+                            return@NeoBrutalistPressBox
+                        }
+                        refTextValidationError = null
                         recorder.stopPreview()
                         if (activeServicePreviewTag != null) {
                             BookAudioPlaybackService.stopPreview(context)
@@ -794,7 +818,7 @@ fun StudioVoiceCloneSection(
                         val name = voiceName.trim().ifBlank {
                             "Giọng AI #${clonedVoices.size + 1}"
                         }
-                        onCreateDraftVoice(name, samples, activeInputRate, referenceText.trim())
+                        onCreateDraftVoice(name, samples, activeInputRate, cleanRef)
                     },
                     enabled = sectionEnabled && canCreateDraft && !isExtractingEmbedding,
                     isPill = true,
@@ -1038,17 +1062,25 @@ fun StudioVoiceCloneSection(
                                     )
                                     if (hasRefIpa) {
                                         Text(
-                                            text = "refTextIpa: ${draft.referenceTextIpa}",
+                                            text = "refPhones: ${draft.referenceTextIpa}",
                                             fontSize = 9.5.sp,
                                             fontFamily = FontFamily.Monospace,
                                             color = primaryInk
                                         )
                                     } else {
                                         Text(
-                                            text = "⚠ refTextIpa RỖNG! Bạn chưa nhập Lời thoại mẫu (Ref Text) khớp với file âm thanh nên tông giọng sẽ bị lệch. Hãy nhập đúng lời đọc rồi bấm Tạo lại.",
+                                            text = "⚠ refPhones RỖNG! Bạn chưa nhập Lời thoại mẫu (Ref Text) khớp với file âm thanh nên tông giọng sẽ bị lệch. Hãy nhập đúng lời đọc rồi bấm Tạo lại.",
                                             fontSize = 9.5.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = IosRed
+                                        )
+                                    }
+                                    if (draft.sampleTargetPhones.isNotBlank()) {
+                                        Text(
+                                            text = "targetPhones: ${draft.sampleTargetPhones.take(120)}",
+                                            fontSize = 9.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = secondaryInk
                                         )
                                     }
                                     if (draft.encoderIoSummary.isNotBlank()) {

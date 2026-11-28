@@ -361,21 +361,12 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                     }
 
                     val codesOutNode = result[codesIndex]
-                    val codesOutShape = (codesOutNode.info as? TensorInfo)?.shape?.contentToString() ?: "?"
+                    val codesOutTensorInfo = codesOutNode.info as? TensorInfo
+                    val codesOutDims = codesOutTensorInfo?.shape
+                    val codesOutShape = codesOutDims?.contentToString() ?: "?"
                     val rawCodesValue = codesOutNode.value
-                    @Suppress("UNCHECKED_CAST")
-                    val extractedCodes: IntArray = runCatching {
-                        // Exact NeuCodec INT32[1, 1, N] chronological extraction: (output[0].value as Array<Array<IntArray>>)[0][0]
-                        (rawCodesValue as Array<Array<IntArray>>)[0][0]
-                    }.getOrElse {
-                        when (rawCodesValue) {
-                            is Array<*> -> {
-                                val direct3d = (rawCodesValue.firstOrNull() as? Array<*>)?.firstOrNull() as? IntArray
-                                direct3d ?: flattenAnyToIntArray(rawCodesValue)
-                            }
-                            else -> flattenAnyToIntArray(rawCodesValue)
-                        }
-                    }
+                    val extractedCodes: IntArray = extractChronologicalCodes(rawCodesValue, codesOutDims)
+                    val outOfRangeCount = extractedCodes.count { it !in 0..65535 }
                     val flatCodes = extractedCodes
                         .filter { it in 0..65535 }
                         .toIntArray()
@@ -387,18 +378,22 @@ class NeuCodecOnnxEngine(context: Context? = null) {
 
                     Log.i(
                         TAG,
-                        "Encoder output: shape=$codesOutShape | len=${flatCodes.size} | unique=$uniqueCount | " +
-                            "range=$minTok..$maxTok (in0..1023=$countIn1024) | first10=${first10.contentToString()} | " +
+                        "Encoder output: shape=$codesOutShape | rawLen=${extractedCodes.size} | validLen=${flatCodes.size} | " +
+                            "outOfRange=$outOfRangeCount | unique=$uniqueCount | " +
+                            "range=$minTok..$maxTok (in0..1023=$countIn1024, ggufVocab=0..65535) | " +
+                            "first10=${first10.contentToString()} | " +
                             "first5Tags=${VieNeuGgufRunner.formatRefSpeechTokens(flatCodes, 5)}"
                     )
 
                     val invalidCodes = flatCodes.size < MIN_VALID_REF_CODES ||
+                        outOfRangeCount > 0 ||
                         flatCodes.all { it == 0 } ||
                         uniqueCount < MIN_UNIQUE_REF_CODES
                     if (invalidCodes) {
                         throw IllegalArgumentException(
                             "${AudioFileDecoder.INVALID_AUDIO_USER_MESSAGE} " +
-                                "(len=${flatCodes.size}c, unique=$uniqueCount, first10=${first10.contentToString()})."
+                                "(shape=$codesOutShape, len=${flatCodes.size}c, outOfRange=$outOfRangeCount, " +
+                                "unique=$uniqueCount, first10=${first10.contentToString()})."
                         )
                     }
                     val optionalVoiceEmb = if (embIndex in 0 until result.size()) {
@@ -684,6 +679,98 @@ class NeuCodecOnnxEngine(context: Context? = null) {
             out[idx] = (out[idx] * w).coerceIn(-1.0f, 1.0f)
         }
         return out
+    }
+
+    /**
+     * Extracts 1D speech token IDs in strict chronological frame order from any NeuCodec ONNX
+     * encoder output layout (`[1, 1, N]`, `[1, N, 1]`, `[N, 1, 1]`, `[1, N]`, `[N, 1]`, or `[N]`),
+     * preventing accidental axis transpositions or scrambling between batch/channel/time axes.
+     */
+    private fun extractChronologicalCodes(rawValue: Any?, dims: LongArray?): IntArray {
+        if (rawValue == null) return IntArray(0)
+        when (rawValue) {
+            is IntArray -> return rawValue.copyOf()
+            is LongArray -> return IntArray(rawValue.size) { rawValue[it].toInt() }
+        }
+
+        val outer = rawValue as? Array<*> ?: return flattenAnyToIntArray(rawValue)
+        if (outer.isEmpty()) return IntArray(0)
+        val first0 = outer[0]
+
+        // 3D tensors: [1, 1, N], [1, N, 1], or [N, 1, 1]
+        if (first0 is Array<*>) {
+            val d0 = outer.size
+            val d1 = first0.size
+            val firstInner = first0.firstOrNull()
+            val d2 = when (firstInner) {
+                is IntArray -> firstInner.size
+                is LongArray -> firstInner.size
+                else -> 0
+            }
+            if (d1 > 0 && d2 > 0) {
+                if (dims != null && dims.size == 3) {
+                    Log.d(TAG, "extractChronologicalCodes 3D: dims=${dims.contentToString()} runtime=[$d0, $d1, $d2]")
+                }
+                // Standard NeuCodec [1, 1, N]
+                if (d0 == 1 && d1 == 1) {
+                    return when (firstInner) {
+                        is IntArray -> firstInner.copyOf()
+                        is LongArray -> IntArray(firstInner.size) { firstInner[it].toInt() }
+                        else -> flattenAnyToIntArray(rawValue)
+                    }
+                }
+                // Transposed [1, N, 1]
+                if (d0 == 1 && d2 == 1 && d1 > 1) {
+                    return IntArray(d1) { t ->
+                        when (val inner = first0[t]) {
+                            is IntArray -> inner.firstOrNull() ?: 0
+                            is LongArray -> inner.firstOrNull()?.toInt() ?: 0
+                            else -> 0
+                        }
+                    }
+                }
+                // Transposed [N, 1, 1]
+                if (d1 == 1 && d2 == 1 && d0 > 1) {
+                    return IntArray(d0) { t ->
+                        val mid = outer[t] as? Array<*>
+                        when (val inner = mid?.firstOrNull()) {
+                            is IntArray -> inner.firstOrNull() ?: 0
+                            is LongArray -> inner.firstOrNull()?.toInt() ?: 0
+                            else -> 0
+                        }
+                    }
+                }
+            }
+            return flattenAnyToIntArray(rawValue)
+        }
+
+        // 2D tensors: [1, N] or [N, 1]
+        if (first0 is IntArray || first0 is LongArray) {
+            val d0 = outer.size
+            val d1 = when (first0) {
+                is IntArray -> first0.size
+                is LongArray -> first0.size
+                else -> 0
+            }
+            if (d0 == 1) {
+                return when (first0) {
+                    is IntArray -> first0.copyOf()
+                    is LongArray -> IntArray(first0.size) { first0[it].toInt() }
+                    else -> flattenAnyToIntArray(rawValue)
+                }
+            }
+            if (d1 == 1 && d0 > 1) {
+                return IntArray(d0) { t ->
+                    when (val row = outer[t]) {
+                        is IntArray -> row.firstOrNull() ?: 0
+                        is LongArray -> row.firstOrNull()?.toInt() ?: 0
+                        else -> 0
+                    }
+                }
+            }
+        }
+
+        return flattenAnyToIntArray(rawValue)
     }
 
     private fun flattenAnyToIntArray(value: Any?): IntArray {

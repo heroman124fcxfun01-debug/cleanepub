@@ -902,6 +902,16 @@ class BookAudioPlaybackService : Service() {
                 resolvedCodes = referenceCodes
                 resolvedRefText = referenceText
                 resolvedPresetId = presetVoiceId
+                if (resolvedRefText.isBlank()) {
+                    withContext(Dispatchers.Main) {
+                        if (isPlaying && generation == activeParagraphGeneration) {
+                            activeUsingOnnxVoice = false
+                            lastPlaybackNotice = "Giọng nhân bản thiếu Lời thoại mẫu (Ref Text -> refPhones rỗng). Vui lòng xóa và tạo lại giọng có nhập đầy đủ Ref Text."
+                            pausePlayback()
+                        }
+                    }
+                    return@launch
+                }
             }
 
             // Giải phóng >150 MB RAM của neucodec_encoder.onnx trước khi bắt đầu luồng đọc sách
@@ -1479,6 +1489,14 @@ class BookAudioPlaybackService : Service() {
                     if (refCodes == null || refCodes.size < com.example.audio.NeuCodecOnnxEngine.MIN_VALID_REF_CODES || refCodes.all { it == 0 }) {
                         mainHandler.post {
                             lastPlaybackNotice = "Giọng \"${targetClone.name}\" thiếu mã giọng hợp lệ (${refCodes?.size ?: 0}c). Vui lòng xóa và tạo lại từ file rõ tiếng 4-7 giây."
+                            publishState()
+                        }
+                        return@launch
+                    }
+                    // Chặn giọng nhân bản thiếu Ref Text (refPhones sẽ rỗng gây lỗi 3 tokens / sai tông!)
+                    if (refText.isBlank()) {
+                        mainHandler.post {
+                            lastPlaybackNotice = "Giọng \"${targetClone.name}\" thiếu Lời thoại mẫu (Ref Text -> refPhones rỗng). Vui lòng xóa và tạo lại có nhập đầy đủ Ref Text."
                             publishState()
                         }
                         return@launch

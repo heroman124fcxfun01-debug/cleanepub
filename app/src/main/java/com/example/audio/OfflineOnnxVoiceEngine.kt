@@ -656,6 +656,19 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 ""
             }
             val targetPhones = espeakG2p.phonemize(cleanTarget)
+            if (refPhones.isBlank()) {
+                return OnnxSynthesisResult(
+                    audio = null,
+                    errorMessage = "Thiếu lời thoại mẫu (Ref Text -> refPhones đang bị RỖNG) cho $voiceSourceLabel. Vui lòng nhập đúng câu nói trong đoạn âm thanh mẫu rồi tạo lại giọng.",
+                    traceLog = buildString {
+                        appendLine("Voice: $voiceSourceLabel")
+                        appendLine("RefText: '${resolvedRefText.take(120)}'")
+                        appendLine("refPhones: '' (RỖNG — đã chặn trước khi chạy GGUF)")
+                        appendLine("targetPhones: '$targetPhones'")
+                        appendLine("refCodes: ${resolvedRefCodes.size}c")
+                    }
+                )
+            }
             if (targetPhones.isBlank()) {
                 return OnnxSynthesisResult(
                     errorMessage = "Bộ chuyển âm vị tiếng Việt không tạo được chuỗi IPA cho câu này."
@@ -690,9 +703,10 @@ class OfflineOnnxVoiceEngine(context: Context) {
                     traceLog = buildString {
                         appendLine("Voice: $voiceSourceLabel")
                         appendLine("RefText: $resolvedRefText")
-                        appendLine("RefIPA: $refPhones")
-                        appendLine("TargetIPA: $targetPhones")
-                        appendLine("GGUF elapsed: ${genRes.elapsedMs} ms | codes=${genRes.speechCodes.size}")
+                        appendLine("refPhones: $refPhones")
+                        appendLine("targetPhones: $targetPhones")
+                        appendLine("refCodes: ${resolvedRefCodes.size}c")
+                        appendLine("GGUF elapsed: ${genRes.elapsedMs} ms | generated=${genRes.speechCodes.size}")
                         appendLine("RawOut: ${genRes.rawOutputText}")
                     }
                 )
@@ -712,8 +726,9 @@ class OfflineOnnxVoiceEngine(context: Context) {
                         appendLine("Pipeline: Official pnnbao97/VieNeu-TTS GGUF (temp=0.6, top_k=40, top_p=0.85, repeat=1.15, threads=3) + NeuCodec ONNX (24kHz)")
                         appendLine("Voice: $voiceSourceLabel")
                         appendLine("RefText: ${resolvedRefText.take(120)}")
-                        appendLine("TargetText: ${cleanTarget.take(140)}")
-                        appendLine("GGUF: ${genRes.speechCodes.size} speech tokens trong ${genRes.elapsedMs} ms")
+                        appendLine("refPhones: $refPhones")
+                        appendLine("targetPhones: $targetPhones")
+                        appendLine("refCodes: ${resolvedRefCodes.size}c | GGUF: ${genRes.speechCodes.size} speech tokens trong ${genRes.elapsedMs} ms")
                         appendLine("NeuCodec Decode: ${waveform24k.size} samples @ 24kHz (${String.format(Locale.US, "%.2fs", durSec)}) trong $decodeMs ms")
                     }
                     OnnxSynthesisResult(
@@ -780,7 +795,11 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
             val sampleIpa = espeakG2p.phonemize("Hôm nay trời trong xanh và mát mẻ.")
             val presetPreview = if (presetVoices.isEmpty()) "(không có)" else {
-                presetVoices.joinToString(" | ") { "${it.id}(${it.referenceCodes.size}c)" }
+                presetVoices.joinToString(" | ") { p ->
+                    val pIpa = phonemizeReferenceText(p.referenceText)
+                    val ipaTag = if (pIpa.isNotBlank()) "ipa=${pIpa.length}ch" else "ipa=RỖNG"
+                    "${p.id}(${p.referenceCodes.size}c,$ipaTag)"
+                }
             }
             val metadata = linkedMapOf(
                 "gguf_special_tokens" to ggufRunner.specialTokenCheckSummary.ifBlank { "(chưa kiểm tra)" },

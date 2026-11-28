@@ -85,6 +85,7 @@ data class PendingDraftClonedVoice(
     val refSpeechTokens: String = "",
     val referenceText: String = "",
     val referenceTextIpa: String = "",
+    val sampleTargetPhones: String = "",
     val first10Tokens: IntArray = IntArray(0),
     val minToken: Int = 0,
     val maxToken: Int = 0,
@@ -838,6 +839,13 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     ) {
         if (_isExtractingVoiceClone.value || samples.isEmpty()) return
         val userRefText = referenceText.trim()
+        if (userRefText.isBlank() || com.example.audio.VietnameseTtsTextNormalizer.countWords(userRefText) < 2) {
+            _draftClonedVoice.value = null
+            val err = "Bắt buộc nhập đầy đủ Lời thoại mẫu (Ref Text) khớp với đoạn âm thanh trước khi tạo giọng (không thể để trống)."
+            _lastAiVerbatimError.value = err
+            _statusMessage.value = err
+            return
+        }
         _isExtractingVoiceClone.value = true
         _lastAiVerbatimError.value = null
         viewModelScope.launch {
@@ -902,6 +910,16 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 val computedRefTextIpa = withContext(Dispatchers.IO) {
                     onnxVoiceEngine.phonemizeReferenceText(userRefText)
                 }
+                if (computedRefTextIpa.isBlank()) {
+                    _draftClonedVoice.value = null
+                    val err = "Không chuyển đổi được Lời thoại mẫu (Ref Text) sang chuỗi IPA (refPhones rỗng). Vui lòng nhập câu tiếng Việt hợp lệ."
+                    _lastAiVerbatimError.value = err
+                    _statusMessage.value = err
+                    return@launch
+                }
+                val computedSampleTargetIpa = withContext(Dispatchers.IO) {
+                    onnxVoiceEngine.phonemizeReferenceText(OnnxModelAssetHelper.AI_VOICE_QUICK_PREVIEW_SENTENCE)
+                }
                 val canonicalRefSpeechTokens = extracted.refSpeechTokens.ifBlank {
                     com.example.audio.VieNeuGgufRunner.formatRefSpeechTokens(refCodes)
                 }
@@ -960,6 +978,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     refSpeechTokens = canonicalRefSpeechTokens,
                     referenceText = userRefText,
                     referenceTextIpa = computedRefTextIpa,
+                    sampleTargetPhones = computedSampleTargetIpa,
                     first10Tokens = extracted.first10Tokens,
                     minToken = extracted.minToken,
                     maxToken = extracted.maxToken,
