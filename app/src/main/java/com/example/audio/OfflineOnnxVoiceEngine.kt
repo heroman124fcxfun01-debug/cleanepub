@@ -181,6 +181,18 @@ class OfflineOnnxVoiceEngine(context: Context) {
         }
     }
 
+    val currentCachedVoiceId: String?
+        get() = if (ggufRunnerLazy.isInitialized()) ggufRunner.currentCachedVoiceId else null
+
+    /**
+     * Clears ALL stale KV-cache & voice prefix state whenever switching voices or starting a preview.
+     */
+    fun clearVoiceKvCache(reason: String = "") {
+        if (ggufRunnerLazy.isInitialized()) {
+            runCatching { ggufRunner.clearKvCacheAndPrefix(reason) }
+        }
+    }
+
     /**
      * Frees >150 MB of native RAM by ensuring `neucodec_encoder.onnx` OrtSession is closed
      * before book reading starts.
@@ -259,11 +271,11 @@ class OfflineOnnxVoiceEngine(context: Context) {
         alreadyPreprocessed: Boolean = false
     ): SpeakerEmbeddingResult = withContext(Dispatchers.IO) {
         ensureInitialized()
-        if (samples.isEmpty()) {
+        if (samples.isEmpty() || AudioFileDecoder.computeRms(samples) < AudioFileDecoder.MIN_VALID_AUDIO_RMS) {
             return@withContext SpeakerEmbeddingResult(
                 embedding = FloatArray(0),
                 usedOnnxEncoder = false,
-                errorMessage = "Dữ liệu âm thanh mẫu bị rỗng."
+                errorMessage = AudioFileDecoder.INVALID_AUDIO_USER_MESSAGE
             )
         }
 
@@ -304,19 +316,31 @@ class OfflineOnnxVoiceEngine(context: Context) {
             )
         }
 
+        if (cleanWindow16k.isEmpty() || AudioFileDecoder.computeRms(cleanWindow16k) < AudioFileDecoder.MIN_VALID_AUDIO_RMS) {
+            return@withContext SpeakerEmbeddingResult(
+                embedding = FloatArray(0),
+                usedOnnxEncoder = false,
+                errorMessage = AudioFileDecoder.INVALID_AUDIO_USER_MESSAGE
+            )
+        }
+
         val encodedRes = neuCodec.encodeReferenceAudio(
             samples = cleanWindow16k,
             sampleRate = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE,
             alreadyPreprocessed = true
         )
         val encoded = encodedRes.getOrNull()
-        if (encoded != null && encoded.codes.size >= 8) {
+        val hasValidCodes = encoded != null &&
+            encoded.codes.size >= NeuCodecOnnxEngine.MIN_VALID_REF_CODES &&
+            !encoded.codes.all { it == 0 } &&
+            encoded.codes.distinct().size > 1
+        if (hasValidCodes && encoded != null) {
             val realEmbedding = encoded.voiceEmbedding?.takeIf { it.isNotEmpty() }
                 ?: OnnxModelAssetHelper.computeAcousticFingerprint(cleanWindow16k)
             val spkTag = if (encoded.voiceEmbedding != null) " • speaker_emb=${encoded.voiceEmbedding.size}D" else ""
             val summary = String.format(
                 Locale.US,
-                "NeuCodec Encoder ONNX: %d mã giọng thật (%.1fs @ 16kHz)%s",
+                "NeuCodec Encoder ONNX: %dc mã giọng thật (%.1fs @ 16kHz)%s",
                 encoded.codes.size,
                 encoded.durationSeconds,
                 spkTag
@@ -332,9 +356,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
             )
         }
 
-        val encErr = encodedRes.exceptionOrNull()?.let {
-            "Lỗi trích xuất giọng thật bằng neucodec_encoder.onnx:\n${OnnxModelAssetHelper.formatFullThrowable(it)}"
-        } ?: "neucodec_encoder.onnx không trích xuất được chuỗi ref_codes hợp lệ từ tệp ghi âm."
+        val encErr = encodedRes.exceptionOrNull()?.message?.takeIf { it.isNotBlank() }
+            ?: AudioFileDecoder.INVALID_AUDIO_USER_MESSAGE
         Log.e(TAG, encErr)
         SpeakerEmbeddingResult(
             embedding = FloatArray(0),
@@ -362,7 +385,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
             speed = 1.0f,
             referenceCodes = preset.referenceCodes,
             referenceText = preset.referenceText,
-            matchedPresetId = preset.id
+            matchedPresetId = preset.id,
+            voiceId = preset.storageId
         )
         val audio = synth.audio ?: return@withContext null
         VoicePreviewCache.savePreviewPcm(
@@ -375,31 +399,36 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
     /**
      * Pre-phonemizes `ref_text` and locks the active voice prefix (`ref_phones` + `ref_codes`)
-     * ONCE before streaming a chapter so the Producer thread never recomputes voice prefix state.
+     * ONCE before streaming a chapter. Automatically clears old KV-cache if `voiceId` changed!
      */
     fun prepareVoiceForStreaming(
         referenceCodes: IntArray? = null,
         referenceText: String? = null,
-        matchedPresetId: String? = null
+        matchedPresetId: String? = null,
+        voiceId: String = ""
     ) {
         if (!ggufRunner.isLoaded) return
         val explicitPreset = matchedPresetId?.takeIf { it.isNotBlank() }?.let { findPresetVoiceById(it) }
         val inferredPreset = explicitPreset ?: findPresetMatchingCodes(referenceCodes)
         val resolvedRefCodes: IntArray
         val resolvedRefText: String
+        val resolvedVoiceId: String
         when {
             inferredPreset != null -> {
                 resolvedRefCodes = inferredPreset.referenceCodes
                 resolvedRefText = inferredPreset.referenceText
+                resolvedVoiceId = voiceId.ifBlank { inferredPreset.storageId }
             }
             referenceCodes != null && referenceCodes.size >= 8 -> {
                 resolvedRefCodes = referenceCodes
                 resolvedRefText = referenceText?.trim().orEmpty()
+                resolvedVoiceId = voiceId.ifBlank { "cloned_${resolvedRefCodes.size}_${resolvedRefCodes.firstOrNull() ?: 0}" }
             }
             else -> {
                 val fallback = presetVoices.firstOrNull { it.referenceCodes.size >= 8 } ?: return
                 resolvedRefCodes = fallback.referenceCodes
                 resolvedRefText = fallback.referenceText
+                resolvedVoiceId = voiceId.ifBlank { fallback.storageId }
             }
         }
         val cleanRefText = VietnameseTtsTextNormalizer.normalizeForTts(resolvedRefText).trim()
@@ -408,16 +437,15 @@ class OfflineOnnxVoiceEngine(context: Context) {
         } else {
             ""
         }
-        ggufRunner.lockVoicePrefix(refPhones = refPhones, refCodes = resolvedRefCodes)
+        ggufRunner.lockVoicePrefix(
+            refPhones = refPhones,
+            refCodes = resolvedRefCodes,
+            voiceId = resolvedVoiceId
+        )
     }
 
     /**
-     * Synthesizes a single Vietnamese text chunk using official `pnnbao97/VieNeu-TTS` GGUF + NeuCodec 24kHz:
-     * 1. Passes the authentic cloned `(ref_text, ref_codes, speaker_embedding)` directly into the prompt
-     *    (or the selected built-in preset if reading with a `voices.json` preset).
-     * 2. Phonemizes `ref_text` (cached per voice) and `target_text` via eSpeak-NG Vietnamese IPA.
-     * 3. Generates `<|speech_N|>` tokens with `VieNeuGgufRunner` (`temperature = 0.8`), stopping immediately on `<|SPEECH_GENERATION_END|>`.
-     * 4. Decodes directly to authentic 24,000 Hz Mono Float32 PCM via `neucodec_decoder.onnx` (NO artificial pitch/formant distortion).
+     * Synthesizes a single Vietnamese text chunk using official `pnnbao97/VieNeu-TTS` GGUF + NeuCodec 24kHz.
      */
     suspend fun synthesizeSentenceDetailed(
         sentence: String,
@@ -425,7 +453,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
         speed: Float = 1.0f,
         referenceCodes: IntArray? = null,
         referenceText: String? = null,
-        matchedPresetId: String? = null
+        matchedPresetId: String? = null,
+        voiceId: String = ""
     ): OnnxSynthesisResult = withContext(Dispatchers.IO) {
         ensureInitialized()
         synthesizeSentenceBlocking(
@@ -434,7 +463,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
             speed = speed,
             referenceCodes = referenceCodes,
             referenceText = referenceText,
-            matchedPresetId = matchedPresetId
+            matchedPresetId = matchedPresetId,
+            voiceId = voiceId
         )
     }
 
@@ -448,7 +478,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
         speed: Float = 1.0f,
         referenceCodes: IntArray? = null,
         referenceText: String? = null,
-        matchedPresetId: String? = null
+        matchedPresetId: String? = null,
+        voiceId: String = ""
     ): OnnxSynthesisResult {
         activeOpsCount.incrementAndGet()
         try {
@@ -523,6 +554,11 @@ class OfflineOnnxVoiceEngine(context: Context) {
             // Tight token budget matched to 80-120 char chunks (~14-18 tokens/Vietnamese syllable)
             val estMaxTokens = (wordCount * 18 + 64).coerceIn(110, 400)
 
+            val resolvedVoiceId = voiceId.trim().ifEmpty {
+                inferredPreset?.storageId
+                    ?: "cloned_${resolvedRefCodes.size}_${resolvedRefCodes.firstOrNull() ?: 0}_${resolvedRefCodes.lastOrNull() ?: 0}"
+            }
+
             val genRes = ggufRunner.generateSpeechCodes(
                 refPhones = refPhones,
                 targetPhones = targetPhones,
@@ -531,7 +567,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 topK = VieNeuGgufRunner.DEFAULT_TOP_K,
                 topP = VieNeuGgufRunner.DEFAULT_TOP_P.toDouble(),
                 repeatPenalty = VieNeuGgufRunner.DEFAULT_REPEAT_PENALTY.toDouble(),
-                maxNewTokens = estMaxTokens
+                maxNewTokens = estMaxTokens,
+                voiceId = resolvedVoiceId
             )
 
             if (genRes.errorMessage != null || genRes.speechCodes.size < 4) {
@@ -783,5 +820,21 @@ class OfflineOnnxVoiceEngine(context: Context) {
     companion object {
         private const val TAG = "VieNeuGgufEngine"
         const val DEFAULT_TTS_OUTPUT_SAMPLE_RATE = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE
+
+        @Volatile
+        private var sharedInstance: OfflineOnnxVoiceEngine? = null
+
+        /**
+         * Process-wide shared singleton so Studio (ViewModel) and BookAudioPlaybackService share ONE
+         * GGUF + NeuCodec Decoder instance in RAM (~300 MB saved on Helio G99) and share one unified
+         * `currentCachedVoiceId` / KV-cache invalidation state.
+         */
+        fun getShared(context: Context): OfflineOnnxVoiceEngine {
+            return sharedInstance ?: synchronized(this) {
+                sharedInstance ?: OfflineOnnxVoiceEngine(context.applicationContext).also {
+                    sharedInstance = it
+                }
+            }
+        }
     }
 }

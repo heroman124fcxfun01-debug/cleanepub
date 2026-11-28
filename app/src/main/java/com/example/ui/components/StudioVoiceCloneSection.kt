@@ -229,7 +229,7 @@ fun StudioVoiceCloneSection(
             localPreviewTarget = null
         } else {
             localPreviewTarget = tag
-            recorder.togglePreviewRecordedSample(
+            recorder.playPreview(
                 samplesOverride = samples,
                 sampleRateOverride = sampleRate,
                 wavPathOverride = wavPath,
@@ -962,7 +962,7 @@ fun StudioVoiceCloneSection(
                     }
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(
-                            text = "✓ Đã tạo \"${draft.name}\" ($tokenCount mã • $modeBadge) — Bấm Nghe thử để kiểm tra, rồi bấm Lưu.",
+                            text = "✓ Đã tạo \"${draft.name} (${tokenCount}c)\" • $modeBadge — Bấm Nghe thử để kiểm tra, rồi bấm Lưu.",
                             fontSize = 10.5.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = IosGreen

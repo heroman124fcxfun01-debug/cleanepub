@@ -261,6 +261,14 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                 )
             }
             val trimmedLen = cleanest16k.size.coerceAtMost(MAX_REF_AUDIO_SAMPLES_16K)
+            // Block silent/corrupt reference audio (RMS < 0.001f) BEFORE peak normalization
+            val inputRms = AudioFileDecoder.computeRms(
+                if (trimmedLen == cleanest16k.size) cleanest16k else cleanest16k.copyOf(trimmedLen)
+            )
+            if (inputRms < AudioFileDecoder.MIN_VALID_AUDIO_RMS) {
+                throw IllegalArgumentException(AudioFileDecoder.INVALID_AUDIO_USER_MESSAGE)
+            }
+
             val paddedLen = ((trimmedLen + HOP_SAMPLES_16K - 1) / HOP_SAMPLES_16K) * HOP_SAMPLES_16K
             val padded = FloatArray(paddedLen)
             System.arraycopy(cleanest16k, 0, padded, 0, trimmedLen)
@@ -354,9 +362,12 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                     val flatCodes = extractedCodes
                         .filter { it in 0..65535 }
                         .toIntArray()
-                    if (flatCodes.size < 8) {
-                        throw IllegalStateException(
-                            "neucodec_encoder.onnx chỉ trích xuất được ${flatCodes.size} token âm thanh (quá ngắn)."
+                    val invalidCodes = flatCodes.size < MIN_VALID_REF_CODES ||
+                        flatCodes.all { it == 0 } ||
+                        flatCodes.distinct().size <= 1
+                    if (invalidCodes) {
+                        throw IllegalArgumentException(
+                            "${AudioFileDecoder.INVALID_AUDIO_USER_MESSAGE} (${flatCodes.size}c)."
                         )
                     }
                     val optionalVoiceEmb = if (embIndex in 0 until result.size()) {
@@ -376,6 +387,9 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                     )
                 }
             } catch (t: Throwable) {
+                if (t is IllegalArgumentException && t.message?.startsWith(AudioFileDecoder.INVALID_AUDIO_USER_MESSAGE) == true) {
+                    throw t
+                }
                 val schema = "Encoder schema: in=[${formatInputs(session)}] | out=[${formatOutputs(session)}] | fed=[${fedShapeDesc.joinToString()}]"
                 Log.e(TAG, "encodeReferenceAudio failed | $schema", t)
                 throw IllegalStateException("$schema\n${t.message ?: t.javaClass.simpleName}", t)
@@ -693,6 +707,7 @@ class NeuCodecOnnxEngine(context: Context? = null) {
         private const val TAG = "NeuCodecOnnx"
         const val ENCODER_SAMPLE_RATE = 16_000
         const val DECODER_SAMPLE_RATE = 24_000
+        const val MIN_VALID_REF_CODES = 30
         private const val HOP_SAMPLES_16K = 320
         private const val MAX_REF_AUDIO_SECONDS = 7
         const val MAX_REF_AUDIO_SAMPLES_16K = 112_000

@@ -63,9 +63,17 @@ class VieNeuGgufRunner(context: Context? = null) {
     private var activeThreads: Int = HELIO_G99_THREADS
     private var activeThreadsBatch: Int = HELIO_G99_THREADS_BATCH
 
-    // Locked voice prefix cache for the active speaker across all sentences in a chapter
+    // Locked voice prefix cache + active cached voice ID across sentences/previews
     @Volatile
     private var cachedVoicePrefix: ActiveVoicePrefixCache? = null
+
+    @Volatile
+    var currentCachedVoiceId: String? = null
+        private set
+
+    @Volatile
+    var cachedPrefixLen: Int = 0
+        private set
 
     @Volatile
     var statusSummary: String = "Chưa nạp model GGUF"
@@ -218,24 +226,61 @@ class VieNeuGgufRunner(context: Context? = null) {
     }
 
     /**
-     * Pre-computes and locks the active voice's serialized prompt prefix (`ref_phones` + `ref_codes`)
-     * ONCE before streaming a chapter so every subsequent sentence reuses the exact cached prefix.
+     * Clears ALL stale KV-cache & voice prefix state (`prefix_len = 0`, `currentCachedVoiceId = null`)
+     * whenever switching to a different voice or starting a voice preview.
      */
-    fun lockVoicePrefix(refPhones: String, refCodes: IntArray): ActiveVoicePrefixCache {
-        return getOrBuildVoicePrefix(refPhones, refCodes).also { cached ->
+    @Synchronized
+    fun clearKvCacheAndPrefix(reason: String = "") {
+        val prevVoice = currentCachedVoiceId
+        cancelActiveGeneration()
+        loadedModel?.let { model ->
+            // Reflection-safe hook in case llama-kotlin-android exposes native clearKvCache/resetContext
+            for (methodName in listOf("clearKvCache", "clearContext", "resetContext", "kvCacheClear")) {
+                val method = runCatching { model.javaClass.getMethod(methodName) }.getOrNull()
+                if (method != null) {
+                    runCatching { method.invoke(model) }
+                    break
+                }
+            }
+        }
+        cachedVoicePrefix = null
+        currentCachedVoiceId = null
+        cachedPrefixLen = 0
+        if (prevVoice != null || reason.isNotBlank()) {
+            Log.i(TAG, "Cleared KV-cache & voice prefix (prevVoice=$prevVoice, prefix_len=0, reason=$reason)")
+        }
+    }
+
+    /**
+     * Pre-computes and locks the active voice's serialized prompt prefix (`ref_phones` + `ref_codes`)
+     * ONCE before streaming a chapter. Automatically clears old KV-cache if `voiceId != currentCachedVoiceId`.
+     */
+    @Synchronized
+    fun lockVoicePrefix(
+        refPhones: String,
+        refCodes: IntArray,
+        voiceId: String = ""
+    ): ActiveVoicePrefixCache {
+        val resolvedId = voiceId.trim().ifEmpty { computeVoiceContentKey(refPhones, refCodes) }
+        if (currentCachedVoiceId != null && currentCachedVoiceId != resolvedId) {
+            clearKvCacheAndPrefix("lockVoicePrefix: $currentCachedVoiceId -> $resolvedId")
+        }
+        return getOrBuildVoicePrefix(resolvedId, refPhones, refCodes).also { cached ->
+            currentCachedVoiceId = resolvedId
+            cachedPrefixLen = cached.estimatedPrefixTokens
             Log.i(
                 TAG,
-                "Locked active voice prefix: key=${cached.cacheKey}, refCodes=${cached.refCodesCount}, " +
-                    "estPrefixTokens=${cached.estimatedPrefixTokens}, n_batch=$activeBatchSize"
+                "Locked active voice prefix: voiceId=$resolvedId, key=${cached.cacheKey}, refCodes=${cached.refCodesCount}, " +
+                    "prefix_len=$cachedPrefixLen, n_batch=$activeBatchSize"
             )
         }
     }
 
     fun clearVoicePrefixLock() {
-        cachedVoicePrefix = null
+        clearKvCacheAndPrefix("clearVoicePrefixLock")
     }
 
-    private fun getOrBuildVoicePrefix(refPhones: String, refCodes: IntArray): ActiveVoicePrefixCache {
+    private fun computeVoiceContentKey(refPhones: String, refCodes: IntArray): String {
         val cleanRefPhones = refPhones.trim()
         val headHash = if (refCodes.isNotEmpty()) {
             var h = refCodes.size
@@ -247,9 +292,19 @@ class VieNeuGgufRunner(context: Context? = null) {
             }
             h
         } else 0
-        val key = "${cleanRefPhones.hashCode()}:${refCodes.size}:$headHash"
+        return "${cleanRefPhones.hashCode()}:${refCodes.size}:$headHash"
+    }
+
+    private fun getOrBuildVoicePrefix(
+        voiceId: String,
+        refPhones: String,
+        refCodes: IntArray
+    ): ActiveVoicePrefixCache {
+        val cleanRefPhones = refPhones.trim()
+        val contentKey = computeVoiceContentKey(cleanRefPhones, refCodes)
+        val key = "$voiceId|$contentKey"
         val existing = cachedVoicePrefix
-        if (existing != null && existing.cacheKey == key) {
+        if (existing != null && existing.cacheKey == key && currentCachedVoiceId == voiceId) {
             return existing
         }
 
@@ -276,6 +331,8 @@ class VieNeuGgufRunner(context: Context? = null) {
             estimatedPrefixTokens = estRefTokens
         ).also {
             cachedVoicePrefix = it
+            currentCachedVoiceId = voiceId
+            cachedPrefixLen = estRefTokens
         }
     }
 
@@ -288,7 +345,8 @@ class VieNeuGgufRunner(context: Context? = null) {
         topK: Int = DEFAULT_TOP_K,
         topP: Double = DEFAULT_TOP_P.toDouble(),
         repeatPenalty: Double = DEFAULT_REPEAT_PENALTY.toDouble(),
-        maxNewTokens: Int = 420
+        maxNewTokens: Int = 420,
+        voiceId: String = ""
     ): GgufGenerationResult {
         val model = loadedModel
         if (model == null || !isLoaded) {
@@ -301,7 +359,11 @@ class VieNeuGgufRunner(context: Context? = null) {
             return GgufGenerationResult(errorMessage = "Chuỗi âm vị mục tiêu trống.")
         }
 
-        val prefix = getOrBuildVoicePrefix(refPhones, refCodes)
+        val resolvedVoiceId = voiceId.trim().ifEmpty { computeVoiceContentKey(refPhones, refCodes) }
+        if (currentCachedVoiceId != null && currentCachedVoiceId != resolvedVoiceId) {
+            clearKvCacheAndPrefix("voice_switch: $currentCachedVoiceId -> $resolvedVoiceId")
+        }
+        val prefix = getOrBuildVoicePrefix(resolvedVoiceId, refPhones, refCodes)
 
         // Exact official pnnbao97/VieNeu-TTS & scripts/test_tts_gguf.py prompt format:
         // ONLY {ref_phones} {target_phones} inside TEXT_PROMPT, followed by FULL {ref_codes_str}.
@@ -465,6 +527,8 @@ class VieNeuGgufRunner(context: Context? = null) {
         val model = loadedModel
         loadedModel = null
         cachedVoicePrefix = null
+        currentCachedVoiceId = null
+        cachedPrefixLen = 0
         if (model != null) {
             runCatching { model.cancelGeneration() }
             runCatching { model.close() }

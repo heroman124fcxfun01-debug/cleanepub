@@ -302,8 +302,7 @@ class VoiceSampleRecorder(context: Context? = null) {
     }
 
     /**
-     * Plays back a standard 44-byte WAV preview via [MediaPlayer] (preferred for guaranteed smooth playback),
-     * or falls back to a properly drained streaming [AudioTrack] for in-memory [FloatArray] audio.
+     * Toggles playback of the recorded/draft preview.
      */
     fun togglePreviewRecordedSample(
         samplesOverride: FloatArray? = null,
@@ -315,6 +314,26 @@ class VoiceSampleRecorder(context: Context? = null) {
             stopPreview()
             return
         }
+        playPreview(
+            samplesOverride = samplesOverride,
+            sampleRateOverride = sampleRateOverride,
+            wavPathOverride = wavPathOverride,
+            pitchOverride = pitchOverride
+        )
+    }
+
+    /**
+     * Stops any active preview and plays a standard 44-byte WAV preview via [MediaPlayer]
+     * (or falls back to streaming [AudioTrack]). Always resets `isPlayingPreview = false`
+     * when playback completes, encounters empty PCM, or fails.
+     */
+    fun playPreview(
+        samplesOverride: FloatArray? = null,
+        sampleRateOverride: Int? = null,
+        wavPathOverride: String? = null,
+        pitchOverride: Float = 1.0f
+    ) {
+        stopPreview()
 
         val resolvedWavPath = wavPathOverride?.takeIf { File(it).exists() && File(it).length() > 44L }
             ?: _uiState.value.previewWavPath?.takeIf { samplesOverride == null && File(it).exists() && File(it).length() > 44L }
@@ -323,17 +342,23 @@ class VoiceSampleRecorder(context: Context? = null) {
         val rate = (sampleRateOverride ?: _uiState.value.sampleRate).coerceAtLeast(8_000)
         val safePitch = pitchOverride.coerceIn(0.82f, 1.22f)
 
-        if (resolvedWavPath == null && (samples == null || samples.isEmpty())) return
+        val hasPlayableSamples = samples != null && samples.isNotEmpty()
+        if (resolvedWavPath == null && !hasPlayableSamples) {
+            _uiState.value = _uiState.value.copy(
+                isPlayingPreview = false,
+                errorMessage = "Không có dữ liệu âm thanh hợp lệ để phát nghe thử."
+            )
+            return
+        }
 
         val myToken = ++activePreviewToken
-        previewJob?.cancel()
         previewJob = scope.launch {
             _uiState.value = _uiState.value.copy(isPlayingPreview = true, errorMessage = null)
             try {
                 // Preferred path: write or reuse a 44-byte PCM-16 WAV and play cleanly with MediaPlayer
                 val wavFileToPlay: File? = when {
                     resolvedWavPath != null -> File(resolvedWavPath)
-                    samples != null && appContext != null -> runCatching {
+                    samples != null && samples.isNotEmpty() && appContext != null -> runCatching {
                         val dir = File(appContext.cacheDir, "voice_previews").apply { mkdirs() }
                         val tmpWav = File(dir, "preview_tmp.wav")
                         AudioFileDecoder.writePcm16MonoWav(tmpWav, samples, rate)
@@ -342,14 +367,21 @@ class VoiceSampleRecorder(context: Context? = null) {
                     else -> null
                 }
 
+                var playedOk = false
                 if (wavFileToPlay != null && wavFileToPlay.exists() && wavFileToPlay.length() > 44L) {
-                    val playedWithMediaPlayer = playWavFileWithMediaPlayer(wavFileToPlay, safePitch)
-                    if (playedWithMediaPlayer) return@launch
+                    playedOk = playWavFileWithMediaPlayer(wavFileToPlay, safePitch)
                 }
 
-                // Fallback path: properly drained streaming AudioTrack (small ring buffer + playbackHeadPosition wait)
-                if (samples != null && samples.isNotEmpty()) {
+                // Fallback path: properly drained streaming AudioTrack
+                if (!playedOk && samples != null && samples.isNotEmpty()) {
                     playFloatWithStreamingAudioTrack(samples, rate, safePitch)
+                    playedOk = true
+                }
+
+                if (!playedOk && myToken == activePreviewToken) {
+                    _uiState.value = _uiState.value.copy(
+                        errorMessage = "Không thể phát tệp âm thanh nghe thử."
+                    )
                 }
             } catch (ce: kotlinx.coroutines.CancellationException) {
                 throw ce

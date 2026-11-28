@@ -76,7 +76,7 @@ class BookAudioPlaybackService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var libraryManager: LibraryManager
     private lateinit var clonedVoiceRepo: ClonedVoiceRepository
-    private val onnxEngineLazy = lazy { OfflineOnnxVoiceEngine(applicationContext) }
+    private val onnxEngineLazy = lazy { OfflineOnnxVoiceEngine.getShared(applicationContext) }
     private val onnxEngine: OfflineOnnxVoiceEngine get() = onnxEngineLazy.value
     private val onnxPlayer = OnnxAudioTrackPlayer()
     private val ambientEngine = AmbientSoundEngine()
@@ -125,6 +125,8 @@ class BookAudioPlaybackService : Service() {
     // Trạng thái nghe thử dạng công tắc (bấm 1 lần nghe, bấm lần 2 tắt ngay)
     private var isPreviewingVoice = false
     private var activePreviewTag: String? = null
+    @Volatile
+    private var activePreviewSessionId = 0L
     private var previewFinalUtteranceId = ""
     private var previewAudioJob: Job? = null
     private var lastPlaybackNotice: String? = null
@@ -905,11 +907,21 @@ class BookAudioPlaybackService : Service() {
             // Giải phóng >150 MB RAM của neucodec_encoder.onnx trước khi bắt đầu luồng đọc sách
             onnxEngine.releaseEncoderMemory()
 
+            val streamVoiceId = resolvedPresetId?.let { OnnxModelAssetHelper.presetStorageId(it) }
+                ?: activeClonedVoice?.id
+                ?: "cloned_${resolvedCodes?.size ?: 0}"
+
+            // Nếu đổi sang giọng khác với giọng đang cache -> xóa sạch KV-Cache cũ & tính lại prefix
+            if (onnxEngine.currentCachedVoiceId != null && onnxEngine.currentCachedVoiceId != streamVoiceId) {
+                onnxEngine.clearVoiceKvCache("chapter_stream_switch_$streamVoiceId")
+            }
+
             // Khóa cố định tiền tố giọng (ref_phones + ref_codes) MỘT LẦN DUY NHẤT trước khi chạy toàn bộ chương
             onnxEngine.prepareVoiceForStreaming(
                 referenceCodes = resolvedCodes,
                 referenceText = resolvedRefText,
-                matchedPresetId = resolvedPresetId
+                matchedPresetId = resolvedPresetId,
+                voiceId = streamVoiceId
             )
 
             val chunks = buildAiChapterChunks(
@@ -958,7 +970,8 @@ class BookAudioPlaybackService : Service() {
                             speed = effectiveSpeed,
                             referenceCodes = resolvedCodes,
                             referenceText = resolvedRefText,
-                            matchedPresetId = resolvedPresetId
+                            matchedPresetId = resolvedPresetId,
+                            voiceId = streamVoiceId
                         )
                         if (!isStillValid() || Thread.currentThread().isInterrupted) break
                         val audio = synthRes.audio
@@ -1231,12 +1244,17 @@ class BookAudioPlaybackService : Service() {
     }
 
     private fun reloadSettingsAndRefreshActiveAudio() {
+        val previousVoiceId = activePrefs.selectedClonedVoiceId
         activePrefs = libraryManager.getReaderPreferences()
         val isAiMode = activePrefs.ttsEngineType == TtsEngineType.AI_TTS
         activeClonedVoice = if (isAiMode) {
             clonedVoiceRepo.findById(activePrefs.selectedClonedVoiceId)
         } else {
             null
+        }
+        // Khi đổi giọng AI trong cài đặt -> xóa sạch toàn bộ KV-Cache của giọng cũ ngay lập tức
+        if (isAiMode && previousVoiceId != activePrefs.selectedClonedVoiceId && onnxEngineLazy.isInitialized()) {
+            onnxEngine.clearVoiceKvCache("settings_voice_changed:$previousVoiceId->${activePrefs.selectedClonedVoiceId}")
         }
         // Khi đổi sang AI Nhân bản -> tắt ngay mọi âm thanh từ Android TTS hệ thống
         if (isAiMode) {
@@ -1284,10 +1302,14 @@ class BookAudioPlaybackService : Service() {
     }
 
     private fun stopVoicePreviewInternal(publish: Boolean) {
+        activePreviewSessionId += 1L
         previewAudioJob?.cancel()
         previewAudioJob = null
         previewFinalUtteranceId = ""
-        if (isPreviewingVoice) {
+        if (onnxEngineLazy.isInitialized() && isPreviewingVoice) {
+            onnxEngine.cancelActiveGeneration()
+        }
+        if (isPreviewingVoice || activePreviewTag != null) {
             isPreviewingVoice = false
             activePreviewTag = null
             onnxPlayer.stopImmediately()
@@ -1397,6 +1419,8 @@ class BookAudioPlaybackService : Service() {
             targetClone != null -> "cloned_${targetClone.id}"
             else -> "preset_default"
         }
+        val sessionId = activePreviewSessionId + 1L
+        activePreviewSessionId = sessionId
         isPreviewingVoice = true
         activePreviewTag = tag
         publishState()
@@ -1405,6 +1429,7 @@ class BookAudioPlaybackService : Service() {
             try {
                 // 1. LUỒNG PHÁT NGAY LẬP TỨC (<50ms, 0ms suy luận AI):
                 // Nếu đã có sẵn tệp cache `filesDir/voice_previews/preview_<voice_id>.wav`, phát trực tiếp!
+                // Nếu tệp cache lỗi/không phát được -> tự động xóa và tổng hợp lại từ đầu.
                 val initialCacheId: String? = when {
                     targetClone != null -> targetClone.id
                     requestedPresetId != null -> OnnxModelAssetHelper.presetStorageId(requestedPresetId)
@@ -1413,16 +1438,20 @@ class BookAudioPlaybackService : Service() {
                 if (initialCacheId != null) {
                     val cachedWav = VoicePreviewCache.getValidPreviewFile(applicationContext, initialCacheId)
                     if (cachedWav != null) {
-                        onnxPlayer.playWavFileBlocking(cachedWav)
-                        return@launch
+                        val playedOk = onnxPlayer.playWavFileBlocking(cachedWav)
+                        if (playedOk || activePreviewSessionId != sessionId) {
+                            return@launch
+                        }
+                        // File cache hỏng hoặc im lặng -> xóa cache lỗi để tổng hợp mới
+                        VoicePreviewCache.deletePreview(applicationContext, initialCacheId)
                     }
                 }
 
-                // 2. Chỉ khi chưa có file cache mới nạp model VieNeu-TTS GGUF + NeuCodec để tổng hợp 1 lần & lưu cache
+                // 2. Nạp model VieNeu-TTS GGUF + NeuCodec để tổng hợp & lưu cache
                 onnxEngine.ensureInitialized()
                 if (!onnxEngine.isFullOnnxSynthesisReady()) {
                     val diag = onnxEngine.getReadinessDiagnostic()
-                    withContext(Dispatchers.Main) {
+                    mainHandler.post {
                         lastPlaybackNotice = "Chưa nạp được VieNeu-TTS GGUF + NeuCodec: $diag"
                         publishState()
                     }
@@ -1441,10 +1470,19 @@ class BookAudioPlaybackService : Service() {
                     refText = targetClone.referenceText
                     matchedPresetId = targetClone.matchedPresetId.takeIf { it.isNotBlank() }
                     resolvedCacheId = targetClone.id
+
+                    // Chặn giọng lỗi thiếu ref_codes (<30c) hoặc toàn số 0 trước khi sinh âm
+                    if (refCodes == null || refCodes.size < com.example.audio.NeuCodecOnnxEngine.MIN_VALID_REF_CODES || refCodes.all { it == 0 }) {
+                        mainHandler.post {
+                            lastPlaybackNotice = "Giọng \"${targetClone.name}\" thiếu mã giọng hợp lệ (${refCodes?.size ?: 0}c). Vui lòng xóa và tạo lại từ file rõ tiếng 5-8 giây."
+                            publishState()
+                        }
+                        return@launch
+                    }
                 } else {
                     val preset = onnxEngine.findPresetVoiceById(requestedPresetId)
                     if (preset == null) {
-                        withContext(Dispatchers.Main) {
+                        mainHandler.post {
                             lastPlaybackNotice = "Không tìm thấy giọng mẫu hợp lệ trong voices.json để nghe thử."
                             publishState()
                         }
@@ -1454,8 +1492,11 @@ class BookAudioPlaybackService : Service() {
                     // Kiểm tra lại cache nếu trước đó requestedPresetId là null (giọng mặc định)
                     val defaultCachedWav = VoicePreviewCache.getValidPreviewFile(applicationContext, resolvedCacheId)
                     if (defaultCachedWav != null) {
-                        onnxPlayer.playWavFileBlocking(defaultCachedWav)
-                        return@launch
+                        val playedOk = onnxPlayer.playWavFileBlocking(defaultCachedWav)
+                        if (playedOk || activePreviewSessionId != sessionId) {
+                            return@launch
+                        }
+                        VoicePreviewCache.deletePreview(applicationContext, resolvedCacheId)
                     }
                     embedding = preset.voiceEmbedding ?: FloatArray(0)
                     refCodes = preset.referenceCodes
@@ -1463,17 +1504,21 @@ class BookAudioPlaybackService : Service() {
                     matchedPresetId = preset.id
                 }
 
+                // Bắt buộc xóa sạch toàn bộ KV-Cache cũ mỗi khi nghe thử giọng khác hoặc bắt đầu nghe thử mới!
+                onnxEngine.clearVoiceKvCache("preview_voice_$resolvedCacheId")
+
                 val synthResult = onnxEngine.synthesizeSentenceDetailed(
                     sentence = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
                     speakerEmbedding = embedding,
                     speed = 1.0f,
                     referenceCodes = refCodes,
                     referenceText = refText,
-                    matchedPresetId = matchedPresetId
+                    matchedPresetId = matchedPresetId,
+                    voiceId = resolvedCacheId
                 )
 
                 val synthesized = synthResult.audio
-                if (synthesized != null) {
+                if (synthesized != null && synthesized.pcmFloat.isNotEmpty() && activePreviewSessionId == sessionId) {
                     // Lưu cache `preview_<voice_id>.wav` để mọi lần bấm "Nghe thử" sau phát ngay trong <50ms!
                     val savedWav = VoicePreviewCache.savePreviewPcm(
                         context = applicationContext,
@@ -1481,9 +1526,12 @@ class BookAudioPlaybackService : Service() {
                         samples = synthesized.pcmFloat,
                         sampleRate = synthesized.sampleRate
                     )
-                    if (savedWav != null) {
+                    val playedFromWav = if (savedWav != null) {
                         onnxPlayer.playWavFileBlocking(savedWav)
                     } else {
+                        false
+                    }
+                    if (!playedFromWav && activePreviewSessionId == sessionId) {
                         onnxPlayer.playBlocking(
                             samples = synthesized.pcmFloat,
                             sampleRate = synthesized.sampleRate,
@@ -1491,16 +1539,26 @@ class BookAudioPlaybackService : Service() {
                             pitch = 1.0f
                         )
                     }
-                } else {
-                    val errDetail = synthResult.errorMessage ?: "Không thể sinh sóng âm 24kHz từ GGUF + NeuCodec."
-                    withContext(Dispatchers.Main) {
+                } else if (activePreviewSessionId == sessionId) {
+                    val errDetail = synthResult.errorMessage ?: "Không thể sinh sóng âm 24kHz từ GGUF + NeuCodec (PCM rỗng)."
+                    mainHandler.post {
                         lastPlaybackNotice = "Lỗi tổng hợp VieNeu nghe thử: $errDetail"
                         publishState()
                     }
                 }
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                if (activePreviewSessionId == sessionId) {
+                    mainHandler.post {
+                        lastPlaybackNotice = "Lỗi nghe thử giọng AI: ${t.message ?: t.javaClass.simpleName}"
+                        publishState()
+                    }
+                }
             } finally {
-                withContext(Dispatchers.Main) {
-                    if (activePreviewTag == tag) {
+                // Luôn reset nút "Dừng" -> "Nghe thử" qua mainHandler.post (không bị nuốt khi coroutine hủy!)
+                mainHandler.post {
+                    if (activePreviewSessionId == sessionId || activePreviewTag == tag) {
                         isPreviewingVoice = false
                         activePreviewTag = null
                         publishState()
@@ -1844,7 +1902,8 @@ class BookAudioPlaybackService : Service() {
         }
         ttsEngine = null
         if (onnxEngineLazy.isInitialized()) {
-            runCatching { onnxEngine.close() }
+            runCatching { onnxEngine.cancelActiveGeneration() }
+            runCatching { onnxEngine.releaseEncoderMemory() }
         }
         serviceScope.cancel()
         super.onDestroy()

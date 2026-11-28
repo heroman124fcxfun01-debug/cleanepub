@@ -18,6 +18,7 @@ import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.min
+import kotlin.math.sqrt
 
 data class ImportedVoiceSample(
     val displayName: String,
@@ -28,13 +29,16 @@ data class ImportedVoiceSample(
 )
 
 /**
- * 100% Offline Android Audio File Decoder (`MediaExtractor` + `MediaCodec` + direct RIFF/WAV parser).
+ * 100% Offline Standard Android Audio File Decoder (`MediaExtractor` + `MediaCodec`).
  *
- * - Decodes MP3, M4A, AAC, OGG, FLAC, and WAV (8/16/24/32-bit PCM & 32-bit IEEE Float) cleanly to raw PCM.
- * - Downmixes multi-channel audio accurately to 1-channel Mono and resamples to exact 16,000 Hz
- *   normalized `FloatArray` in `[-1.0f, 1.0f]` ready for `speaker_encoder.onnx`.
- * - Simultaneously writes a standard 16-bit PCM Mono WAV file (with full 44-byte RIFF/WAVE header)
- *   so "Nghe thử" plays the exact original voice smoothly via `MediaPlayer` or `AudioTrack`.
+ * - Decodes ALL imported audio formats (`.wav`, `.mp3`, `.m4a`, `.aac`, `.ogg`, `.flac`) exclusively
+ *   via Android's standard [MediaExtractor] + [MediaCodec] (ZERO manual WAV header parsing).
+ * - Reads real `sampleRate`, `channelCount`, and `pcmEncoding` from [MediaFormat] (updating live on
+ *   [MediaCodec.INFO_OUTPUT_FORMAT_CHANGED]).
+ * - Explicitly downmixes Stereo (`channelCount == 2`) via `(left + right) / 2.0f` and multi-channel
+ *   via average across channels so duration & pitch are NEVER distorted.
+ * - Performs exact linear resampling from original `sampleRate` (e.g. 44100/48000 Hz) to exact
+ *   `16000 Hz` Mono Float32 `[-1.0f, 1.0f]` ready for `neucodec_encoder.onnx`.
  */
 object AudioFileDecoder {
 
@@ -47,11 +51,33 @@ object AudioFileDecoder {
     const val CLONE_MAX_SAMPLES_16K = 112_000
     const val ABSOLUTE_SILENCE_THRESHOLD = 0.005f
     const val MAX_EDGE_SILENCE_TRIM_SECONDS = 0.15f
+    const val MIN_VALID_AUDIO_RMS = 0.001f
+
+    const val INVALID_AUDIO_USER_MESSAGE =
+        "Không giải mã được âm thanh từ file này, vui lòng chọn file rõ tiếng dài 5-8 giây"
 
     private data class DecodedRawMono(
         val monoFloat: FloatArray,
         val sampleRate: Int
     )
+
+    /**
+     * Computes Root-Mean-Square (RMS) amplitude of a Float32 PCM array to detect silent/corrupt audio.
+     */
+    fun computeRms(samples: FloatArray): Float {
+        if (samples.isEmpty()) return 0f
+        var sqSum = 0.0
+        var finiteCount = 0
+        for (v in samples) {
+            if (v.isFinite()) {
+                val d = v.toDouble()
+                sqSum += d * d
+                finiteCount++
+            }
+        }
+        if (finiteCount == 0) return 0f
+        return sqrt(sqSum / finiteCount).toFloat()
+    }
 
     suspend fun decodeAudioUriToMonoFloat(
         context: Context,
@@ -70,22 +96,26 @@ object AudioFileDecoder {
                 ?.ifBlank { "Giọng đã nhập" }
                 ?: "Giọng đã nhập"
 
-            // 1. Try direct RIFF/WAVE PCM parser first if file starts with "RIFF...WAVE"
-            //    (handles 8/16/24/32-bit PCM & 32-bit Float WAV without codec quirks).
-            val rawDecoded: DecodedRawMono = tryDecodeUncompressedWav(context, uri)
-                ?: decodeWithMediaExtractorAndCodec(context, uri)
+            // Always decode via standard Android MediaExtractor + MediaCodec (never manual WAV headers)
+            val rawDecoded: DecodedRawMono = decodeWithMediaExtractorAndCodec(context, uri)
 
             if (rawDecoded.monoFloat.isEmpty()) {
-                error("Không giải mã được sóng âm PCM từ tệp đã chọn.")
+                error(INVALID_AUDIO_USER_MESSAGE)
+            }
+
+            // Reject silent/corrupt audio BEFORE peak normalization amplifies noise
+            val rawRms = computeRms(rawDecoded.monoFloat)
+            if (rawRms < MIN_VALID_AUDIO_RMS) {
+                error(INVALID_AUDIO_USER_MESSAGE)
             }
 
             val rawDurationSec = rawDecoded.monoFloat.size.toFloat() /
                 rawDecoded.sampleRate.coerceAtLeast(8_000).toFloat()
             if (rawDurationSec < MIN_DECODE_SECONDS) {
-                error("Tệp âm thanh quá ngắn (${String.format("%.1f", rawDurationSec)}s — cần tối thiểu 2–8 giây giọng nói rõ ràng).")
+                error("Tệp âm thanh quá ngắn (${String.format("%.1f", rawDurationSec)}s — vui lòng chọn file rõ tiếng dài 5-8 giây).")
             }
 
-            // 2. Cap to MAX_DECODE_SECONDS, remove DC offset, normalize [-1f, 1f], and resample to 16kHz Mono
+            // Cap to MAX_DECODE_SECONDS, remove DC offset, normalize [-1f, 1f], and linear-resample to exact 16kHz Mono
             val maxSourceSamples = (rawDecoded.sampleRate * MAX_DECODE_SECONDS).toInt()
                 .coerceAtLeast(rawDecoded.sampleRate)
             val cappedMono = if (rawDecoded.monoFloat.size > maxSourceSamples) {
@@ -100,17 +130,22 @@ object AudioFileDecoder {
                 targetRate = safeTargetRate
             )
 
-            // Automatically trim silence & select the cleanest 5-8s speech segment for NeuCodec Encoder ONNX
+            // Trim ONLY absolute silence (< 0.005f, max 0.15s) & cap strictly at 7.0s (112,000 samples @ 16kHz)
             val cleanest16k = extractCleanestSpeechWindow16k(
                 samples = normalized16k,
                 sampleRate = safeTargetRate,
                 minSeconds = CLONE_MIN_WINDOW_SECONDS,
-                maxSeconds = CLONE_MAX_WINDOW_SECONDS
+                maxSeconds = CLONE_MAX_WINDOW_SECONDS,
+                trimEdgeMicNoiseSeconds = MAX_EDGE_SILENCE_TRIM_SECONDS
             )
+
+            if (cleanest16k.isEmpty() || computeRms(cleanest16k) < MIN_VALID_AUDIO_RMS) {
+                error(INVALID_AUDIO_USER_MESSAGE)
+            }
 
             val finalDuration = cleanest16k.size.toFloat() / safeTargetRate.toFloat()
 
-            // 3. Write a standard 16-bit PCM Mono WAV file with full 44-byte RIFF/WAVE header for clean preview playback
+            // Write a standard 16-bit PCM Mono WAV file with full 44-byte RIFF/WAVE header for clean preview playback
             val previewDir = File(context.applicationContext.cacheDir, "voice_previews").apply { mkdirs() }
             cleanupOldTempPreviews(previewDir, keepLatest = 4)
             val previewWavFile = File(previewDir, "import_${System.currentTimeMillis()}.wav")
@@ -196,9 +231,14 @@ object AudioFileDecoder {
     }
 
     /**
-     * Decodes any Android-supported compressed/uncompressed audio file (MP3, M4A, AAC, OGG, FLAC, WAV)
-     * via [MediaExtractor] + [MediaCodec], respecting dynamic [MediaCodec.INFO_OUTPUT_FORMAT_CHANGED]
-     * and all PCM encodings (16-bit, 32-bit Float, 8-bit, 24-bit, 32-bit int).
+     * Decodes ANY Android-supported audio file (`.wav`, `.mp3`, `.m4a`, `.aac`, `.ogg`, `.flac`)
+     * via standard [MediaExtractor] + [MediaCodec]:
+     * - Reads real `sampleRate` and `channelCount` from [MediaFormat] and refreshes them whenever
+     *   [MediaCodec.INFO_OUTPUT_FORMAT_CHANGED] or `codec.outputFormat` reports updated values.
+     * - Defaults output encoding to `ENCODING_PCM_16BIT` (standard MediaCodec PCM output) unless
+     *   `codec.outputFormat` explicitly declares a different `KEY_PCM_ENCODING`.
+     * - Downmixes Stereo (`channelCount == 2`) strictly via `(left + right) / 2.0f` and multi-channel
+     *   via average across channels — NEVER interleaving L/R as consecutive mono samples.
      */
     private fun decodeWithMediaExtractorAndCodec(
         context: Context,
@@ -220,12 +260,12 @@ object AudioFileDecoder {
                 }
             }
             if (audioTrackIndex < 0 || trackFormat == null) {
-                error("Không tìm thấy luồng âm thanh hợp lệ trong tệp đã chọn.")
+                error(INVALID_AUDIO_USER_MESSAGE)
             }
 
             extractor.selectTrack(audioTrackIndex)
             val mime = trackFormat.getString(MediaFormat.KEY_MIME)
-                ?: error("Định dạng âm thanh không được hỗ trợ.")
+                ?: error(INVALID_AUDIO_USER_MESSAGE)
 
             var sourceSampleRate = if (trackFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
                 trackFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE).coerceAtLeast(8_000)
@@ -237,14 +277,10 @@ object AudioFileDecoder {
             } else {
                 1
             }
-            var pcmEncoding = if (trackFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
-                trackFormat.getInteger(MediaFormat.KEY_PCM_ENCODING)
-            } else {
-                AudioFormat.ENCODING_PCM_16BIT
-            }
+            // MediaCodec always outputs PCM 16-bit unless outputFormat explicitly sets KEY_PCM_ENCODING
+            var pcmEncoding = AudioFormat.ENCODING_PCM_16BIT
 
-            // Dynamic growable float buffer (prevents premature cutoff if INFO_OUTPUT_FORMAT_CHANGED alters sampleRate)
-            var monoBuffer = FloatArray((sourceSampleRate * 4).coerceAtLeast(32_000))
+            var monoBuffer = FloatArray((sourceSampleRate * 6).coerceAtLeast(48_000))
             var totalMonoSamples = 0
             fun maxAllowedSamples(): Int = (sourceSampleRate * (MAX_DECODE_SECONDS + 0.5)).toInt()
                 .coerceAtLeast(16_000)
@@ -261,19 +297,185 @@ object AudioFileDecoder {
                 monoBuffer[totalMonoSamples++] = v
             }
 
-            codec = MediaCodec.createDecoderByType(mime)
-            codec.configure(trackFormat, null, null, 0)
-            codec.start()
+            fun decodePcmBytesToMono(
+                chunk: ByteArray,
+                size: Int,
+                chCount: Int,
+                encoding: Int
+            ) {
+                if (size <= 0) return
+                val ch = chCount.coerceAtLeast(1)
+                val capLimit = maxAllowedSamples()
+                val bb = ByteBuffer.wrap(chunk, 0, size).order(ByteOrder.LITTLE_ENDIAN)
+
+                when (encoding) {
+                    AudioFormat.ENCODING_PCM_FLOAT -> {
+                        val frames = (size / 4) / ch
+                        for (f in 0 until frames) {
+                            if (totalMonoSamples >= capLimit) break
+                            val mono = if (ch == 1) {
+                                bb.float
+                            } else if (ch == 2) {
+                                (bb.float + bb.float) / 2.0f
+                            } else {
+                                var sum = 0f
+                                for (c in 0 until ch) sum += bb.float
+                                sum / ch.toFloat()
+                            }
+                            appendMonoSample(mono.coerceIn(-1f, 1f))
+                        }
+                    }
+
+                    AudioFormat.ENCODING_PCM_8BIT -> {
+                        val frames = size / ch
+                        for (f in 0 until frames) {
+                            if (totalMonoSamples >= capLimit) break
+                            val mono = if (ch == 1) {
+                                ((bb.get().toInt() and 0xFF) - 128) / 128f
+                            } else if (ch == 2) {
+                                val left = ((bb.get().toInt() and 0xFF) - 128) / 128f
+                                val right = ((bb.get().toInt() and 0xFF) - 128) / 128f
+                                (left + right) / 2.0f
+                            } else {
+                                var sum = 0f
+                                for (c in 0 until ch) {
+                                    sum += ((bb.get().toInt() and 0xFF) - 128) / 128f
+                                }
+                                sum / ch.toFloat()
+                            }
+                            appendMonoSample(mono.coerceIn(-1f, 1f))
+                        }
+                    }
+
+                    else -> {
+                        val is24Bit = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                            encoding == AudioFormat.ENCODING_PCM_24BIT_PACKED
+                        val is32Bit = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                            encoding == AudioFormat.ENCODING_PCM_32BIT
+                        when {
+                            is24Bit -> {
+                                val frames = size / (3 * ch)
+                                var idx = 0
+                                for (f in 0 until frames) {
+                                    if (totalMonoSamples >= capLimit) break
+                                    var sum = 0f
+                                    for (c in 0 until ch) {
+                                        val b0 = chunk[idx].toInt() and 0xFF
+                                        val b1 = chunk[idx + 1].toInt() and 0xFF
+                                        val b2 = chunk[idx + 2].toInt()
+                                        idx += 3
+                                        val sample24 = b0 or (b1 shl 8) or (b2 shl 16)
+                                        sum += sample24 / 8_388_608f
+                                    }
+                                    appendMonoSample((sum / ch.toFloat()).coerceIn(-1f, 1f))
+                                }
+                            }
+
+                            is32Bit -> {
+                                val frames = (size / 4) / ch
+                                for (f in 0 until frames) {
+                                    if (totalMonoSamples >= capLimit) break
+                                    var sum = 0.0
+                                    for (c in 0 until ch) {
+                                        sum += bb.int.toDouble() / 2_147_483_648.0
+                                    }
+                                    appendMonoSample((sum / ch.toDouble()).toFloat().coerceIn(-1f, 1f))
+                                }
+                            }
+
+                            else -> {
+                                // Standard MediaCodec ENCODING_PCM_16BIT (signed 16-bit LE)
+                                val frames = (size / 2) / ch
+                                for (f in 0 until frames) {
+                                    if (totalMonoSamples >= capLimit) break
+                                    val mono = if (ch == 1) {
+                                        bb.short / 32768f
+                                    } else if (ch == 2) {
+                                        val left = bb.short / 32768f
+                                        val right = bb.short / 32768f
+                                        (left + right) / 2.0f
+                                    } else {
+                                        var sum = 0f
+                                        for (c in 0 until ch) sum += bb.short / 32768f
+                                        sum / ch.toFloat()
+                                    }
+                                    appendMonoSample(mono.coerceIn(-1f, 1f))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Create and configure MediaCodec decoder for the detected MIME type
+            val createdCodec = runCatching {
+                MediaCodec.createDecoderByType(mime).also { mc ->
+                    mc.configure(trackFormat, null, null, 0)
+                    mc.start()
+                }
+            }.getOrNull()
+
+            if (createdCodec == null) {
+                // Edge-device fallback ONLY if audio/raw decoder is absent: read PCM directly from MediaExtractor
+                if (mime.equals("audio/raw", ignoreCase = true)) {
+                    val rawEnc = if (trackFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                        trackFormat.getInteger(MediaFormat.KEY_PCM_ENCODING)
+                    } else {
+                        AudioFormat.ENCODING_PCM_16BIT
+                    }
+                    val bufSize = if (trackFormat.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
+                        trackFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE).coerceIn(16_384, 262_144)
+                    } else {
+                        65_536
+                    }
+                    val directBuf = ByteBuffer.allocate(bufSize)
+                    val byteChunk = ByteArray(bufSize)
+                    while (totalMonoSamples < maxAllowedSamples()) {
+                        directBuf.clear()
+                        val readBytes = extractor.readSampleData(directBuf, 0)
+                        if (readBytes <= 0) break
+                        directBuf.position(0)
+                        directBuf.limit(readBytes)
+                        directBuf.get(byteChunk, 0, readBytes)
+                        decodePcmBytesToMono(byteChunk, readBytes, channelCount, rawEnc)
+                        if (!extractor.advance()) break
+                    }
+                    return DecodedRawMono(
+                        monoFloat = monoBuffer.copyOf(totalMonoSamples),
+                        sampleRate = sourceSampleRate
+                    )
+                }
+                error(INVALID_AUDIO_USER_MESSAGE)
+            }
+
+            codec = createdCodec
+
+            fun syncOutputFormat(outFmt: MediaFormat) {
+                if (outFmt.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                    sourceSampleRate = outFmt.getInteger(MediaFormat.KEY_SAMPLE_RATE).coerceAtLeast(8_000)
+                }
+                if (outFmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                    channelCount = outFmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
+                }
+                pcmEncoding = if (outFmt.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                    outFmt.getInteger(MediaFormat.KEY_PCM_ENCODING)
+                } else {
+                    AudioFormat.ENCODING_PCM_16BIT
+                }
+            }
 
             val bufferInfo = MediaCodec.BufferInfo()
             var sawInputEos = false
             var sawOutputEos = false
-            var emptyPolls = 0
+            var outputFormatSynced = false
+            var idlePolls = 0
 
-            while (!sawOutputEos && totalMonoSamples < maxAllowedSamples() && emptyPolls < 400) {
+            while (!sawOutputEos && totalMonoSamples < maxAllowedSamples() && idlePolls < 600) {
+                var madeProgress = false
                 if (!sawInputEos) {
                     val inIdx = codec.dequeueInputBuffer(10_000L)
                     if (inIdx >= 0) {
+                        madeProgress = true
                         val inBuf = codec.getInputBuffer(inIdx)
                         val sampleSize = if (inBuf != null) {
                             inBuf.clear()
@@ -301,94 +503,18 @@ object AudioFileDecoder {
                 val outIdx = codec.dequeueOutputBuffer(bufferInfo, 10_000L)
                 when {
                     outIdx >= 0 -> {
-                        emptyPolls = 0
+                        madeProgress = true
+                        if (!outputFormatSynced) {
+                            runCatching { syncOutputFormat(codec.outputFormat) }
+                            outputFormatSynced = true
+                        }
                         val outBuf = codec.getOutputBuffer(outIdx)
                         if (outBuf != null && bufferInfo.size > 0) {
                             val chunk = ByteArray(bufferInfo.size)
                             outBuf.position(bufferInfo.offset)
                             outBuf.limit(bufferInfo.offset + bufferInfo.size)
                             outBuf.get(chunk)
-
-                            val bb = ByteBuffer.wrap(chunk).order(ByteOrder.LITTLE_ENDIAN)
-                            val capLimit = maxAllowedSamples()
-                            val ch = channelCount.coerceAtLeast(1)
-
-                            when (pcmEncoding) {
-                                AudioFormat.ENCODING_PCM_FLOAT -> {
-                                    val floatCount = chunk.size / 4
-                                    val frames = floatCount / ch
-                                    for (f in 0 until frames) {
-                                        if (totalMonoSamples >= capLimit) break
-                                        var sum = 0f
-                                        for (c in 0 until ch) {
-                                            sum += bb.float
-                                        }
-                                        appendMonoSample((sum / ch).coerceIn(-1f, 1f))
-                                    }
-                                }
-
-                                AudioFormat.ENCODING_PCM_8BIT -> {
-                                    val frames = chunk.size / ch
-                                    for (f in 0 until frames) {
-                                        if (totalMonoSamples >= capLimit) break
-                                        var sum = 0f
-                                        for (c in 0 until ch) {
-                                            val u = bb.get().toInt() and 0xFF
-                                            sum += (u - 128) / 128f
-                                        }
-                                        appendMonoSample((sum / ch).coerceIn(-1f, 1f))
-                                    }
-                                }
-
-                                else -> {
-                                    val is24Bit = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                                        pcmEncoding == AudioFormat.ENCODING_PCM_24BIT_PACKED
-                                    val is32Bit = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                                        pcmEncoding == AudioFormat.ENCODING_PCM_32BIT
-                                    when {
-                                        is24Bit -> {
-                                            val frames = chunk.size / (3 * ch)
-                                            var idx = 0
-                                            for (f in 0 until frames) {
-                                                if (totalMonoSamples >= capLimit) break
-                                                var sum = 0f
-                                                for (c in 0 until ch) {
-                                                    val b0 = chunk[idx].toInt() and 0xFF
-                                                    val b1 = chunk[idx + 1].toInt() and 0xFF
-                                                    val b2 = chunk[idx + 2].toInt()
-                                                    idx += 3
-                                                    val sample24 = b0 or (b1 shl 8) or (b2 shl 16)
-                                                    sum += sample24 / 8_388_608f
-                                                }
-                                                appendMonoSample((sum / ch).coerceIn(-1f, 1f))
-                                            }
-                                        }
-                                        is32Bit -> {
-                                            val frames = (chunk.size / 4) / ch
-                                            for (f in 0 until frames) {
-                                                if (totalMonoSamples >= capLimit) break
-                                                var sum = 0f
-                                                for (c in 0 until ch) {
-                                                    sum += (bb.int.toDouble() / 2_147_483_648.0).toFloat()
-                                                }
-                                                appendMonoSample((sum / ch).coerceIn(-1f, 1f))
-                                            }
-                                        }
-                                        else -> {
-                                            // Default ENCODING_PCM_16BIT (signed 16-bit LE)
-                                            val frames = (chunk.size / 2) / ch
-                                            for (f in 0 until frames) {
-                                                if (totalMonoSamples >= capLimit) break
-                                                var sum = 0f
-                                                for (c in 0 until ch) {
-                                                    sum += bb.short / 32768f
-                                                }
-                                                appendMonoSample((sum / ch).coerceIn(-1f, 1f))
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            decodePcmBytesToMono(chunk, chunk.size, channelCount, pcmEncoding)
                         }
                         codec.releaseOutputBuffer(outIdx, false)
                         if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
@@ -397,22 +523,17 @@ object AudioFileDecoder {
                     }
 
                     outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                        emptyPolls = 0
-                        val outFmt = codec.outputFormat
-                        if (outFmt.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
-                            sourceSampleRate = outFmt.getInteger(MediaFormat.KEY_SAMPLE_RATE).coerceAtLeast(8_000)
-                        }
-                        if (outFmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
-                            channelCount = outFmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
-                        }
-                        if (outFmt.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
-                            pcmEncoding = outFmt.getInteger(MediaFormat.KEY_PCM_ENCODING)
-                        }
+                        madeProgress = true
+                        syncOutputFormat(codec.outputFormat)
+                        outputFormatSynced = true
                     }
 
                     outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                        if (sawInputEos) emptyPolls++ else emptyPolls++
+                        if (!madeProgress) idlePolls++
                     }
+                }
+                if (madeProgress) {
+                    idlePolls = 0
                 }
             }
 
@@ -428,106 +549,9 @@ object AudioFileDecoder {
     }
 
     /**
-     * Direct RIFF/WAVE parser for uncompressed PCM (format 1: 8/16/24/32-bit) and IEEE Float (format 3: 32-bit).
-     * Returns `null` if the file is not a standard uncompressed WAV (so [MediaExtractor] handles it).
-     */
-    private fun tryDecodeUncompressedWav(context: Context, uri: Uri): DecodedRawMono? {
-        return runCatching {
-            val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
-                // Read up to 20 MB max for WAV header + audio data
-                val cap = 20 * 1024 * 1024
-                val buf = ByteArray(16_384)
-                val out = java.io.ByteArrayOutputStream()
-                var total = 0
-                while (total < cap) {
-                    val read = input.read(buf, 0, min(buf.size, cap - total))
-                    if (read <= 0) break
-                    out.write(buf, 0, read)
-                    total += read
-                }
-                out.toByteArray()
-            } ?: return null
-
-            if (bytes.size < 44) return null
-            if (bytes[0] != 'R'.code.toByte() || bytes[1] != 'I'.code.toByte() ||
-                bytes[2] != 'F'.code.toByte() || bytes[3] != 'F'.code.toByte() ||
-                bytes[8] != 'W'.code.toByte() || bytes[9] != 'A'.code.toByte() ||
-                bytes[10] != 'V'.code.toByte() || bytes[11] != 'E'.code.toByte()
-            ) {
-                return null
-            }
-
-            val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-            var pos = 12
-            var audioFormat = -1
-            var numChannels = 1
-            var sampleRate = 0
-            var bitsPerSample = 0
-            var dataOffset = -1
-            var dataSize = 0
-
-            while (pos + 8 <= bytes.size) {
-                val id = String(bytes, pos, 4, Charsets.US_ASCII)
-                val chunkSize = bb.getInt(pos + 4).coerceAtLeast(0)
-                val chunkStart = pos + 8
-                if (id == "fmt " && chunkSize >= 16 && chunkStart + 16 <= bytes.size) {
-                    audioFormat = bb.getShort(chunkStart).toInt() and 0xFFFF
-                    numChannels = (bb.getShort(chunkStart + 2).toInt() and 0xFFFF).coerceAtLeast(1)
-                    sampleRate = bb.getInt(chunkStart + 4)
-                    bitsPerSample = bb.getShort(chunkStart + 14).toInt() and 0xFFFF
-                } else if (id == "data") {
-                    dataOffset = chunkStart
-                    dataSize = min(chunkSize, bytes.size - chunkStart)
-                    break
-                }
-                pos = chunkStart + chunkSize + (chunkSize and 1)
-            }
-
-            // Only handle linear PCM (1) and IEEE float (3) directly
-            if ((audioFormat != 1 && audioFormat != 3) || sampleRate < 8_000 || dataOffset < 0 || dataSize <= 0) {
-                return null
-            }
-            val bytesPerSample = bitsPerSample / 8
-            if (bytesPerSample !in setOf(1, 2, 3, 4)) return null
-
-            val frameSize = bytesPerSample * numChannels
-            val totalFrames = min(
-                dataSize / frameSize,
-                (sampleRate * (MAX_DECODE_SECONDS + 0.5)).toInt()
-            )
-            if (totalFrames <= 0) return null
-
-            val mono = FloatArray(totalFrames)
-            var cursor = dataOffset
-            for (f in 0 until totalFrames) {
-                var sum = 0f
-                for (c in 0 until numChannels) {
-                    val sample = when {
-                        audioFormat == 3 && bitsPerSample == 32 -> bb.getFloat(cursor)
-                        bitsPerSample == 8 -> ((bytes[cursor].toInt() and 0xFF) - 128) / 128f
-                        bitsPerSample == 16 -> bb.getShort(cursor) / 32768f
-                        bitsPerSample == 24 -> {
-                            val b0 = bytes[cursor].toInt() and 0xFF
-                            val b1 = bytes[cursor + 1].toInt() and 0xFF
-                            val b2 = bytes[cursor + 2].toInt()
-                            (b0 or (b1 shl 8) or (b2 shl 16)) / 8_388_608f
-                        }
-                        bitsPerSample == 32 -> (bb.getInt(cursor).toDouble() / 2_147_483_648.0).toFloat()
-                        else -> 0f
-                    }
-                    cursor += bytesPerSample
-                    sum += sample
-                }
-                mono[f] = (sum / numChannels).coerceIn(-1f, 1f)
-            }
-
-            DecodedRawMono(monoFloat = mono, sampleRate = sampleRate)
-        }.getOrNull()
-    }
-
-    /**
-     * Removes DC offset, applies gentle peak normalization ([-0.92f, 0.92f]), and resamples cleanly
-     * with box-filter anti-aliasing when downsampling (e.g. 48kHz/44.1kHz -> 16kHz).
+     * Removes DC offset, normalizes cleanly to `[-0.92f, 0.92f]`, and performs exact linear resampling
+     * from `sourceRate` (e.g. 44100 Hz or 48000 Hz) to `targetRate` (`16000 Hz`), preserving 100% of
+     * the speaker's original pitch and speaking speed.
      */
     fun normalizeAndResampleMonoFloat(
         monoFloat: FloatArray,
@@ -537,17 +561,17 @@ object AudioFileDecoder {
         if (monoFloat.isEmpty()) return FloatArray(0)
         // 1. Remove DC offset & find peak
         var sum = 0.0
-        for (v in monoFloat) sum += v
+        for (v in monoFloat) sum += if (v.isFinite()) v.toDouble() else 0.0
         val dc = (sum / monoFloat.size).toFloat()
         val centered = FloatArray(monoFloat.size)
         var peak = 0f
         for (i in monoFloat.indices) {
-            val v = monoFloat[i] - dc
+            val v = (if (monoFloat[i].isFinite()) monoFloat[i] else 0f) - dc
             centered[i] = v
             val a = abs(v)
             if (a > peak) peak = a
         }
-        // Normalize quietly recorded voices up gently, or clamp hot signals cleanly to 0.92
+        // Normalize quietly recorded voices gently, or clamp hot signals cleanly to 0.92
         if (peak > 0.005f) {
             val gain = (0.92f / peak).coerceAtMost(5.0f)
             for (i in centered.indices) {
@@ -559,41 +583,18 @@ object AudioFileDecoder {
             return centered
         }
 
+        // Exact linear interpolation resampling: out[i] = sample at i * (sourceRate / targetRate)
         val ratio = sourceRate.toDouble() / targetRate.toDouble()
         val outLen = (centered.size.toDouble() / ratio).toInt().coerceAtLeast(1)
         val out = FloatArray(outLen)
         val lastIdx = centered.lastIndex
 
-        if (ratio > 1.25) {
-            // Downsampling (e.g., 44.1kHz/48kHz -> 16kHz): triangular anti-aliasing window prevents aliasing hiss
-            val halfWin = ratio * 0.85
-            for (i in 0 until outLen) {
-                val center = i * ratio
-                val start = floor(center - halfWin).toInt().coerceIn(0, lastIdx)
-                val end = floor(center + halfWin).toInt().coerceIn(0, lastIdx)
-                var weightedSum = 0.0
-                var weightTotal = 0.0
-                for (j in start..end) {
-                    val dist = abs(j - center) / halfWin
-                    val w = (1.0 - dist).coerceAtLeast(0.0)
-                    weightedSum += centered[j] * w
-                    weightTotal += w
-                }
-                out[i] = if (weightTotal > 1e-6) {
-                    (weightedSum / weightTotal).toFloat().coerceIn(-1f, 1f)
-                } else {
-                    centered[center.toInt().coerceIn(0, lastIdx)]
-                }
-            }
-        } else {
-            // Linear interpolation for mild rate adjustments or upsampling
-            for (i in 0 until outLen) {
-                val srcPos = i * ratio
-                val idx0 = floor(srcPos).toInt().coerceIn(0, lastIdx)
-                val idx1 = min(idx0 + 1, lastIdx)
-                val frac = (srcPos - idx0).toFloat()
-                out[i] = (centered[idx0] * (1f - frac) + centered[idx1] * frac).coerceIn(-1f, 1f)
-            }
+        for (i in 0 until outLen) {
+            val srcPos = i * ratio
+            val idx0 = floor(srcPos).toInt().coerceIn(0, lastIdx)
+            val idx1 = min(idx0 + 1, lastIdx)
+            val frac = (srcPos - idx0).toFloat()
+            out[i] = (centered[idx0] * (1f - frac) + centered[idx1] * frac).coerceIn(-1f, 1f)
         }
         return out
     }
