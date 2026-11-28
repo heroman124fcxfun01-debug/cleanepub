@@ -684,7 +684,7 @@ fun StudioVoiceCloneSection(
                 }
             }
 
-            // 2.5. Ô TÙY CHỌN: Nội dung chữ trong file ghi âm mẫu (dùng khi có encoder ONNX; nếu trống sẽ tự ghép voices.json + chỉnh cao độ)
+            // 2.5. Lời thoại mẫu (ref_text) khớp với đoạn ghi âm 3–8 giây để đồng bộ cùng ref_codes từ neucodec_encoder.onnx
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(5.dp)
@@ -695,7 +695,7 @@ fun StudioVoiceCloneSection(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Lời thoại mẫu (tùy chọn)",
+                        text = "Lời thoại mẫu (ref_text — khuyên nhập)",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = primaryInk,
@@ -747,7 +747,7 @@ fun StudioVoiceCloneSection(
                 ) {
                     if (referenceText.isEmpty()) {
                         Text(
-                            text = "Có thể để trống — app sẽ tự phân tích cao độ giọng mẫu, ghép giọng tương đồng từ voices.json và đọc bằng VieNeu-TTS 24kHz.",
+                            text = "Nhập đúng câu nói trong đoạn ghi âm 3–8 giây (hoặc bấm \"Điền câu mẫu để đọc\" rồi thu âm) để NeuCodec Encoder ONNX trích xuất & nhân bản giọng thật chuẩn nhất.",
                             fontSize = 11.sp,
                             lineHeight = 15.sp,
                             color = secondaryInk.copy(alpha = 0.72f)
@@ -951,11 +951,10 @@ fun StudioVoiceCloneSection(
             AnimatedVisibility(visible = draftClonedVoice != null) {
                 draftClonedVoice?.let { draft ->
                     val tokenCount = draft.referenceCodes?.size ?: 0
-                    val modeBadge = when {
-                        draft.usedOnnxEncoder && draft.synthesizedPreview -> "GGUF + NeuCodec 24kHz"
-                        draft.usedOnnxEncoder -> "NeuCodec Encoder"
-                        draft.synthesizedPreview -> "GGUF + nền ${draft.timbreSettings.matchedPresetId ?: "voices.json"} + DSP"
-                        else -> "nền ${draft.timbreSettings.matchedPresetId ?: "voices.json"} + DSP"
+                    val modeBadge = if (draft.synthesizedPreview) {
+                        "NeuCodec Encoder ONNX • GGUF 24kHz"
+                    } else {
+                        "NeuCodec Encoder ONNX"
                     }
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(

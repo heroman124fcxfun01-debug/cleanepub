@@ -39,8 +39,11 @@ data class ImportedVoiceSample(
 object AudioFileDecoder {
 
     const val SPEAKER_ENCODER_SAMPLE_RATE = 16_000
-    private const val MAX_DECODE_SECONDS = 12.0
+    private const val MAX_DECODE_SECONDS = 25.0
     private const val MIN_DECODE_SECONDS = 2.0
+    const val CLONE_MIN_WINDOW_SECONDS = 3.0f
+    const val CLONE_OPTIMAL_WINDOW_SECONDS = 6.0f
+    const val CLONE_MAX_WINDOW_SECONDS = 8.0f
 
     private data class DecodedRawMono(
         val monoFloat: FloatArray,
@@ -94,7 +97,15 @@ object AudioFileDecoder {
                 targetRate = safeTargetRate
             )
 
-            val finalDuration = normalized16k.size.toFloat() / safeTargetRate.toFloat()
+            // Automatically trim silence & select the cleanest 5-8s speech segment for NeuCodec Encoder ONNX
+            val cleanest16k = extractCleanestSpeechWindow16k(
+                samples = normalized16k,
+                sampleRate = safeTargetRate,
+                minSeconds = CLONE_MIN_WINDOW_SECONDS,
+                maxSeconds = CLONE_MAX_WINDOW_SECONDS
+            )
+
+            val finalDuration = cleanest16k.size.toFloat() / safeTargetRate.toFloat()
 
             // 3. Write a standard 16-bit PCM Mono WAV file with full 44-byte RIFF/WAVE header for clean preview playback
             val previewDir = File(context.applicationContext.cacheDir, "voice_previews").apply { mkdirs() }
@@ -102,13 +113,13 @@ object AudioFileDecoder {
             val previewWavFile = File(previewDir, "import_${System.currentTimeMillis()}.wav")
             writePcm16MonoWav(
                 outputFile = previewWavFile,
-                samples = normalized16k,
+                samples = cleanest16k,
                 sampleRate = safeTargetRate
             )
 
             ImportedVoiceSample(
                 displayName = displayName,
-                samples = normalized16k,
+                samples = cleanest16k,
                 sampleRate = safeTargetRate,
                 durationSeconds = finalDuration,
                 previewWavPath = previewWavFile.absolutePath
@@ -580,6 +591,148 @@ object AudioFileDecoder {
                 val frac = (srcPos - idx0).toFloat()
                 out[i] = (centered[idx0] * (1f - frac) + centered[idx1] * frac).coerceIn(-1f, 1f)
             }
+        }
+        return out
+    }
+
+    /**
+     * Trims leading/trailing silence and selects the cleanest [minSeconds]..[maxSeconds] (default 5-8s)
+     * active speech segment at [sampleRate] Hz for `neucodec_encoder.onnx` zero-shot voice cloning.
+     *
+     * Scores candidate windows by active speech ratio, consistent vocal RMS, and low silence/clipping,
+     * ensuring 250-400 clean 50Hz FSQ `ref_codes` that fit comfortably inside VieNeu-TTS GGUF's context.
+     */
+    fun extractCleanestSpeechWindow16k(
+        samples: FloatArray,
+        sampleRate: Int = SPEAKER_ENCODER_SAMPLE_RATE,
+        minSeconds: Float = CLONE_MIN_WINDOW_SECONDS,
+        maxSeconds: Float = CLONE_MAX_WINDOW_SECONDS
+    ): FloatArray {
+        if (samples.isEmpty() || sampleRate <= 0) return samples
+
+        val frameLen = (sampleRate / 50).coerceAtLeast(160) // 20ms frame
+        val numFrames = samples.size / frameLen
+        if (numFrames < 4) return samples
+
+        val frameRms = FloatArray(numFrames)
+        var maxRms = 0f
+        for (f in 0 until numFrames) {
+            val base = f * frameLen
+            var sq = 0.0
+            for (i in 0 until frameLen) {
+                val v = samples[base + i].toDouble()
+                sq += v * v
+            }
+            val rms = kotlin.math.sqrt(sq / frameLen).toFloat()
+            frameRms[f] = rms
+            if (rms > maxRms) maxRms = rms
+        }
+
+        if (maxRms < 1e-4f) return samples
+
+        // 1. Trim dead leading/trailing silence (keep 80ms = 4 frames natural breath margin)
+        val silenceThresh = (maxRms * 0.07f).coerceIn(0.008f, 0.025f)
+        var firstSpeechFrame = 0
+        while (firstSpeechFrame < numFrames && frameRms[firstSpeechFrame] < silenceThresh) {
+            firstSpeechFrame++
+        }
+        var lastSpeechFrame = numFrames - 1
+        while (lastSpeechFrame > firstSpeechFrame && frameRms[lastSpeechFrame] < silenceThresh) {
+            lastSpeechFrame--
+        }
+
+        val marginFrames = 4 // 80ms
+        val trimStartSample = ((firstSpeechFrame - marginFrames).coerceAtLeast(0)) * frameLen
+        val trimEndSample = (((lastSpeechFrame + 1 + marginFrames).coerceAtMost(numFrames)) * frameLen)
+            .coerceAtMost(samples.size)
+
+        val trimmed = if (trimEndSample - trimStartSample >= sampleRate) {
+            samples.copyOfRange(trimStartSample, trimEndSample)
+        } else {
+            samples
+        }
+
+        val maxSamples = (sampleRate * maxSeconds).toInt().coerceAtLeast(sampleRate)
+        if (trimmed.size <= maxSamples) {
+            return applyGentleEdgeFadeAndNormalize(trimmed, sampleRate)
+        }
+
+        // 2. Slide an optimal 6.0s window (within 3-8s range) across trimmed audio to pick the cleanest speech segment
+        val targetSeconds = CLONE_OPTIMAL_WINDOW_SECONDS.coerceIn(minSeconds, maxSeconds)
+        val winSamples = (sampleRate * targetSeconds).toInt().coerceAtMost(trimmed.size)
+        val winFrames = (winSamples / frameLen).coerceAtLeast(1)
+        val trimFrames = trimmed.size / frameLen
+        val trimFrameRms = FloatArray(trimFrames)
+        val trimFrameClip = FloatArray(trimFrames)
+        for (f in 0 until trimFrames) {
+            val base = f * frameLen
+            var sq = 0.0
+            var clips = 0
+            for (i in 0 until frameLen) {
+                val v = trimmed[base + i]
+                sq += v.toDouble() * v.toDouble()
+                if (abs(v) >= 0.985f) clips++
+            }
+            trimFrameRms[f] = kotlin.math.sqrt(sq / frameLen).toFloat()
+            trimFrameClip[f] = clips.toFloat() / frameLen.toFloat()
+        }
+
+        val activeThresh = (maxRms * 0.12f).coerceIn(0.015f, 0.04f)
+        val stepFrames = 10 // 200ms stride
+        var bestStartFrame = 0
+        var bestScore = Float.NEGATIVE_INFINITY
+
+        var startF = 0
+        val maxStartF = (trimFrames - winFrames).coerceAtLeast(0)
+        while (startF <= maxStartF) {
+            var activeCount = 0
+            var activeRmsSum = 0f
+            var clipSum = 0f
+            for (k in 0 until winFrames) {
+                val r = trimFrameRms[startF + k]
+                if (r >= activeThresh) {
+                    activeCount++
+                    activeRmsSum += r
+                }
+                clipSum += trimFrameClip[startF + k]
+            }
+            val activeRatio = activeCount.toFloat() / winFrames.toFloat()
+            val meanActiveRms = if (activeCount > 0) activeRmsSum / activeCount else 0f
+            val clipRate = clipSum / winFrames.toFloat()
+            // Favor high speech occupancy (0.65..0.95) & clear RMS; penalize clipping and long silences
+            val score = activeRatio * 2.2f + meanActiveRms * 1.5f - clipRate * 8.0f
+            if (score > bestScore) {
+                bestScore = score
+                bestStartFrame = startF
+            }
+            if (startF == maxStartF) break
+            startF = (startF + stepFrames).coerceAtMost(maxStartF)
+        }
+
+        val bestStartSample = (bestStartFrame * frameLen).coerceIn(0, (trimmed.size - winSamples).coerceAtLeast(0))
+        val bestEndSample = (bestStartSample + winSamples).coerceAtMost(trimmed.size)
+        return applyGentleEdgeFadeAndNormalize(trimmed.copyOfRange(bestStartSample, bestEndSample), sampleRate)
+    }
+
+    private fun applyGentleEdgeFadeAndNormalize(segment: FloatArray, sampleRate: Int): FloatArray {
+        if (segment.isEmpty()) return segment
+        val out = segment.copyOf()
+        var peak = 0f
+        for (v in out) {
+            val a = abs(v)
+            if (a > peak) peak = a
+        }
+        if (peak > 1e-4f) {
+            val gain = (0.92f / peak).coerceAtMost(5.0f)
+            for (i in out.indices) {
+                out[i] = (out[i] * gain).coerceIn(-1f, 1f)
+            }
+        }
+        val fade = (sampleRate * 5 / 1000).coerceAtMost(out.size / 8)
+        for (i in 0 until fade) {
+            val w = i.toFloat() / fade.coerceAtLeast(1).toFloat()
+            out[i] *= w
+            out[out.lastIndex - i] *= w
         }
         return out
     }

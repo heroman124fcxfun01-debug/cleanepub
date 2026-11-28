@@ -15,13 +15,18 @@ import java.nio.LongBuffer
 import java.util.Locale
 import kotlin.math.abs
 
+data class EncodedReferenceVoice(
+    val codes: IntArray,
+    val voiceEmbedding: FloatArray? = null,
+    val durationSeconds: Float = 0f
+)
+
 /**
  * Official NeuCodec ONNX Runtime Engine (Encoder + Decoder) for `pnnbao97/VieNeu-TTS` GGUF:
  *
  * 1. **Encoder (`neucodec_encoder.onnx` / `distill_neucodec_encoder.onnx`)**:
- *    - Consumes 16,000 Hz Mono Float32 audio padded to a multiple of 320 samples (`[1, 1, T]` or `[1, T]`).
- *    - Produces discrete 50 Hz FSQ speech token IDs (`IntArray`, values in `0..65535`).
- *    - Used when the user records or imports a voice sample to clone their voice 100% offline.
+ *    - Consumes cleanest 5-8s 16,000 Hz Mono Float32 audio padded to a multiple of 320 samples (`[1, 1, T]` or `[1, T]`).
+ *    - Produces discrete 50 Hz FSQ speech token IDs (`IntArray`, values in `0..65535`) for true zero-shot voice cloning.
  *
  * 2. **Decoder (`neucodec_decoder.onnx` / `pnnbao-ump/neucodec-onnx-decoder-int8`)**:
  *    - Consumes discrete FSQ speech token IDs (`[1, 1, F]` or `[1, F]`, `INT32` or `INT64`).
@@ -32,6 +37,7 @@ class NeuCodecOnnxEngine(context: Context? = null) {
     private val appContext: Context? = context?.applicationContext
     private var env: OrtEnvironment? = null
     private var encoderSession: OrtSession? = null
+    private var speakerEncoderSession: OrtSession? = null
     private var decoderSession: OrtSession? = null
 
     @Volatile
@@ -44,11 +50,18 @@ class NeuCodecOnnxEngine(context: Context? = null) {
     val hasEncoder: Boolean
         get() = encoderSession != null
 
+    val hasSpeakerEncoder: Boolean
+        get() = speakerEncoderSession != null
+
     val hasDecoder: Boolean
         get() = decoderSession != null
 
     @Synchronized
-    fun initialize(encoderFile: File?, decoderFile: File?) {
+    fun initialize(
+        encoderFile: File?,
+        decoderFile: File?,
+        speakerEncoderFile: File? = null
+    ) {
         closeSessions()
         loadedSignatures.clear()
         loadErrors.clear()
@@ -91,6 +104,7 @@ class NeuCodecOnnxEngine(context: Context? = null) {
         }
 
         encoderSession = loadSession(ortEnv, opts, "neucodec_encoder", encoderFile)
+        speakerEncoderSession = loadSession(ortEnv, opts, "speaker_encoder", speakerEncoderFile)
         decoderSession = loadSession(ortEnv, opts, "neucodec_decoder", decoderFile)
     }
 
@@ -128,12 +142,12 @@ class NeuCodecOnnxEngine(context: Context? = null) {
     }
 
     /**
-     * Encodes 16 kHz Mono Float32 reference voice audio into discrete 50 Hz NeuCodec FSQ speech token IDs.
-     * Pads length to a multiple of 320 samples and caps to [MAX_REF_AUDIO_SECONDS] seconds so the LLM
-     * context window (`n_ctx = 2048`) has ample room for target generation.
+     * Encodes the cleanest 5–8 second 16 kHz Mono Float32 reference voice window into discrete
+     * 50 Hz NeuCodec FSQ speech token IDs (`0..65535`, ~250–400 tokens) for 100% offline zero-shot
+     * voice cloning. Pads length to a multiple of 320 samples so DistilHuBERT/SQCodec aligns cleanly.
      */
     @Synchronized
-    fun encodeReferenceAudio(samples: FloatArray, sampleRate: Int): Result<IntArray> {
+    fun encodeReferenceAudio(samples: FloatArray, sampleRate: Int): Result<EncodedReferenceVoice> {
         val ortEnv = env ?: return Result.failure(IllegalStateException("OrtEnvironment chưa được khởi tạo."))
         val session = encoderSession
             ?: return Result.failure(
@@ -158,12 +172,17 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                 samples
             }
 
-            // Cap to max 10 seconds (~500 speech tokens) and pad to multiple of 320 samples
-            val maxSamples = ENCODER_SAMPLE_RATE * MAX_REF_AUDIO_SECONDS
-            val trimmedLen = mono16k.size.coerceAtMost(maxSamples)
+            // Pick the cleanest 5-8s speech segment (~250-400 FSQ tokens @ 50Hz) and pad to multiple of 320
+            val cleanest16k = AudioFileDecoder.extractCleanestSpeechWindow16k(
+                samples = mono16k,
+                sampleRate = ENCODER_SAMPLE_RATE,
+                minSeconds = AudioFileDecoder.CLONE_MIN_WINDOW_SECONDS,
+                maxSeconds = MAX_REF_AUDIO_SECONDS.toFloat()
+            )
+            val trimmedLen = cleanest16k.size.coerceAtMost(ENCODER_SAMPLE_RATE * MAX_REF_AUDIO_SECONDS)
             val paddedLen = ((trimmedLen + HOP_SAMPLES_16K - 1) / HOP_SAMPLES_16K) * HOP_SAMPLES_16K
             val padded = FloatArray(paddedLen)
-            System.arraycopy(mono16k, 0, padded, 0, trimmedLen)
+            System.arraycopy(cleanest16k, 0, padded, 0, trimmedLen)
 
             // Peak-normalize gently to 0.92 so encoder sees clean amplitude
             var peak = 0f
@@ -208,11 +227,34 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                     inputs[name] = tensor
                 }
 
+                val durSec = trimmedLen.toFloat() / ENCODER_SAMPLE_RATE.toFloat()
+                CrashReportStore.markNativeOperationStart(
+                    context = appContext,
+                    operation = "NeuCodec Encoder session.run",
+                    detail = "samples=$paddedLen (${String.format(Locale.US, "%.2fs", durSec)} @ 16kHz)"
+                )
                 session.run(inputs).use { result ->
                     if (result.size() <= 0) {
                         throw IllegalStateException("neucodec_encoder.onnx không trả về tensor codes.")
                     }
-                    val flatCodes = flattenAnyToIntArray(result[0].value)
+                    val outNames = session.outputInfo.keys.toList()
+                    var codesIndex = 0
+                    var embIndex = -1
+                    for (idx in outNames.indices) {
+                        val nameLow = outNames[idx].lowercase(Locale.ROOT)
+                        val tType = (session.outputInfo[outNames[idx]]?.info as? TensorInfo)?.type
+                        if (tType == OnnxJavaType.INT32 || tType == OnnxJavaType.INT64 ||
+                            nameLow.contains("code") || nameLow.contains("token") || nameLow.contains("id")
+                        ) {
+                            codesIndex = idx
+                        } else if (tType == OnnxJavaType.FLOAT &&
+                            (nameLow.contains("embed") || nameLow.contains("voice") || nameLow.contains("spk"))
+                        ) {
+                            embIndex = idx
+                        }
+                    }
+
+                    val flatCodes = flattenAnyToIntArray(result[codesIndex].value)
                         .filter { it in 0..65535 }
                         .toIntArray()
                     if (flatCodes.size < 8) {
@@ -220,11 +262,59 @@ class NeuCodecOnnxEngine(context: Context? = null) {
                             "neucodec_encoder.onnx chỉ trích xuất được ${flatCodes.size} token âm thanh (quá ngắn)."
                         )
                     }
-                    flatCodes
+                    val optionalVoiceEmb = if (embIndex in 0 until result.size()) {
+                        flattenAnyToFloatArray(result[embIndex].value).takeIf { it.isNotEmpty() }
+                    } else {
+                        runSpeakerEncoderIfLoaded(ortEnv, padded)
+                    }
+                    Log.i(
+                        TAG,
+                        "Encoded reference voice (${String.format(Locale.US, "%.2fs", durSec)} @ 16kHz) -> " +
+                            "${flatCodes.size} FSQ codes (unique=${flatCodes.toSet().size}, embDim=${optionalVoiceEmb?.size ?: 0})"
+                    )
+                    EncodedReferenceVoice(
+                        codes = flatCodes,
+                        voiceEmbedding = optionalVoiceEmb,
+                        durationSeconds = durSec
+                    )
                 }
             } finally {
+                CrashReportStore.clearNativeOperation(appContext)
                 inputs.values.forEach { runCatching { it.close() } }
             }
+        }
+    }
+
+    private fun runSpeakerEncoderIfLoaded(ortEnv: OrtEnvironment, padded16k: FloatArray): FloatArray? {
+        val spkSession = speakerEncoderSession ?: return null
+        val spkInputs = LinkedHashMap<String, OnnxTensor>()
+        return try {
+            for ((name, nodeInfo) in spkSession.inputInfo) {
+                val tInfo = nodeInfo.info as? TensorInfo
+                val shape = tInfo?.shape
+                val type = tInfo?.type ?: OnnxJavaType.FLOAT
+                val tensor = when {
+                    type == OnnxJavaType.INT64 ->
+                        OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(longArrayOf(padded16k.size.toLong())), longArrayOf(1L))
+                    type == OnnxJavaType.INT32 ->
+                        OnnxTensor.createTensor(ortEnv, IntBuffer.wrap(intArrayOf(padded16k.size)), longArrayOf(1L))
+                    shape != null && shape.size == 3 ->
+                        OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(padded16k), longArrayOf(1L, 1L, padded16k.size.toLong()))
+                    shape != null && shape.size == 1 ->
+                        OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(padded16k), longArrayOf(padded16k.size.toLong()))
+                    else ->
+                        OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(padded16k), longArrayOf(1L, padded16k.size.toLong()))
+                }
+                spkInputs[name] = tensor
+            }
+            spkSession.run(spkInputs).use { res ->
+                if (res.size() > 0) flattenAnyToFloatArray(res[0].value).takeIf { it.isNotEmpty() } else null
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Optional speaker_encoder.onnx inference skipped: ${t.message}")
+            null
+        } finally {
+            spkInputs.values.forEach { runCatching { it.close() } }
         }
     }
 
@@ -467,8 +557,10 @@ class NeuCodecOnnxEngine(context: Context? = null) {
     @Synchronized
     fun closeSessions() {
         runCatching { encoderSession?.close() }
+        runCatching { speakerEncoderSession?.close() }
         runCatching { decoderSession?.close() }
         encoderSession = null
+        speakerEncoderSession = null
         decoderSession = null
     }
 
@@ -477,6 +569,6 @@ class NeuCodecOnnxEngine(context: Context? = null) {
         const val ENCODER_SAMPLE_RATE = 16_000
         const val DECODER_SAMPLE_RATE = 24_000
         private const val HOP_SAMPLES_16K = 320
-        private const val MAX_REF_AUDIO_SECONDS = 10
+        private const val MAX_REF_AUDIO_SECONDS = 8
     }
 }

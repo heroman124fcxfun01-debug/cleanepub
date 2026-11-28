@@ -18,6 +18,10 @@ android {
     versionName = "2.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    ndk {
+      abiFilters += listOf("arm64-v8a")
+    }
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
@@ -40,14 +44,18 @@ android {
 
   buildTypes {
     release {
-      isCrunchPngs = false
-      isMinifyEnabled = false
+      isCrunchPngs = true
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
       // AI Studio.
       signingConfig = signingConfigs.getByName("release")
     }
     debug {
+      isMinifyEnabled = true
+      isShrinkResources = true
+      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
       // AI Studio.
       signingConfig = signingConfigs.getByName("debugConfig")
@@ -62,11 +70,30 @@ android {
     buildConfig = true
   }
   androidResources {
-    noCompress += listOf("gguf", "onnx", "bin", "data", "onnx_data", "json", "txt", "tsv", "ort", "npz")
+    noCompress += listOf("gguf", "onnx", "data", "bin")
   }
   packaging {
     jniLibs {
       useLegacyPackaging = true
+      excludes += listOf(
+        "lib/armeabi-v7a/**",
+        "lib/armeabi/**",
+        "lib/x86/**",
+        "lib/x86_64/**",
+        "lib/mips/**",
+        "lib/mips64/**"
+      )
+    }
+    resources {
+      excludes += listOf(
+        "META-INF/LICENSE*",
+        "META-INF/NOTICE*",
+        "META-INF/DEPENDENCIES",
+        "META-INF/AL2.0",
+        "META-INF/LGPL2.1",
+        "DebugProbesKt.bin",
+        "kotlin-tooling-metadata.json"
+      )
     }
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }

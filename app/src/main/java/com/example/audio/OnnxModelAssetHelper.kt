@@ -34,16 +34,17 @@ data class VieNeuPresetVoice(
 data class LightweightAiModelCatalog(
     val hasGgufModel: Boolean,
     val hasDecoderModel: Boolean,
+    val hasEncoderModel: Boolean = false,
     val presetVoices: List<VieNeuPresetVoice>
 ) {
     val modelsPresent: Boolean
         get() = hasGgufModel && hasDecoderModel
 
     val statusBadgeText: String
-        get() = if (modelsPresent) {
-            "Model: OK | Voices: ${presetVoices.size}"
-        } else {
-            "Model: Thiếu | Voices: ${presetVoices.size}"
+        get() = when {
+            modelsPresent && hasEncoderModel -> "Model: OK • Encoder | Voices: ${presetVoices.size}"
+            modelsPresent -> "Model: OK | Voices: ${presetVoices.size}"
+            else -> "Model: Thiếu | Voices: ${presetVoices.size}"
         }
 }
 
@@ -55,6 +56,7 @@ data class DiscoveredOnnxModels(
     val sampleRate: Int,
     val ggufBackboneFile: File?,
     val codecEncoderFile: File?,
+    val speakerEncoderFile: File? = null,
     val codecDecoderFile: File?,
     val espeakDictFile: File?,
     val voicesJsonFile: File?,
@@ -72,6 +74,7 @@ data class DiscoveredOnnxModels(
         val parts = mutableListOf<String>()
         ggufBackboneFile?.let { parts.add("gguf=${it.name}") }
         codecEncoderFile?.let { parts.add("enc=${it.name}") }
+        speakerEncoderFile?.let { parts.add("spk=${it.name}") }
         codecDecoderFile?.let { parts.add("dec=${it.name}") }
         espeakDictFile?.let { parts.add("g2p=${it.name}") }
         voicesJsonFile?.let { parts.add("voices=${it.name}") }
@@ -205,8 +208,11 @@ object OnnxModelAssetHelper {
             .map { it.lowercase(Locale.ROOT) }
 
         val hasGguf = allNames.any { it.endsWith(".gguf") }
+        val hasEncoder = allNames.any { n ->
+            n.endsWith(".onnx") && (n.contains("enc") || n.contains("distill")) && !n.contains("dec")
+        }
         val hasDecoder = allNames.any { n ->
-            n.endsWith(".onnx") && (n.contains("dec") || n.contains("neucodec") || n.endsWith("/model.onnx") || n == "model.onnx")
+            n.endsWith(".onnx") && !n.contains("enc") && (n.contains("dec") || n.contains("neucodec") || n.endsWith("/model.onnx") || n == "model.onnx")
         }
 
         val filesVoices = File(File(appCtx.filesDir, FILES_MODELS_DIR), "voices.json")
@@ -232,6 +238,7 @@ object OnnxModelAssetHelper {
         return LightweightAiModelCatalog(
             hasGgufModel = hasGguf,
             hasDecoderModel = hasDecoder,
+            hasEncoderModel = hasEncoder,
             presetVoices = presets
         )
     }
@@ -474,21 +481,28 @@ object OnnxModelAssetHelper {
 
         val onnxFiles = allFiles.filter { it.name.endsWith(".onnx", ignoreCase = true) }
 
+        val speakerEncoder = onnxFiles.firstOrNull { f ->
+            val n = f.name.lowercase(Locale.ROOT)
+            (n.contains("speaker") || n.contains("spk") || n.contains("ecapa") || n.contains("campplus")) &&
+                !n.contains("dec")
+        }
+
         val codecEncoder = onnxFiles.firstOrNull { f ->
             val n = f.name.lowercase(Locale.ROOT)
-            (n.contains("enc") || n.contains("distill")) && !n.contains("dec")
+            f != speakerEncoder && (n.contains("enc") || n.contains("distill")) && !n.contains("dec")
         }
 
         val codecDecoder = onnxFiles.firstOrNull { f ->
             val n = f.name.lowercase(Locale.ROOT)
-            f != codecEncoder && (n.contains("dec") || n.contains("neucodec") || n == "model.onnx")
-        } ?: onnxFiles.firstOrNull { it != codecEncoder }
+            f != codecEncoder && f != speakerEncoder && (n.contains("dec") || n.contains("neucodec") || n == "model.onnx")
+        } ?: onnxFiles.firstOrNull { it != codecEncoder && it != speakerEncoder }
 
         return DiscoveredOnnxModels(
             modelsRootDir = rootDir,
             sampleRate = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE,
             ggufBackboneFile = ggufFile,
             codecEncoderFile = codecEncoder,
+            speakerEncoderFile = speakerEncoder,
             codecDecoderFile = codecDecoder,
             espeakDictFile = espeakDictFile,
             voicesJsonFile = voicesFile,
@@ -589,46 +603,8 @@ object OnnxModelAssetHelper {
     }
 
     /**
-     * Estimates coarse pitch ratio of a reference voice sample for metadata display.
-     */
-    fun estimateSpeakerPitchRatio(samples: FloatArray, sampleRate: Int): Float {
-        if (samples.size < sampleRate / 4 || sampleRate <= 0) return 1.0f
-        val minLag = (sampleRate / 340).coerceAtLeast(20)
-        val maxLag = (sampleRate / 75).coerceAtMost(samples.size / 3)
-        if (maxLag <= minLag) return 1.0f
-        val winSize = (sampleRate / 20).coerceAtMost(samples.size / 2)
-        val start = ((samples.size - winSize) / 2).coerceAtLeast(0)
-
-        var bestLag = (minLag + maxLag) / 2
-        var bestCorr = -1.0
-        for (lag in minLag..maxLag) {
-            var corr = 0.0
-            var e1 = 0.0
-            var e2 = 0.0
-            var i = 0
-            while (i < winSize && start + i + lag < samples.size) {
-                val a = samples[start + i].toDouble()
-                val b = samples[start + i + lag].toDouble()
-                corr += a * b
-                e1 += a * a
-                e2 += b * b
-                i += 2
-            }
-            val denom = sqrt(e1 * e2)
-            if (denom > 1e-6) {
-                val norm = corr / denom
-                if (norm > bestCorr) {
-                    bestCorr = norm
-                    bestLag = lag
-                }
-            }
-        }
-        val f0 = sampleRate.toFloat() / bestLag.toFloat()
-        return (f0 / 165f).coerceIn(0.75f, 1.28f)
-    }
-
-    /**
-     * Compact 32-dim acoustic summary vector stored alongside NeuCodec reference codes for profile metadata.
+     * Compact 32-dim acoustic summary vector stored as fallback embedding metadata when the
+     * NeuCodec encoder outputs FSQ `ref_codes` without a separate float speaker vector.
      */
     fun computeAcousticFingerprint(samples: FloatArray): FloatArray {
         val out = FloatArray(32)

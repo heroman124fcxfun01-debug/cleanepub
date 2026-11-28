@@ -161,7 +161,7 @@ class VieNeuGgufRunner(context: Context? = null) {
                     batchSize = batchSz,
                     threads = threads,
                     threadsBatch = threadsBatch,
-                    temperature = 0.75f,
+                    temperature = 0.8f,
                     topP = 0.95f,
                     topK = 50,
                     repeatPenalty = 1.1f,
@@ -256,7 +256,7 @@ class VieNeuGgufRunner(context: Context? = null) {
         refPhones: String,
         targetPhones: String,
         refCodes: IntArray,
-        temperature: Double = 0.75,
+        temperature: Double = 0.8,
         topK: Int = 50,
         maxNewTokens: Int = 520
     ): GgufGenerationResult {

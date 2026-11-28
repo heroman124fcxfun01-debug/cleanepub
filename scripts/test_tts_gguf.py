@@ -309,29 +309,55 @@ def resample_linear(samples: np.ndarray, src_rate: int, dst_rate: int) -> np.nda
     return np.interp(x_new, x_old, samples).astype(np.float32)
 
 
-def smoke_test_neucodec_encoder(encoder_path: str, wav_24k: np.ndarray) -> List[int]:
+def smoke_test_neucodec_encoder(
+    encoder_path: str,
+    wav_24k: np.ndarray,
+    log_fn=None,
+) -> List[int]:
     sess = ort.InferenceSession(encoder_path, providers=["CPUExecutionProvider"])
-    inp = sess.get_inputs()[0]
-    rank = len(inp.shape)
+    inputs = sess.get_inputs()
+    outputs_meta = sess.get_outputs()
+    if log_fn is not None:
+        log_fn(f"Encoder ONNX inputs:  {[(i.name, i.type, list(i.shape)) for i in inputs]}")
+        log_fn(f"Encoder ONNX outputs: {[(o.name, o.type, list(o.shape)) for o in outputs_meta]}")
 
     wav_16k = resample_linear(wav_24k, DECODER_SAMPLE_RATE, ENCODER_SAMPLE_RATE)
-    # Trim to 5 seconds max for fast smoke test and pad to multiple of 320
-    wav_16k = wav_16k[: ENCODER_SAMPLE_RATE * 5]
+    # Trim to 5-8 seconds window for realistic zero-shot voice cloning smoke test and pad to multiple of 320
+    wav_16k = wav_16k[: ENCODER_SAMPLE_RATE * 6]
     rem = wav_16k.size % ENCODER_HOP_SIZE
     pad = (ENCODER_HOP_SIZE - rem) if rem != 0 else 0
     if pad:
         wav_16k = np.concatenate([wav_16k, np.zeros(pad, dtype=np.float32)])
 
-    if rank == 3:
-        tensor = wav_16k.reshape(1, 1, -1)
-    elif rank == 2:
-        tensor = wav_16k.reshape(1, -1)
-    else:
-        tensor = wav_16k.reshape(1, 1, -1)
+    feed: Dict[str, np.ndarray] = {}
+    for inp in inputs:
+        low = inp.name.lower()
+        t_low = inp.type.lower()
+        if "int" in t_low or "len" in low:
+            dt = np.int64 if "int64" in t_low else np.int32
+            feed[inp.name] = np.asarray([wav_16k.size], dtype=dt)
+        else:
+            rank = len(inp.shape)
+            if rank == 3:
+                feed[inp.name] = wav_16k.reshape(1, 1, -1).astype(np.float32)
+            elif rank == 2:
+                feed[inp.name] = wav_16k.reshape(1, -1).astype(np.float32)
+            elif rank == 1:
+                feed[inp.name] = wav_16k.reshape(-1).astype(np.float32)
+            else:
+                feed[inp.name] = wav_16k.reshape(1, 1, -1).astype(np.float32)
 
-    outputs = sess.run(None, {inp.name: tensor})
-    raw_codes = np.asarray(outputs[0]).reshape(-1)
-    return [int(c) for c in raw_codes.tolist() if 0 <= int(c) <= 65535]
+    outputs = sess.run(None, feed)
+    raw_codes = None
+    for idx, out_val in enumerate(outputs):
+        o_type = outputs_meta[idx].type.lower()
+        o_name = outputs_meta[idx].name.lower()
+        if "int" in o_type or "code" in o_name or "token" in o_name or "idx" in o_name:
+            raw_codes = np.asarray(out_val).reshape(-1)
+            break
+    if raw_codes is None:
+        raw_codes = np.asarray(outputs[0]).reshape(-1)
+    return [int(round(float(c))) for c in raw_codes.tolist() if 0 <= int(round(float(c))) <= 65535]
 
 
 def analyze_waveform(wav: np.ndarray, sample_rate: int) -> Dict[str, float]:
@@ -528,10 +554,12 @@ def main() -> int:
         if stats["env_cv"] < 0.12:
             failures.append(f"Audio lacks speech syllable modulation (env_cv={stats['env_cv']:.4f} < 0.12)")
 
-        # Optional smoke test for NeuCodec Encoder (only if bundled)
-        if encoder_path and wav.size >= DECODER_SAMPLE_RATE:
+        # Mandatory smoke test for NeuCodec Encoder (real zero-shot voice cloning)
+        if not encoder_path:
+            failures.append("Missing mandatory neucodec_encoder.onnx in assets/models/ for real zero-shot voice cloning")
+        elif wav.size >= DECODER_SAMPLE_RATE:
             enc_t0 = time.time()
-            enc_codes = smoke_test_neucodec_encoder(encoder_path, wav)
+            enc_codes = smoke_test_neucodec_encoder(encoder_path, wav, log_fn=log)
             enc_elapsed = time.time() - enc_t0
             log(
                 f"NeuCodec Encoder smoke test: {len(enc_codes)} FSQ codes "
@@ -541,8 +569,6 @@ def main() -> int:
                 failures.append(
                     f"NeuCodec encoder smoke test produced invalid codes (len={len(enc_codes)}, unique={len(set(enc_codes))})"
                 )
-        else:
-            log("NeuCodec Encoder smoke test: skipped (optional encoder not bundled; using voices.json presets)")
 
         total_elapsed = time.time() - t0
         if failures:

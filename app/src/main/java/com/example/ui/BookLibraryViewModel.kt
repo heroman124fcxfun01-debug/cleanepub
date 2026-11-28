@@ -83,9 +83,7 @@ data class PendingDraftClonedVoice(
     val embedding: FloatArray,
     val referenceCodes: IntArray? = null,
     val referenceText: String = "",
-    val usedOnnxEncoder: Boolean,
-    val estimatedPitchRatio: Float,
-    val timbreSettings: com.example.audio.VoiceTimbreSettings = com.example.audio.VoiceTimbreSettings(pitchRatio = estimatedPitchRatio),
+    val usedOnnxEncoder: Boolean = true,
     val acousticSummary: String = "",
     val previewWavPath: String? = null,
     val synthesizedPreview: Boolean = false
@@ -815,11 +813,10 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     /**
-     * Bước "Tạo" trong Studio (chuẩn `pnnbao97/VieNeu-TTS`):
-     * 1. Nếu có tùy chọn `neucodec_encoder.onnx`, mã hóa âm thanh mẫu sang mã FSQ NeuCodec.
-     * 2. Nếu không có encoder rời (mặc định của `pnnbao-ump`), phân tích cao độ & đặc trưng âm học
-     *    của mẫu ghi âm/import để chọn giọng mẫu tương đồng nhất trong `voices.json` kèm tỉ lệ cao độ (pitch).
-     * 3. Tổng hợp sẵn câu mẫu tiếng Việt qua GGUF + `neucodec_decoder.onnx` 24kHz cho nút Nghe thử.
+     * Bước "Tạo" trong Studio (nhân bản giọng thật 100% offline bằng `neucodec_encoder.onnx`):
+     * 1. Cắt đoạn nói sạch nhất 3–8 giây (tối ưu 6 giây), giải mã 16 kHz Mono PCM.
+     * 2. Chạy `neucodec_encoder.onnx` (+ `speaker_encoder.onnx` nếu có) để trích xuất `ref_codes` & `speaker_embedding` thật.
+     * 3. Tổng hợp sẵn câu nghe thử bằng GGUF (`temperature = 0.8`) + `neucodec_decoder.onnx` 24kHz và lưu cache WAV.
      */
     fun createDraftClonedVoice(
         name: String,
@@ -834,46 +831,45 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
         _lastAiVerbatimError.value = null
         viewModelScope.launch {
             try {
-                val samples16k = if (sampleRate != AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE) {
-                    withContext(Dispatchers.IO) {
+                val cleanSamples16k = withContext(Dispatchers.IO) {
+                    val mono16k = if (sampleRate != AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE) {
                         AudioFileDecoder.normalizeAndResampleMonoFloat(
                             monoFloat = samples,
                             sourceRate = sampleRate,
                             targetRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
                         )
+                    } else {
+                        samples
                     }
-                } else {
-                    samples
+                    AudioFileDecoder.extractCleanestSpeechWindow16k(
+                        samples = mono16k,
+                        sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE,
+                        minSeconds = AudioFileDecoder.CLONE_MIN_WINDOW_SECONDS,
+                        maxSeconds = AudioFileDecoder.CLONE_MAX_WINDOW_SECONDS
+                    )
                 }
                 val extracted = onnxVoiceEngine.extractSpeakerEmbedding(
-                    samples = samples16k,
+                    samples = cleanSamples16k,
                     sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
                 )
                 _voiceCloneEngineMode.value = onnxVoiceEngine.engineMode
                 _presetAiVoices.value = onnxVoiceEngine.getPresetVoices()
                 _aiModelStatusBadge.value = onnxVoiceEngine.getStatusBadgeSummary()
 
-                if (extracted.embedding.isEmpty() || (extracted.referenceCodes?.size ?: 0) < 8) {
+                if (!extracted.usedOnnxEncoder || extracted.embedding.isEmpty() || (extracted.referenceCodes?.size ?: 0) < 8) {
                     val err = extracted.errorMessage
-                        ?: "Không tìm thấy giọng mẫu hợp lệ từ voices.json."
+                        ?: "Không trích xuất được mã giọng thật bằng neucodec_encoder.onnx."
                     _lastAiVerbatimError.value = err
                     _statusMessage.value = err.lineSequence().firstOrNull() ?: err
                     return@launch
                 }
 
-                // BẮT BUỘC đồng bộ 1-1: khi dùng mã giọng nền từ voices.json (không có encoder rời),
-                // ref_text phải là đúng lời thoại gốc của preset trong voices.json để GGUF không bao giờ đọc lấn câu mẫu.
-                val effectiveRefText = if (extracted.usedOnnxEncoder) {
-                    userRefText.ifBlank { extracted.matchedPresetRefText.orEmpty() }
-                } else {
-                    extracted.matchedPresetRefText.orEmpty()
-                }
-
                 val cleanName = name.trim().ifBlank {
                     "Giọng nhân bản #${_clonedVoices.value.size + 1}"
                 }.take(36)
-                val durationSec = (samples16k.size.toFloat() / AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE.toFloat())
-                    .coerceIn(2.0f, 12.0f)
+                val durationSec = extracted.durationSeconds.takeIf { it > 0.5f }
+                    ?: (cleanSamples16k.size.toFloat() / AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE.toFloat())
+                        .coerceIn(2.0f, 12.0f)
 
                 var synthPreviewNote: String? = null
                 var usedSynthPreview = false
@@ -884,11 +880,10 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                         val synthRes = onnxVoiceEngine.synthesizeSentenceDetailed(
                             sentence = OnnxModelAssetHelper.AI_VOICE_QUICK_PREVIEW_SENTENCE,
                             speakerEmbedding = extracted.embedding,
-                            speed = extracted.timbreSettings.speakingRateRatio,
+                            speed = 1.0f,
                             referenceCodes = extracted.referenceCodes,
-                            referenceText = effectiveRefText,
-                            matchedPresetId = extracted.matchedPresetId,
-                            timbreSettings = extracted.timbreSettings
+                            referenceText = userRefText,
+                            matchedPresetId = null
                         )
                         val synthAudio = synthRes.audio
                         if (synthAudio != null) {
@@ -903,7 +898,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     }
                     AudioFileDecoder.writePcm16MonoWav(
                         outWav,
-                        samples16k,
+                        cleanSamples16k,
                         AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE
                     )
                     outWav.absolutePath
@@ -911,15 +906,13 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
 
                 _draftClonedVoice.value = PendingDraftClonedVoice(
                     name = cleanName,
-                    samples = samples16k,
+                    samples = cleanSamples16k,
                     sampleRate = AudioFileDecoder.SPEAKER_ENCODER_SAMPLE_RATE,
                     durationSeconds = durationSec,
                     embedding = extracted.embedding,
                     referenceCodes = extracted.referenceCodes,
-                    referenceText = effectiveRefText,
-                    usedOnnxEncoder = extracted.usedOnnxEncoder,
-                    estimatedPitchRatio = extracted.timbreSettings.pitchRatio,
-                    timbreSettings = extracted.timbreSettings,
+                    referenceText = userRefText,
+                    usedOnnxEncoder = true,
                     acousticSummary = extracted.acousticSummary,
                     previewWavPath = draftWavPath,
                     synthesizedPreview = usedSynthPreview
@@ -931,15 +924,14 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 ).joinToString("\n\n")
                 _lastAiVerbatimError.value = combinedDiagErr.ifBlank { null }
 
-                val presetNote = extracted.matchedPresetId?.let { " • nền '$it'" } ?: ""
-                val timbreNote = extracted.timbreSettings.describeShort()
+                val codeCount = extracted.referenceCodes?.size ?: 0
                 _statusMessage.value = when {
                     usedSynthPreview ->
-                        "Đã tạo giọng \"$cleanName\" ($presetNote • $timbreNote) — Bấm Nghe thử rồi bấm Lưu."
+                        "Đã nhân bản giọng thật \"$cleanName\" ($codeCount mã NeuCodec ONNX) — Bấm Nghe thử rồi bấm Lưu."
                     !synthPreviewNote.isNullOrBlank() ->
-                        "Đã phân tích giọng ($presetNote • $timbreNote), tổng hợp GGUF báo lỗi (xem log bên dưới)."
+                        "Đã trích xuất $codeCount mã giọng thật, tổng hợp GGUF báo lỗi (xem log bên dưới)."
                     else ->
-                        "Đã tạo giọng \"$cleanName\" ($presetNote • $timbreNote) — Bấm Nghe thử rồi bấm Lưu."
+                        "Đã tạo giọng thật \"$cleanName\" ($codeCount mã NeuCodec ONNX) — Bấm Nghe thử rồi bấm Lưu."
                 }
                 onCreated()
             } catch (e: Throwable) {
@@ -1056,8 +1048,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     val emb: FloatArray?,
                     val codes: IntArray?,
                     val refText: String?,
-                    val presetId: String?,
-                    val timbre: com.example.audio.VoiceTimbreSettings?
+                    val presetId: String?
                 )
                 val voiceInput = withContext(Dispatchers.IO) {
                     val draft = _draftClonedVoice.value
@@ -1066,8 +1057,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                             emb = draft.embedding,
                             codes = draft.referenceCodes,
                             refText = draft.referenceText,
-                            presetId = draft.timbreSettings.matchedPresetId,
-                            timbre = draft.timbreSettings
+                            presetId = null
                         )
                     } else {
                         val selId = _readerPrefs.value.selectedClonedVoiceId
@@ -1079,8 +1069,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                                 emb = preset?.voiceEmbedding,
                                 codes = preset?.referenceCodes,
                                 refText = preset?.referenceText,
-                                presetId = preset?.id,
-                                timbre = null
+                                presetId = preset?.id
                             )
                         } else {
                             val prof = selId?.let { id -> clonedVoiceRepository.findById(id) }
@@ -1089,11 +1078,10 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                                     emb = clonedVoiceRepository.loadEmbedding(prof),
                                     codes = clonedVoiceRepository.loadReferenceCodes(prof),
                                     refText = prof.referenceText,
-                                    presetId = prof.matchedPresetId.takeIf { it.isNotBlank() },
-                                    timbre = prof.toTimbreSettings()
+                                    presetId = prof.matchedPresetId.takeIf { it.isNotBlank() }
                                 )
                             } else {
-                                DiagVoiceInput(null, null, null, null, null)
+                                DiagVoiceInput(null, null, null, null)
                             }
                         }
                     }
@@ -1103,8 +1091,7 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                     speakerEmbedding = voiceInput.emb,
                     referenceCodes = voiceInput.codes,
                     referenceText = voiceInput.refText,
-                    matchedPresetId = voiceInput.presetId,
-                    timbreSettings = voiceInput.timbre
+                    matchedPresetId = voiceInput.presetId
                 )
                 _aiDiagnosticTestResult.value = res
                 _aiDiagnosticReport.value = onnxVoiceEngine.runFullSystemDiagnostics(forceResync = false)
@@ -1155,10 +1142,9 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                         sampleRate = draft.sampleRate,
                         embedding = draft.embedding,
                         usedOnnxEncoder = draft.usedOnnxEncoder,
-                        estimatedPitchRatio = draft.estimatedPitchRatio,
                         referenceCodes = draft.referenceCodes,
                         referenceText = draft.referenceText,
-                        timbreSettings = draft.timbreSettings
+                        matchedPresetId = ""
                     )
                     if (draft.synthesizedPreview) {
                         VoicePreviewCache.copyDraftPreviewToSavedVoice(
@@ -1230,15 +1216,13 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 if (VoicePreviewCache.hasValidPreview(appCtx, clone.id)) continue
                 val emb = clonedVoiceRepository.loadEmbedding(clone) ?: FloatArray(0)
                 val codes = clonedVoiceRepository.loadReferenceCodes(clone)
-                val timbre = clone.toTimbreSettings()
                 val synth = onnxVoiceEngine.synthesizeSentenceDetailed(
                     sentence = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
                     speakerEmbedding = emb,
-                    speed = timbre.speakingRateRatio,
+                    speed = 1.0f,
                     referenceCodes = codes,
                     referenceText = clone.referenceText,
-                    matchedPresetId = clone.matchedPresetId.takeIf { it.isNotBlank() },
-                    timbreSettings = timbre
+                    matchedPresetId = clone.matchedPresetId.takeIf { it.isNotBlank() }
                 )
                 synth.audio?.let { audio ->
                     VoicePreviewCache.savePreviewPcm(appCtx, clone.id, audio.pcmFloat, audio.sampleRate)
@@ -1264,15 +1248,13 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
             if (!onnxVoiceEngine.isFullOnnxSynthesisReady()) return@launch
             val emb = clonedVoiceRepository.loadEmbedding(profile) ?: FloatArray(0)
             val codes = clonedVoiceRepository.loadReferenceCodes(profile)
-            val timbre = profile.toTimbreSettings()
             val synth = onnxVoiceEngine.synthesizeSentenceDetailed(
                 sentence = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
                 speakerEmbedding = emb,
-                speed = timbre.speakingRateRatio,
+                speed = 1.0f,
                 referenceCodes = codes,
                 referenceText = profile.referenceText,
-                matchedPresetId = profile.matchedPresetId.takeIf { it.isNotBlank() },
-                timbreSettings = timbre
+                matchedPresetId = profile.matchedPresetId.takeIf { it.isNotBlank() }
             )
             synth.audio?.let { audio ->
                 VoicePreviewCache.savePreviewPcm(appCtx, profile.id, audio.pcmFloat, audio.sampleRate)

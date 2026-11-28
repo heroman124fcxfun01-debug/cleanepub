@@ -20,13 +20,8 @@ enum class OnnxVoiceEngineMode {
 data class SpeakerEmbeddingResult(
     val embedding: FloatArray,
     val usedOnnxEncoder: Boolean,
-    val estimatedPitchRatio: Float,
     val referenceCodes: IntArray? = null,
-    val matchedPresetId: String? = null,
-    val secondaryPresetId: String? = null,
-    val blendWeightPrimary: Float = 1.0f,
-    val matchedPresetRefText: String? = null,
-    val timbreSettings: VoiceTimbreSettings = VoiceTimbreSettings(pitchRatio = estimatedPitchRatio),
+    val durationSeconds: Float = 0f,
     val acousticSummary: String = "",
     val errorMessage: String? = null
 )
@@ -43,15 +38,15 @@ data class OnnxSynthesisResult(
 )
 
 /**
- * 100% Offline Official `pnnbao97/VieNeu-TTS` Engine (GGUF via `llama.cpp` + NeuCodec ONNX 24kHz).
+ * 100% Offline Official `pnnbao97/VieNeu-TTS` Engine
+ * (GGUF Backbone via `llama.cpp` + NeuCodec ONNX Encoder 16kHz + NeuCodec ONNX Decoder 24kHz).
  *
  * Strictly LAZY-LOADED on [Dispatchers.IO]:
  * - Constructing this class performs ZERO file I/O, ZERO `assets/models/` copying, and ZERO native
  *   library loading (`llama.cpp` / `onnxruntime`).
- * - Enforces exact 1-to-1 alignment between `ref_text` (`ref_phones`) and `ref_codes` so VieNeu-TTS
- *   NEVER speaks leftover sample/reference text between book sentences.
- * - Applies real 24kHz PCM DSP timbre shaping (WSOLA Pitch Shift + 3-band Biquad Formant/EQ) via
- *   [VoiceTimbreProcessor] so distinct cloned voices sound unmistakably different.
+ * - Extracts REAL 50 Hz FSQ `ref_codes` & `speaker_embedding` directly from the user's cleanest
+ *   3–8 second (optimal 6s) voice recording via `neucodec_encoder.onnx` (ZERO pitch/formant/voices.json faking).
+ * - Synthesizes with `temperature = 0.8` directly from `(ref_text, ref_codes, speaker_embedding)`.
  */
 class OfflineOnnxVoiceEngine(context: Context) {
 
@@ -131,10 +126,11 @@ class OfflineOnnxVoiceEngine(context: Context) {
                         return@withLock engineMode
                     }
 
-                    // 1. Initialize NeuCodec ONNX Decoder (24kHz) ONLY — never load non-existent neucodec_encoder.onnx
+                    // 1. Initialize NeuCodec ONNX Encoder (16kHz real voice cloning) + optional Speaker Encoder + Decoder (24kHz)
                     neuCodec.initialize(
-                        encoderFile = null,
-                        decoderFile = discovered.codecDecoderFile
+                        encoderFile = discovered.codecEncoderFile,
+                        decoderFile = discovered.codecDecoderFile,
+                        speakerEncoderFile = discovered.speakerEncoderFile
                     )
                     neuCodec.loadErrors.forEach { (role, err) -> initErrors[role] = err }
 
@@ -157,7 +153,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
                     Log.i(
                         TAG,
                         "Lazy init done on IO: mode=$engineMode | gguf=${ggufRunner.isLoaded} | " +
-                            "dec=${neuCodec.hasDecoder} | g2p=${espeakG2p.entryCount} | presets=${presetVoices.size}"
+                            "enc=${neuCodec.hasEncoder} | spk=${neuCodec.hasSpeakerEncoder} | dec=${neuCodec.hasDecoder} | " +
+                            "g2p=${espeakG2p.entryCount} | presets=${presetVoices.size}"
                     )
                     engineMode
                 } catch (t: Throwable) {
@@ -192,11 +189,6 @@ class OfflineOnnxVoiceEngine(context: Context) {
             ?: presetVoices.firstOrNull { it.referenceCodes.size >= 8 }
     }
 
-    /**
-     * Checks whether a given `referenceCodes` array came from one of the official `voices.json` presets.
-     * Used to guarantee 1-to-1 `ref_text` <-> `ref_codes` alignment even for previously saved cloned profiles
-     * whose stored `referenceText` was a mismatched recording script.
-     */
     private fun findPresetMatchingCodes(codes: IntArray?): VieNeuPresetVoice? {
         if (codes == null || codes.size < 8 || presetVoices.isEmpty()) return null
         val checkLen = minOf(codes.size, 12)
@@ -219,7 +211,9 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
     fun getStatusBadgeSummary(): String {
         val voiceCount = presetVoices.size
+        val hasEnc = neuCodecLazy.isInitialized() && neuCodec.hasEncoder
         return when {
+            isFullOnnxSynthesisReady() && hasEnc -> "Model: OK • Encoder | Voices: $voiceCount"
             isFullOnnxSynthesisReady() -> "Model: OK | Voices: $voiceCount"
             engineMode == OnnxVoiceEngineMode.UNINITIALIZED -> "Model: Chờ nạp | Voices: $voiceCount"
             else -> "Model: Lỗi | Voices: $voiceCount"
@@ -229,26 +223,25 @@ class OfflineOnnxVoiceEngine(context: Context) {
     fun getReadinessDiagnostic(): String {
         val d = discoveredModels
         if (d == null || !d.hasAnyModel) {
-            return lastInitError ?: "Chưa có bộ model VieNeu-TTS GGUF + NeuCodec trong assets/models/."
+            return lastInitError ?: "Chưa có bộ model VieNeu-TTS GGUF + NeuCodec ONNX trong assets/models/."
         }
         val missing = mutableListOf<String>()
         if (!ggufRunner.isLoaded) missing.add("chưa nạp được backbone .gguf (${ggufRunner.lastLoadError ?: "thiếu file .gguf"})")
         if (!neuCodec.hasDecoder) missing.add("chưa nạp được neucodec_decoder.onnx")
+        if (!neuCodec.hasEncoder) missing.add("thiếu neucodec_encoder.onnx để nhân bản giọng thật")
         return if (missing.isEmpty()) {
-            "Sẵn sàng VieNeu-TTS GGUF + NeuCodec 24kHz (${presetVoices.size} giọng mẫu voices.json + DSP biến đổi âm sắc)"
+            "Sẵn sàng VieNeu-TTS GGUF + NeuCodec Encoder 16kHz + Decoder 24kHz (Nhân bản giọng thật 100% offline)"
         } else {
             missing.joinToString(" | ")
         }
     }
 
     /**
-     * Analyzes the user's 16 kHz Mono audio sample across multiple acoustic dimensions:
-     * - Median voiced F0 pitch (Hz)
-     * - 3-band spectral energy ratios (Low/Mid/High), Spectral Centroid & Formant tilt
-     * - Speaking rate (syllables/second)
-     *
-     * Maps accurately across ALL Vietnamese presets in `voices.json` (`Vinh`, `Binh`, `Tuyen`,
-     * `Doan`, `Ly`, `Ngoc`, etc.) and computes real relative WSOLA Pitch + 3-band Formant/EQ parameters.
+     * Real 100% offline zero-shot voice cloning extractor via `neucodec_encoder.onnx`
+     * (+ optional `speaker_encoder.onnx`):
+     * - Automatically trims silence & extracts the cleanest 3–8 second (optimal 6s) 16 kHz Mono PCM segment.
+     * - Runs ONNX Runtime directly on-device to obtain authentic 50 Hz FSQ `ref_codes` & `speaker_embedding`.
+     * - ZERO `voices.json` substitution and ZERO artificial pitch/formant shifting.
      */
     suspend fun extractSpeakerEmbedding(
         samples: FloatArray,
@@ -259,8 +252,17 @@ class OfflineOnnxVoiceEngine(context: Context) {
             return@withContext SpeakerEmbeddingResult(
                 embedding = FloatArray(0),
                 usedOnnxEncoder = false,
-                estimatedPitchRatio = 1.0f,
                 errorMessage = "Dữ liệu âm thanh mẫu bị rỗng."
+            )
+        }
+
+        if (!neuCodec.hasEncoder) {
+            val missingErr = neuCodec.loadErrors["neucodec_encoder"]
+                ?: "Không tìm thấy neucodec_encoder.onnx trong assets/models/ để trích xuất mã giọng thật."
+            return@withContext SpeakerEmbeddingResult(
+                embedding = FloatArray(0),
+                usedOnnxEncoder = false,
+                errorMessage = missingErr
             )
         }
 
@@ -274,73 +276,54 @@ class OfflineOnnxVoiceEngine(context: Context) {
             samples
         }
 
-        val acousticProfile = VoiceTimbreProcessor.analyzeVoice16k(
+        val cleanWindow16k = AudioFileDecoder.extractCleanestSpeechWindow16k(
             samples = samples16k,
+            sampleRate = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE,
+            minSeconds = AudioFileDecoder.CLONE_MIN_WINDOW_SECONDS,
+            maxSeconds = AudioFileDecoder.CLONE_MAX_WINDOW_SECONDS
+        )
+
+        val encodedRes = neuCodec.encodeReferenceAudio(
+            samples = cleanWindow16k,
             sampleRate = NeuCodecOnnxEngine.ENCODER_SAMPLE_RATE
         )
-        val blended = VoiceTimbreProcessor.matchBestPresetAndComputeTimbre(
-            profile = acousticProfile,
-            presets = presetVoices
-        )
-        val matchedPreset = blended.primaryPreset
-        val secondaryPreset = blended.secondaryPreset
-        val timbreSettings = blended.timbreSettings
-
-        val blendLabel = when {
-            matchedPreset != null && secondaryPreset != null -> String.format(
+        val encoded = encodedRes.getOrNull()
+        if (encoded != null && encoded.codes.size >= 8) {
+            val realEmbedding = encoded.voiceEmbedding?.takeIf { it.isNotEmpty() }
+                ?: OnnxModelAssetHelper.computeAcousticFingerprint(cleanWindow16k)
+            val spkTag = if (encoded.voiceEmbedding != null) " • speaker_emb=${encoded.voiceEmbedding.size}D" else ""
+            val summary = String.format(
                 Locale.US,
-                "%s(%.0f%%) + %s(%.0f%%)",
-                matchedPreset.id,
-                blended.primaryWeight * 100f,
-                secondaryPreset.id,
-                blended.secondaryWeight * 100f
+                "NeuCodec Encoder ONNX: %d mã giọng thật (%.1fs @ 16kHz)%s",
+                encoded.codes.size,
+                encoded.durationSeconds,
+                spkTag
             )
-            matchedPreset != null -> matchedPreset.displayLabel
-            else -> "none"
-        }
-        val summary = String.format(
-            Locale.US,
-            "F0=%.0fHz | Formant=%.0fHz | MFCC13 | Tilt=%+.2f | Rate=%.1f syl/s -> %s (%s)",
-            acousticProfile.f0Hz,
-            acousticProfile.formantCenterHz,
-            acousticProfile.spectralTilt,
-            acousticProfile.speakingRateSylPerSec,
-            blendLabel,
-            timbreSettings.describeShort()
-        )
-        Log.i(TAG, "Acoustic voice profiling (MFCC13 + Top-2 Blend): $summary")
-
-        if (matchedPreset != null) {
+            Log.i(TAG, summary)
             return@withContext SpeakerEmbeddingResult(
-                embedding = blended.blendedVoiceEmbedding,
-                usedOnnxEncoder = false,
-                estimatedPitchRatio = timbreSettings.pitchRatio,
-                referenceCodes = matchedPreset.referenceCodes,
-                matchedPresetId = matchedPreset.id,
-                secondaryPresetId = secondaryPreset?.id,
-                blendWeightPrimary = blended.primaryWeight,
-                matchedPresetRefText = matchedPreset.referenceText,
-                timbreSettings = timbreSettings,
+                embedding = realEmbedding,
+                usedOnnxEncoder = true,
+                referenceCodes = encoded.codes,
+                durationSeconds = encoded.durationSeconds,
                 acousticSummary = summary,
                 errorMessage = null
             )
         }
 
-        val loadErr = "Không tìm thấy giọng mẫu hợp lệ trong voices.json (filesDir/models/voices.json)."
+        val encErr = encodedRes.exceptionOrNull()?.let {
+            "Lỗi trích xuất giọng thật bằng neucodec_encoder.onnx:\n${OnnxModelAssetHelper.formatFullThrowable(it)}"
+        } ?: "neucodec_encoder.onnx không trích xuất được chuỗi ref_codes hợp lệ từ tệp ghi âm."
+        Log.e(TAG, encErr)
         SpeakerEmbeddingResult(
-            embedding = blended.blendedVoiceEmbedding,
+            embedding = FloatArray(0),
             usedOnnxEncoder = false,
-            estimatedPitchRatio = timbreSettings.pitchRatio,
-            referenceCodes = null,
-            timbreSettings = timbreSettings,
-            acousticSummary = summary,
-            errorMessage = loadErr
+            errorMessage = encErr
         )
     }
 
     /**
      * Lazily synthesizes & persists `preview_<preset_id>.wav` for an official `voices.json` preset
-     * so tapping "Nghe thử" plays instantaneously (<50ms). Returns null if the engine is busy or unavailable.
+     * so tapping "Nghe thử" plays instantaneously (<50ms).
      */
     suspend fun ensurePresetPreviewCached(presetId: String): File? = withContext(Dispatchers.IO) {
         val storageId = OnnxModelAssetHelper.presetStorageId(presetId)
@@ -357,8 +340,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
             speed = 1.0f,
             referenceCodes = preset.referenceCodes,
             referenceText = preset.referenceText,
-            matchedPresetId = preset.id,
-            timbreSettings = null
+            matchedPresetId = preset.id
         )
         val audio = synth.audio ?: return@withContext null
         VoicePreviewCache.savePreviewPcm(
@@ -371,12 +353,11 @@ class OfflineOnnxVoiceEngine(context: Context) {
 
     /**
      * Synthesizes a single Vietnamese text chunk using official `pnnbao97/VieNeu-TTS` GGUF + NeuCodec 24kHz:
-     * 1. Resolves strictly aligned `(ref_text, ref_codes)` from `voices.json` (never letting mismatched
-     *    recording scripts leak into `ref_text` and cause the model to speak extra sample sentences!).
-     * 2. Phonemizes `ref_text` (cached per voice) and `target_text` ONLY via eSpeak-NG Vietnamese IPA.
-     * 3. Generates `<|speech_N|>` tokens with `VieNeuGgufRunner`, stopping immediately on `<|SPEECH_GENERATION_END|>`.
-     * 4. Decodes to 24,000 Hz Mono Float32 PCM via `neucodec_decoder.onnx`.
-     * 5. Applies real 24kHz PCM DSP Pitch Shifting + 3-band Formant/EQ shaping via [VoiceTimbreProcessor].
+     * 1. Passes the authentic cloned `(ref_text, ref_codes, speaker_embedding)` directly into the prompt
+     *    (or the selected built-in preset if reading with a `voices.json` preset).
+     * 2. Phonemizes `ref_text` (cached per voice) and `target_text` via eSpeak-NG Vietnamese IPA.
+     * 3. Generates `<|speech_N|>` tokens with `VieNeuGgufRunner` (`temperature = 0.8`), stopping immediately on `<|SPEECH_GENERATION_END|>`.
+     * 4. Decodes directly to authentic 24,000 Hz Mono Float32 PCM via `neucodec_decoder.onnx` (NO artificial pitch/formant distortion).
      */
     suspend fun synthesizeSentenceDetailed(
         sentence: String,
@@ -384,8 +365,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
         speed: Float = 1.0f,
         referenceCodes: IntArray? = null,
         referenceText: String? = null,
-        matchedPresetId: String? = null,
-        timbreSettings: VoiceTimbreSettings? = null
+        matchedPresetId: String? = null
     ): OnnxSynthesisResult = withContext(Dispatchers.IO) {
         activeOpsCount.incrementAndGet()
         try {
@@ -409,8 +389,6 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 return@withContext OnnxSynthesisResult(errorMessage = "Câu văn bản trống sau khi chuẩn hóa.")
             }
 
-            // STRICT 1-to-1 ALIGNMENT between ref_codes and ref_text:
-            // Always pair with the matched preset's exact original referenceText so GGUF NEVER speaks sample text!
             val explicitPreset = matchedPresetId?.takeIf { it.isNotBlank() }?.let { findPresetVoiceById(it) }
             val inferredPreset = explicitPreset ?: findPresetMatchingCodes(referenceCodes)
 
@@ -423,24 +401,20 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 inferredPreset != null -> {
                     resolvedRefCodes = inferredPreset.referenceCodes
                     resolvedRefText = inferredPreset.referenceText
-                    // Prefer Top-2 weighted blended speakerEmbedding when supplied by a cloned voice profile
                     resolvedVoiceEmbedding = speakerEmbedding.takeIf { it.isNotEmpty() } ?: inferredPreset.voiceEmbedding
-                    val blendSuffix = if (!timbreSettings?.secondaryPresetId.isNullOrBlank()) {
-                        " + blend ${timbreSettings?.secondaryPresetId}"
-                    } else ""
-                    voiceSourceLabel = "Preset '${inferredPreset.displayLabel}'$blendSuffix (${resolvedRefCodes.size} codes)"
+                    voiceSourceLabel = "Preset '${inferredPreset.displayLabel}' (${resolvedRefCodes.size} codes)"
                 }
                 referenceCodes != null && referenceCodes.size >= 8 -> {
                     resolvedRefCodes = referenceCodes
                     resolvedRefText = referenceText?.trim().orEmpty()
                     resolvedVoiceEmbedding = speakerEmbedding.takeIf { it.isNotEmpty() }
-                    voiceSourceLabel = "Custom Encoded Voice (${resolvedRefCodes.size} codes)"
+                    voiceSourceLabel = "Zero-Shot Cloned Voice (${resolvedRefCodes.size} real NeuCodec codes)"
                 }
                 else -> {
                     val fallbackPreset = presetVoices.firstOrNull { it.referenceCodes.size >= 8 }
                     if (fallbackPreset == null) {
                         return@withContext OnnxSynthesisResult(
-                            errorMessage = "Không tìm thấy giọng mẫu hợp lệ trong voices.json."
+                            errorMessage = "Chưa có mã giọng mẫu (ref_codes). Vui lòng tạo giọng nhân bản mới."
                         )
                     }
                     resolvedRefCodes = fallbackPreset.referenceCodes
@@ -455,73 +429,61 @@ class OfflineOnnxVoiceEngine(context: Context) {
             } else {
                 ""
             }
-        val targetPhones = espeakG2p.phonemize(cleanTarget)
-        if (targetPhones.isBlank()) {
-            return@withContext OnnxSynthesisResult(
-                errorMessage = "Bộ chuyển âm vị tiếng Việt không tạo được chuỗi IPA cho câu này."
+            val targetPhones = espeakG2p.phonemize(cleanTarget)
+            if (targetPhones.isBlank()) {
+                return@withContext OnnxSynthesisResult(
+                    errorMessage = "Bộ chuyển âm vị tiếng Việt không tạo được chuỗi IPA cho câu này."
+                )
+            }
+
+            val wordCount = VietnameseTtsTextNormalizer.countWords(cleanTarget).coerceAtLeast(1)
+            val estMaxTokens = (wordCount * 20 + 90).coerceIn(150, 680)
+
+            val genRes = ggufRunner.generateSpeechCodes(
+                refPhones = refPhones,
+                targetPhones = targetPhones,
+                refCodes = resolvedRefCodes,
+                temperature = 0.8,
+                topK = 50,
+                maxNewTokens = estMaxTokens
             )
-        }
 
-        // Tight token budget proportional to target Vietnamese word count (~11-15 speech tokens/word @ 50Hz)
-        // prevents runaway hallucination while leaving comfortable headroom for expressive pauses.
-        val wordCount = VietnameseTtsTextNormalizer.countWords(cleanTarget).coerceAtLeast(1)
-        val estMaxTokens = (wordCount * 20 + 90).coerceIn(150, 680)
+            if (genRes.errorMessage != null || genRes.speechCodes.size < 4) {
+                return@withContext OnnxSynthesisResult(
+                    audio = null,
+                    errorMessage = genRes.errorMessage ?: "GGUF không sinh ra mã âm thanh hợp lệ.",
+                    traceLog = buildString {
+                        appendLine("Voice: $voiceSourceLabel")
+                        appendLine("RefText: $resolvedRefText")
+                        appendLine("RefIPA: $refPhones")
+                        appendLine("TargetIPA: $targetPhones")
+                        appendLine("GGUF elapsed: ${genRes.elapsedMs} ms | codes=${genRes.speechCodes.size}")
+                        appendLine("RawOut: ${genRes.rawOutputText}")
+                    }
+                )
+            }
 
-        val genRes = ggufRunner.generateSpeechCodes(
-            refPhones = refPhones,
-            targetPhones = targetPhones,
-            refCodes = resolvedRefCodes,
-            temperature = 0.75,
-            topK = 50,
-            maxNewTokens = estMaxTokens
-        )
-
-        if (genRes.errorMessage != null || genRes.speechCodes.size < 4) {
-            return@withContext OnnxSynthesisResult(
-                audio = null,
-                errorMessage = genRes.errorMessage ?: "GGUF không sinh ra mã âm thanh hợp lệ.",
-                traceLog = buildString {
-                    appendLine("Voice: $voiceSourceLabel")
-                    appendLine("RefText: $resolvedRefText")
-                    appendLine("RefIPA: $refPhones")
-                    appendLine("TargetIPA: $targetPhones")
-                    appendLine("GGUF elapsed: ${genRes.elapsedMs} ms | codes=${genRes.speechCodes.size}")
-                    appendLine("RawOut: ${genRes.rawOutputText}")
-                }
+            val decodeStart = System.currentTimeMillis()
+            val decoded = neuCodec.decodeSpeechCodes(
+                codes = genRes.speechCodes,
+                voiceEmbedding = resolvedVoiceEmbedding
             )
-        }
-
-        val decodeStart = System.currentTimeMillis()
-        val decoded = neuCodec.decodeSpeechCodes(
-            codes = genRes.speechCodes,
-            voiceEmbedding = resolvedVoiceEmbedding
-        )
-        val decodeMs = System.currentTimeMillis() - decodeStart
+            val decodeMs = System.currentTimeMillis() - decodeStart
 
             decoded.fold(
-                onSuccess = { rawWaveform ->
-                    val dspStart = System.currentTimeMillis()
-                    val shapedWaveform = VoiceTimbreProcessor.applyTimbreAndPitch(
-                        samples = rawWaveform,
-                        sampleRate = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE,
-                        timbre = timbreSettings
-                    )
-                    val dspMs = System.currentTimeMillis() - dspStart
-                    val durSec = shapedWaveform.size.toFloat() / NeuCodecOnnxEngine.DECODER_SAMPLE_RATE.toFloat()
+                onSuccess = { waveform24k ->
+                    val durSec = waveform24k.size.toFloat() / NeuCodecOnnxEngine.DECODER_SAMPLE_RATE.toFloat()
                     val trace = buildString {
-                        appendLine("Pipeline: Official pnnbao97/VieNeu-TTS GGUF + NeuCodec ONNX (24kHz)")
+                        appendLine("Pipeline: Official pnnbao97/VieNeu-TTS GGUF (temp=0.8) + NeuCodec ONNX (24kHz)")
                         appendLine("Voice: $voiceSourceLabel")
-                        if (timbreSettings != null && !timbreSettings.isIdentity) {
-                            appendLine("DSP Pitch+Formant+EQ: ${timbreSettings.describeShort()} (${dspMs}ms)")
-                        }
                         appendLine("RefText: ${resolvedRefText.take(120)}")
                         appendLine("TargetText: ${cleanTarget.take(140)}")
                         appendLine("GGUF: ${genRes.speechCodes.size} speech tokens trong ${genRes.elapsedMs} ms")
-                        appendLine("NeuCodec Decode: ${shapedWaveform.size} samples @ 24kHz (${String.format(Locale.US, "%.2fs", durSec)}) trong $decodeMs ms")
+                        appendLine("NeuCodec Decode: ${waveform24k.size} samples @ 24kHz (${String.format(Locale.US, "%.2fs", durSec)}) trong $decodeMs ms")
                     }
                     OnnxSynthesisResult(
                         audio = SynthesizedSentenceAudio(
-                            pcmFloat = shapedWaveform,
+                            pcmFloat = waveform24k,
                             sampleRate = NeuCodecOnnxEngine.DECODER_SAMPLE_RATE
                         ),
                         errorMessage = null,
@@ -550,14 +512,15 @@ class OfflineOnnxVoiceEngine(context: Context) {
             val d = discoveredModels
 
             val mapped = linkedMapOf(
-                "pipeline" to "Official pnnbao97/VieNeu-TTS (GGUF + NeuCodec 24kHz + MFCC13 Top-2 Blend + Pitch/Formant DSP)",
+                "pipeline" to "Official pnnbao97/VieNeu-TTS (GGUF temp=0.8 + NeuCodec Encoder 16kHz + Decoder 24kHz — Zero-Shot Clone thật)",
                 "gguf_backbone" to (d?.ggufBackboneFile?.name ?: "(không tìm thấy *.gguf)"),
+                "neucodec_encoder" to (d?.codecEncoderFile?.name ?: "(THIẾU neucodec_encoder.onnx)"),
+                "speaker_encoder" to (d?.speakerEncoderFile?.name ?: "(không cần riêng — dùng trực tiếp NeuCodec FSQ ref_codes)"),
                 "neucodec_decoder" to (d?.codecDecoderFile?.name ?: "(không tìm thấy neucodec_decoder.onnx)"),
-                "neucodec_encoder" to "Không sử dụng (MFCC-13 + F0 + Formant -> pha trộn Top-2 voices.json + STFT Formant/WSOLA DSP)",
                 "espeak_g2p_dict" to (d?.espeakDictFile?.let { "${it.name} (${espeakG2p.entryCount} âm tiết)" }
                     ?: "Dùng luật dự phòng eSpeak-NG vi (${espeakG2p.entryCount} âm tiết)"),
                 "voices.json" to (d?.voicesJsonFile?.let { "${it.name} (${presetVoices.size} giọng mẫu)" }
-                    ?: "(không tìm thấy)"),
+                    ?: "(không đóng gói)"),
                 "output_sample_rate" to "${NeuCodecOnnxEngine.DECODER_SAMPLE_RATE} Hz"
             )
 
@@ -568,10 +531,8 @@ class OfflineOnnxVoiceEngine(context: Context) {
             loaded.putAll(neuCodec.loadedSignatures)
 
             val sampleIpa = espeakG2p.phonemize("Hôm nay trời trong xanh và mát mẻ.")
-            val presetPreview = if (presetVoices.isEmpty()) "(trống)" else {
-                presetVoices.joinToString(" | ") {
-                    "${it.id}(${it.referenceCodes.size}c)"
-                }
+            val presetPreview = if (presetVoices.isEmpty()) "(không có)" else {
+                presetVoices.joinToString(" | ") { "${it.id}(${it.referenceCodes.size}c)" }
             }
             val metadata = linkedMapOf(
                 "gguf_special_tokens" to ggufRunner.specialTokenCheckSummary.ifBlank { "(chưa kiểm tra)" },
@@ -606,25 +567,24 @@ class OfflineOnnxVoiceEngine(context: Context) {
         val startMs = System.currentTimeMillis()
         try {
             ensureInitialized()
-            val inputSamples = sampleFloat16k?.takeIf { it.isNotEmpty() } ?: FloatArray(16_000 * 3) { i ->
+            val inputSamples = sampleFloat16k?.takeIf { it.isNotEmpty() } ?: FloatArray(16_000 * 4) { i ->
                 val t = i.toDouble() / 16_000.0
                 (0.35 * kotlin.math.sin(2.0 * kotlin.math.PI * 185.0 * t) +
                     0.18 * kotlin.math.sin(2.0 * kotlin.math.PI * 370.0 * t)).toFloat()
             }
             val res = extractSpeakerEmbedding(inputSamples, sampleRate)
             val elapsed = System.currentTimeMillis() - startMs
-            val ok = (res.referenceCodes?.size ?: 0) >= 8 && res.errorMessage.isNullOrBlank()
+            val ok = res.usedOnnxEncoder && (res.referenceCodes?.size ?: 0) >= 8 && res.errorMessage.isNullOrBlank()
             val modeLabel = if (ok) {
-                "THÀNH CÔNG (Khớp '${res.matchedPresetId}' + ${res.timbreSettings.describeShort()})"
+                "THÀNH CÔNG (NeuCodec Encoder ONNX — ${res.referenceCodes?.size ?: 0} mã giọng thật)"
             } else {
                 "THẤT BẠI"
             }
             val detail = buildString {
                 appendLine("Trạng thái: $modeLabel")
                 appendLine("Thời gian chạy: $elapsed ms")
-                appendLine("Phân tích âm học: ${res.acousticSummary}")
-                appendLine("Số mã FSQ NeuCodec sử dụng: ${res.referenceCodes?.size ?: 0} tokens (~50 tok/s)")
-                res.matchedPresetId?.let { appendLine("Giọng mẫu voices.json tương đồng: $it") }
+                appendLine("Tóm tắt Encoder: ${res.acousticSummary}")
+                appendLine("Số mã FSQ NeuCodec thật: ${res.referenceCodes?.size ?: 0} tokens (~50 tok/s)")
                 if (!res.errorMessage.isNullOrBlank()) {
                     appendLine()
                     appendLine("CHI TIẾT LỖI GỐC (NGUYÊN VĂN):")
@@ -632,14 +592,14 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 }
             }
             AiDiagnosticTestResult(
-                title = "Thử phân tích & khớp giọng mẫu (voices.json + DSP)",
+                title = "Thử NeuCodec Encoder ONNX (trích xuất giọng thật)",
                 success = ok,
                 elapsedMs = elapsed,
                 detailLog = detail.trimEnd()
             )
         } catch (e: Throwable) {
             AiDiagnosticTestResult(
-                title = "Thử phân tích & khớp giọng mẫu (voices.json + DSP)",
+                title = "Thử NeuCodec Encoder ONNX (trích xuất giọng thật)",
                 success = false,
                 elapsedMs = System.currentTimeMillis() - startMs,
                 detailLog = "NGOẠI LỆ NGUYÊN VĂN:\n${OnnxModelAssetHelper.formatFullThrowable(e)}"
@@ -652,8 +612,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
         speakerEmbedding: FloatArray? = null,
         referenceCodes: IntArray? = null,
         referenceText: String? = null,
-        matchedPresetId: String? = null,
-        timbreSettings: VoiceTimbreSettings? = null
+        matchedPresetId: String? = null
     ): Pair<AiDiagnosticTestResult, SynthesizedSentenceAudio?> = withContext(Dispatchers.IO) {
         val startMs = System.currentTimeMillis()
         try {
@@ -664,8 +623,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 speed = 1.0f,
                 referenceCodes = referenceCodes,
                 referenceText = referenceText,
-                matchedPresetId = matchedPresetId,
-                timbreSettings = timbreSettings
+                matchedPresetId = matchedPresetId
             )
             val elapsed = System.currentTimeMillis() - startMs
             val audio = synth.audio

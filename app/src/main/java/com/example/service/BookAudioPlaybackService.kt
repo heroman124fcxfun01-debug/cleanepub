@@ -33,7 +33,6 @@ import com.example.audio.OnnxSynthesisResult
 import com.example.audio.StoryCharacterScanner
 import com.example.audio.VietnameseTtsTextNormalizer
 import com.example.audio.VoicePreviewCache
-import com.example.audio.VoiceTimbreSettings
 import com.example.data.LibraryChapterMeta
 import com.example.data.LibraryManager
 import com.example.data.ReaderPreferences
@@ -619,7 +618,6 @@ class BookAudioPlaybackService : Service() {
             val clonedRefCodes: IntArray?
             val resolvedRefText: String
             val resolvedMatchedPresetId: String?
-            val resolvedTimbre: VoiceTimbreSettings?
             val displayVoiceName: String
             val usePresetLookup: Boolean
 
@@ -629,7 +627,6 @@ class BookAudioPlaybackService : Service() {
                 clonedRefCodes = clonedVoiceRepo.loadReferenceCodes(selectedClone)
                 resolvedRefText = selectedClone.referenceText
                 resolvedMatchedPresetId = selectedClone.matchedPresetId.takeIf { it.isNotBlank() }
-                resolvedTimbre = selectedClone.toTimbreSettings()
                 displayVoiceName = selectedClone.name
                 usePresetLookup = false
             } else {
@@ -638,7 +635,6 @@ class BookAudioPlaybackService : Service() {
                 clonedRefCodes = null
                 resolvedRefText = ""
                 resolvedMatchedPresetId = requestedPresetId
-                resolvedTimbre = null
                 displayVoiceName = requestedPresetId?.let { "VieNeu $it" } ?: "VieNeu AI"
                 usePresetLookup = true
             }
@@ -672,7 +668,6 @@ class BookAudioPlaybackService : Service() {
                 referenceText = resolvedRefText,
                 presetVoiceId = resolvedMatchedPresetId,
                 usePresetFromVoicesJson = usePresetLookup,
-                timbreSettings = resolvedTimbre,
                 generation = generation
             )
             return
@@ -838,7 +833,6 @@ class BookAudioPlaybackService : Service() {
         referenceText: String,
         presetVoiceId: String? = null,
         usePresetFromVoicesJson: Boolean = false,
-        timbreSettings: VoiceTimbreSettings? = null,
         generation: Long
     ) {
         onnxStreamJob = serviceScope.launch {
@@ -910,12 +904,11 @@ class BookAudioPlaybackService : Service() {
                 return@launch
             }
 
-            val userSpeed = (if (activePrefs.advancedCustomEnabled) {
+            val effectiveSpeed = (if (activePrefs.advancedCustomEnabled) {
                 activePrefs.customSpeechRate
             } else {
                 activePrefs.speechRate
             }).coerceIn(0.8f, 1.5f)
-            val effectiveSpeed = (userSpeed * (timbreSettings?.speakingRateRatio ?: 1.0f)).coerceIn(0.82f, 1.5f)
 
             // Look-ahead buffer 3+ đoạn (Channel capacity = 4): giữ sẵn mảng PCM 16-bit 24kHz đã cắt khoảng lặng
             // thừa (< 0.01f), ghép 15ms crossfade & nhịp thở 135-175ms sẵn sàng xả trực tiếp vào 1 AudioTrack duy nhất!
@@ -932,8 +925,7 @@ class BookAudioPlaybackService : Service() {
                             speed = effectiveSpeed,
                             referenceCodes = resolvedCodes,
                             referenceText = resolvedRefText,
-                            matchedPresetId = resolvedPresetId,
-                            timbreSettings = timbreSettings
+                            matchedPresetId = resolvedPresetId
                         )
                         if (!isActive || generation != activeParagraphGeneration) return@launch
                         val audio = synthRes.audio
@@ -1372,7 +1364,6 @@ class BookAudioPlaybackService : Service() {
                 val refCodes: IntArray?
                 val refText: String
                 val matchedPresetId: String?
-                val timbre: VoiceTimbreSettings?
                 val resolvedCacheId: String
 
                 if (targetClone != null) {
@@ -1380,7 +1371,6 @@ class BookAudioPlaybackService : Service() {
                     refCodes = clonedVoiceRepo.loadReferenceCodes(targetClone)
                     refText = targetClone.referenceText
                     matchedPresetId = targetClone.matchedPresetId.takeIf { it.isNotBlank() }
-                    timbre = targetClone.toTimbreSettings()
                     resolvedCacheId = targetClone.id
                 } else {
                     val preset = onnxEngine.findPresetVoiceById(requestedPresetId)
@@ -1402,18 +1392,15 @@ class BookAudioPlaybackService : Service() {
                     refCodes = preset.referenceCodes
                     refText = preset.referenceText
                     matchedPresetId = preset.id
-                    timbre = null
                 }
 
-                val previewSpeed = (timbre?.speakingRateRatio ?: 1.0f).coerceIn(0.88f, 1.14f)
                 val synthResult = onnxEngine.synthesizeSentenceDetailed(
                     sentence = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
                     speakerEmbedding = embedding,
-                    speed = previewSpeed,
+                    speed = 1.0f,
                     referenceCodes = refCodes,
                     referenceText = refText,
-                    matchedPresetId = matchedPresetId,
-                    timbreSettings = timbre
+                    matchedPresetId = matchedPresetId
                 )
 
                 val synthesized = synthResult.audio
@@ -1431,7 +1418,7 @@ class BookAudioPlaybackService : Service() {
                         onnxPlayer.playBlocking(
                             samples = synthesized.pcmFloat,
                             sampleRate = synthesized.sampleRate,
-                            speed = previewSpeed,
+                            speed = 1.0f,
                             pitch = 1.0f
                         )
                     }

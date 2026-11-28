@@ -34,28 +34,48 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Cài đặt thư viện chạy VieNeu-TTS GGUF + NeuCodec (espeak-ng, llama-cpp-python, onnxruntime)
+      - name: Cài đặt thư viện VieNeu-TTS GGUF + NeuCodec ONNX Encoder/Decoder
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq espeak-ng
+          sudo apt-get install -y -qq espeak-ng libsndfile1
           espeak-ng --version
           python3 -m pip install --upgrade pip -q
-          python3 -m pip install -q huggingface_hub numpy onnxruntime
+          python3 -m pip install -q huggingface_hub numpy onnxruntime onnx onnxscript soundfile
           python3 -m pip install -q --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu llama-cpp-python
+          python3 -m pip install -q --index-url https://download.pytorch.org/whl/cpu torch torchaudio || true
+          python3 -m pip install -q neucodec || true
+          python3 -m pip install -q vieneu || true
 
-      - name: Tải trọn bộ model chính thức pnnbao97/VieNeu-TTS (GGUF + NeuCodec ONNX)
+      - name: Dọn rác & tải/xuất bộ model chuẩn (GGUF Q4_0 + NeuCodec Decoder INT8 + NeuCodec Encoder ONNX)
         run: |
           python3 scripts/download_vieneu_models.py app/src/main/assets/models
 
-      - name: Tạo từ điển âm vị tiếng Việt chuẩn eSpeak-NG (vi_espeak_ipa.tsv)
+      - name: Tạo từ điển âm vị tiếng Việt gọn nhẹ (vi_espeak_ipa.tsv) & kiểm tra dung lượng assets
         run: |
           python3 scripts/generate_vi_espeak_dict.py \
             app/src/main/assets/models/vi_espeak_ipa.tsv \
             app/src/main/assets/models/voices.json
-          echo "=== DANH SÁCH FILE TRONG app/src/main/assets/models ==="
-          ls -lh app/src/main/assets/models/
+          echo "=== DANH SÁCH FILE TRONG app/src/main/assets/ ==="
+          find app/src/main/assets -maxdepth 3 -type f -exec ls -lh {} + | sort -k9
+          echo "=== TỔNG DUNG LƯỢNG app/src/main/assets/models/ ==="
+          du -sh app/src/main/assets/models/
+          du -ch app/src/main/assets/models/*
+          # Bắt buộc phải có đủ bộ 3 thành phần AI thật (GGUF + Decoder + Encoder ONNX)
+          test -f app/src/main/assets/models/neucodec_decoder.onnx || { echo "LỖI: Thiếu neucodec_decoder.onnx!"; exit 1; }
+          test -f app/src/main/assets/models/neucodec_encoder.onnx || { echo "LỖI: Thiếu neucodec_encoder.onnx!"; exit 1; }
+          # Chặn tuyệt đối các tệp rác/cũ không dùng tới
+          for forbidden in "sea_g2p.bin" "VieNeuV3Turbo" "MOSS-Audio-Tokenizer-Nano"; do
+            if find app/src/main/assets -iname "*${forbidden}*" | grep -q .; then
+              echo "LỖI: Phát hiện tệp thừa/cũ '${forbidden}' trong app/src/main/assets!"
+              exit 1
+            fi
+          done
+          if find app/src/main/assets -type f \( -iname "*.wav" -o -iname "*.zip" -o -iname "*.md" \) | grep -q .; then
+            echo "LỖI: Phát hiện tệp .wav/.zip/.md thừa trong app/src/main/assets!"
+            exit 1
+          fi
 
-      - name: Chạy kiểm thử tự động âm thanh VieNeu-TTS (sinh & thẩm định test_voice.wav)
+      - name: Chạy kiểm thử tự động VieNeu-TTS (GGUF + Decoder 24kHz + Encoder ONNX 16kHz)
         run: |
           python3 scripts/test_tts_gguf.py \
             app/src/main/assets/models \
@@ -93,7 +113,7 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Biên dịch file APK
+      - name: Biên dịch file APK tối ưu dung lượng (arm64-v8a only + R8 Shrink + Real ONNX Encoder)
         run: |
           gradle :app:assembleDebug \
             --no-daemon \
@@ -104,18 +124,22 @@ jobs:
             echo "Không tìm thấy file APK sau khi biên dịch!"
             exit 1
           fi
+          echo "=== DUNG LƯỢNG APK SAU TỐI ƯU ==="
           ls -lh "$APK_FILE"
           echo "=== KIỂM TRA FILE assets/models TRONG APK ==="
           unzip -l "$APK_FILE" | grep "assets/models/" || { echo "LỖI: APK không chứa assets/models/!"; exit 1; }
           unzip -l "$APK_FILE" | grep -q "\.gguf" || { echo "LỖI: APK thiếu model .gguf!"; exit 1; }
           unzip -l "$APK_FILE" | grep -q "neucodec_decoder\.onnx" || { echo "LỖI: APK thiếu neucodec_decoder.onnx!"; exit 1; }
+          unzip -l "$APK_FILE" | grep -q "neucodec_encoder\.onnx" || { echo "LỖI: APK thiếu neucodec_encoder.onnx!"; exit 1; }
           unzip -l "$APK_FILE" | grep -q "voices\.json" || { echo "LỖI: APK thiếu voices.json!"; exit 1; }
           unzip -l "$APK_FILE" | grep -q "vi_espeak_ipa\.tsv" || { echo "LỖI: APK thiếu vi_espeak_ipa.tsv!"; exit 1; }
-          if unzip -l "$APK_FILE" | grep -q "neucodec_encoder\.onnx"; then
-            echo "Thông tin: APK có kèm tùy chọn neucodec_encoder.onnx."
-          else
-            echo "Thông tin: APK dùng giọng mẫu chuẩn từ voices.json (không cần neucodec_encoder.onnx)."
+          echo "=== KIỂM TRA THƯ VIỆN NATIVE (.so) TRONG APK (CHỈ GIỮ arm64-v8a) ==="
+          unzip -l "$APK_FILE" | grep "lib/" || true
+          if unzip -l "$APK_FILE" | grep -E "lib/(armeabi|x86|x86_64|mips)/"; then
+            echo "LỖI: APK vẫn còn thư viện native ngoài arm64-v8a!"
+            exit 1
           fi
+          echo "OK: APK tối ưu arm64-v8a + R8 + bộ 3 model thật (GGUF Q4_0 + NeuCodec Decoder + NeuCodec Encoder ONNX)."
           echo "APK_PATH=$APK_FILE" >> "$GITHUB_ENV"
 
       - name: Lưu file APK vào GitHub Actions Artifacts

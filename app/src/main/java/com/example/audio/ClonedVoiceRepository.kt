@@ -9,10 +9,11 @@ import java.nio.ByteOrder
 import java.util.UUID
 
 /**
- * Metadata & persistent paths for a user-created Offline AI Cloned Voice (`pnnbao97/VieNeu-TTS`).
- * Stores both:
- * - `referenceText`: exact transcript of the recorded/imported sample ("Nội dung chữ trong file ghi âm mẫu")
- * - `referenceCodesPath`: binary 1D `IntArray` of NeuCodec FSQ speech token IDs extracted from the sample
+ * Metadata & persistent paths for a user-created 100% Offline AI Cloned Voice (`pnnbao97/VieNeu-TTS`).
+ * Stores authentic zero-shot features extracted directly by `neucodec_encoder.onnx`:
+ * - `referenceCodesPath`: binary 1D `IntArray` of real 50 Hz NeuCodec FSQ speech token IDs (`ref_codes`)
+ * - `embeddingPath`: binary `FloatArray` speaker embedding (`speaker_embedding`)
+ * - `referenceText`: exact transcript of the 3–8s recorded/imported sample (`ref_text`)
  */
 data class ClonedVoiceProfile(
     val id: String,
@@ -27,29 +28,9 @@ data class ClonedVoiceProfile(
     val referenceCodesPath: String = "",
     val referenceText: String = "",
     val referenceCodeCount: Int = 0,
-    val usedOnnxEncoder: Boolean,
-    val estimatedPitchRatio: Float,
-    val matchedPresetId: String = "",
-    val secondaryPresetId: String = "",
-    val blendWeightPrimary: Float = 1.0f,
-    val formantShiftRatio: Float = 1.0f,
-    val warmthGainDb: Float = 0.0f,
-    val presenceGainDb: Float = 0.0f,
-    val brightnessGainDb: Float = 0.0f,
-    val speakingRateRatio: Float = 1.0f
-) {
-    fun toTimbreSettings(): VoiceTimbreSettings = VoiceTimbreSettings(
-        pitchRatio = estimatedPitchRatio.coerceIn(0.76f, 1.30f),
-        formantShiftRatio = formantShiftRatio.coerceIn(0.84f, 1.18f),
-        warmthGainDb = warmthGainDb.coerceIn(-4.5f, 4.5f),
-        presenceGainDb = presenceGainDb.coerceIn(-3.2f, 3.2f),
-        brightnessGainDb = brightnessGainDb.coerceIn(-4.5f, 4.5f),
-        speakingRateRatio = speakingRateRatio.coerceIn(0.88f, 1.14f),
-        matchedPresetId = matchedPresetId.takeIf { it.isNotBlank() },
-        secondaryPresetId = secondaryPresetId.takeIf { it.isNotBlank() },
-        blendWeightPrimary = blendWeightPrimary.coerceIn(0.50f, 1.0f)
-    )
-}
+    val usedOnnxEncoder: Boolean = true,
+    val matchedPresetId: String = ""
+)
 
 /**
  * 100% Offline Persistent Storage for Cloned Voices (`filesDir/book_library/cloned_voices/`).
@@ -82,7 +63,7 @@ class ClonedVoiceRepository(private val rootDir: File) {
                         name = name,
                         createdAtMillis = obj.optLong("createdAtMillis", 0L),
                         sampleRate = obj.optInt("sampleRate", VoiceSampleRecorder.DEFAULT_TARGET_SAMPLE_RATE),
-                        durationSeconds = obj.optDouble("durationSeconds", 5.0).toFloat(),
+                        durationSeconds = obj.optDouble("durationSeconds", 6.0).toFloat(),
                         embeddingDim = obj.optInt("embeddingDim", 32),
                         embeddingPath = embPath,
                         referenceAudioPath = obj.optString("referenceAudioPath").trim(),
@@ -90,18 +71,8 @@ class ClonedVoiceRepository(private val rootDir: File) {
                         referenceCodesPath = obj.optString("referenceCodesPath").trim(),
                         referenceText = obj.optString("referenceText").trim(),
                         referenceCodeCount = obj.optInt("referenceCodeCount", 0),
-                        usedOnnxEncoder = obj.optBoolean("usedOnnxEncoder", false),
-                        estimatedPitchRatio = obj.optDouble("estimatedPitchRatio", 1.0)
-                            .toFloat()
-                            .coerceIn(0.75f, 1.30f),
-                        matchedPresetId = obj.optString("matchedPresetId", "").trim(),
-                        secondaryPresetId = obj.optString("secondaryPresetId", "").trim(),
-                        blendWeightPrimary = obj.optDouble("blendWeightPrimary", 1.0).toFloat().coerceIn(0.50f, 1.0f),
-                        formantShiftRatio = obj.optDouble("formantShiftRatio", 1.0).toFloat().coerceIn(0.84f, 1.18f),
-                        warmthGainDb = obj.optDouble("warmthGainDb", 0.0).toFloat().coerceIn(-4.5f, 4.5f),
-                        presenceGainDb = obj.optDouble("presenceGainDb", 0.0).toFloat().coerceIn(-3.2f, 3.2f),
-                        brightnessGainDb = obj.optDouble("brightnessGainDb", 0.0).toFloat().coerceIn(-4.5f, 4.5f),
-                        speakingRateRatio = obj.optDouble("speakingRateRatio", 1.0).toFloat().coerceIn(0.88f, 1.14f)
+                        usedOnnxEncoder = obj.optBoolean("usedOnnxEncoder", true),
+                        matchedPresetId = obj.optString("matchedPresetId", "").trim()
                     )
                 )
             }
@@ -122,10 +93,9 @@ class ClonedVoiceRepository(private val rootDir: File) {
         sampleRate: Int,
         embedding: FloatArray,
         usedOnnxEncoder: Boolean,
-        estimatedPitchRatio: Float,
         referenceCodes: IntArray? = null,
         referenceText: String = "",
-        timbreSettings: VoiceTimbreSettings? = null
+        matchedPresetId: String = ""
     ): ClonedVoiceProfile {
         rootDir.mkdirs()
         val id = "clone_${UUID.randomUUID().toString().take(8)}"
@@ -149,7 +119,7 @@ class ClonedVoiceRepository(private val rootDir: File) {
         val durationSec = if (sampleRate > 0) {
             (samples.size.toFloat() / sampleRate.toFloat()).coerceIn(2.0f, 12.0f)
         } else {
-            5.0f
+            6.0f
         }
 
         val profile = ClonedVoiceProfile(
@@ -166,15 +136,7 @@ class ClonedVoiceRepository(private val rootDir: File) {
             referenceText = cleanRefText,
             referenceCodeCount = referenceCodes?.size ?: 0,
             usedOnnxEncoder = usedOnnxEncoder,
-            estimatedPitchRatio = (timbreSettings?.pitchRatio ?: estimatedPitchRatio).coerceIn(0.75f, 1.30f),
-            matchedPresetId = timbreSettings?.matchedPresetId.orEmpty(),
-            secondaryPresetId = timbreSettings?.secondaryPresetId.orEmpty(),
-            blendWeightPrimary = (timbreSettings?.blendWeightPrimary ?: 1.0f).coerceIn(0.50f, 1.0f),
-            formantShiftRatio = (timbreSettings?.formantShiftRatio ?: 1.0f).coerceIn(0.84f, 1.18f),
-            warmthGainDb = (timbreSettings?.warmthGainDb ?: 0.0f).coerceIn(-4.5f, 4.5f),
-            presenceGainDb = (timbreSettings?.presenceGainDb ?: 0.0f).coerceIn(-3.2f, 3.2f),
-            brightnessGainDb = (timbreSettings?.brightnessGainDb ?: 0.0f).coerceIn(-4.5f, 4.5f),
-            speakingRateRatio = (timbreSettings?.speakingRateRatio ?: 1.0f).coerceIn(0.88f, 1.14f)
+            matchedPresetId = matchedPresetId
         )
 
         val updated = listOf(profile) + loadAll().filterNot { it.id == id }
@@ -254,15 +216,7 @@ class ClonedVoiceRepository(private val rootDir: File) {
                     put("referenceText", p.referenceText)
                     put("referenceCodeCount", p.referenceCodeCount)
                     put("usedOnnxEncoder", p.usedOnnxEncoder)
-                    put("estimatedPitchRatio", p.estimatedPitchRatio.toDouble())
                     put("matchedPresetId", p.matchedPresetId)
-                    put("secondaryPresetId", p.secondaryPresetId)
-                    put("blendWeightPrimary", p.blendWeightPrimary.toDouble())
-                    put("formantShiftRatio", p.formantShiftRatio.toDouble())
-                    put("warmthGainDb", p.warmthGainDb.toDouble())
-                    put("presenceGainDb", p.presenceGainDb.toDouble())
-                    put("brightnessGainDb", p.brightnessGainDb.toDouble())
-                    put("speakingRateRatio", p.speakingRateRatio.toDouble())
                 }
             )
         }
