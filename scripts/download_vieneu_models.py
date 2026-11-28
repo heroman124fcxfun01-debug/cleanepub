@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
 Download & prepare ONLY the essential PUBLIC (non-gated) `pnnbao97/VieNeu-TTS` offline runtime
-components into `app/src/main/assets/models/` for 100% real zero-shot voice cloning on Android:
+components into `app/src/main/assets/models/`:
 
-  1. `VieNeu-TTS-0_3B-Q4_0.gguf` — Q4_0 language backbone (`pnnbao-ump/VieNeu-TTS-0.3B-q4-gguf`)
-  2. `neucodec_decoder.onnx`      — Compact INT8 24kHz FSQ decoder
-  3. `neucodec_encoder.onnx`      — Verified opset-17 16kHz NeuCodec ONNX encoder (for real
-                                    zero-shot voice cloning directly from 3-8s user audio;
-                                    downloaded from public HF or exported from DistillNeuCodec
-                                    and dynamically quantized for compact APK size)
-  4. `voices.json`                — Compact preset reference bank (~15 KB)
+  1. `*.gguf`                     — Compact Q4_0 language backbone (auto-discovered via HfApi.list_repo_files)
+  2. `neucodec_decoder.onnx`      — Verified 24kHz NeuCodec FSQ decoder (+ companion `.data` if required)
+  3. `voices.json`                — Compact preset reference bank (~15 KB)
+  4. `neucodec_encoder.onnx`      — Best-effort opset-17 16kHz NeuCodec ONNX encoder (downloaded from
+                                    public HF if available, or exported via PyTorch CPU + onnx/onnxscript
+                                    and safely quantized; wrapped in try-except so any CI incompatibility
+                                    logs a clear warning WITHOUT failing the APK build!)
 
-Explicitly removes ALL legacy/unused junk (`VieNeuV3Turbo`, `MOSS-Audio-Tokenizer-Nano`,
-`sea_g2p.bin`, `.wav`, `.zip`, docs, superseded `.data` files) and prints a full size report.
+Never hardcodes Hugging Face filenames (uses `HfApi().list_repo_files(...)` to avoid 404 errors),
+purges all old/legacy files before downloading, and prints the exact resulting files and sizes.
 
 Usage:
   python3 scripts/download_vieneu_models.py <models_dir>
@@ -23,7 +23,8 @@ import os
 import shutil
 import sys
 import tempfile
-from typing import Dict, List, Optional, Tuple
+import traceback
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import onnxruntime as ort
@@ -42,29 +43,33 @@ def assert_not_lfs_pointer(path: str) -> None:
             raise RuntimeError(f"File {path} is a Git LFS pointer ({sz} bytes), not binary data!")
 
 
-def inspect_public_repo_files(api: HfApi, repo_id: str) -> Optional[List[str]]:
-    """Inspect a public non-gated HF repo. Skips private/gated repos without failing."""
+def list_public_repo_files(api: HfApi, repo_id: str) -> Optional[List[str]]:
+    """
+    Safely list actual files in a public non-gated Hugging Face repo via `list_repo_files`.
+    Skips private, gated, or missing repos cleanly without crashing the build.
+    """
     try:
         info = api.model_info(repo_id)
-    except Exception as exc:
-        print(f"  [skip] Cannot inspect {repo_id}: {exc}", flush=True)
-        return None
-
-    if getattr(info, "private", False):
-        print(f"  [skip] Repo {repo_id} is private", flush=True)
-        return None
-    if getattr(info, "gated", False):
-        print(f"  [skip] Repo {repo_id} is gated (requires HF login)", flush=True)
-        return None
-
-    siblings = getattr(info, "siblings", None) or []
-    files = [s.rfilename for s in siblings if getattr(s, "rfilename", None)]
-    if not files:
-        try:
-            files = api.list_repo_files(repo_id)
-        except Exception as exc:
-            print(f"  [skip] Cannot list files in {repo_id}: {exc}", flush=True)
+        if getattr(info, "private", False):
+            print(f"  [skip] Repo {repo_id} is private", flush=True)
             return None
+        if getattr(info, "gated", False):
+            print(f"  [skip] Repo {repo_id} is gated (requires HF login)", flush=True)
+            return None
+    except Exception as exc:
+        print(f"  [skip] Cannot inspect model_info for {repo_id}: {exc}", flush=True)
+        return None
+
+    try:
+        files = list(api.list_repo_files(repo_id=repo_id))
+    except Exception as exc:
+        print(f"  [warn] list_repo_files failed for {repo_id} ({exc}); falling back to siblings", flush=True)
+        siblings = getattr(info, "siblings", None) or []
+        files = [s.rfilename for s in siblings if getattr(s, "rfilename", None)]
+
+    if not files:
+        print(f"  [skip] Repo {repo_id} returned 0 files", flush=True)
+        return None
 
     print(f"  [public] {repo_id}: {len(files)} files", flush=True)
     return files
@@ -77,7 +82,10 @@ def download_file_safe(repo_id: str, filename: str, dest_path: str) -> bool:
         os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
         shutil.copy2(cached, dest_path)
         size_mb = os.path.getsize(dest_path) / (1024.0 * 1024.0)
-        print(f"    -> saved {os.path.basename(dest_path)} ({size_mb:.2f} MB) from {repo_id}/{filename}", flush=True)
+        print(
+            f"    -> saved {os.path.basename(dest_path)} ({size_mb:.2f} MB) from {repo_id}/{filename}",
+            flush=True,
+        )
         return True
     except Exception as exc:
         print(f"  [warn] Download failed for {repo_id}/{filename}: {exc}", flush=True)
@@ -89,7 +97,28 @@ def download_file_safe(repo_id: str, filename: str, dest_path: str) -> bool:
         return False
 
 
-def find_external_data_files(chosen_onnx: str, all_files: List[str]) -> List[str]:
+def _inspect_onnx_referenced_external_files(onnx_path: str) -> Set[str]:
+    """Read exact external-data location names from ONNX protobuf if `onnx` package is available."""
+    refs: Set[str] = set()
+    try:
+        import onnx
+
+        model = onnx.load(onnx_path, load_external_data=False)
+        for init in model.graph.initializer:
+            if init.data_location == onnx.TensorProto.EXTERNAL:
+                for kv in init.external_data:
+                    if kv.key == "location" and kv.value:
+                        refs.add(os.path.basename(kv.value))
+    except Exception:
+        pass
+    return refs
+
+
+def find_external_data_files(
+    chosen_onnx: str,
+    all_files: List[str],
+    referenced_names: Optional[Set[str]] = None,
+) -> List[str]:
     chosen_dir = os.path.dirname(chosen_onnx)
     chosen_base = os.path.basename(chosen_onnx)
     chosen_stem = os.path.splitext(chosen_base)[0]
@@ -97,13 +126,19 @@ def find_external_data_files(chosen_onnx: str, all_files: List[str]) -> List[str
         f for f in all_files
         if os.path.dirname(f) == chosen_dir and f.lower().endswith(".onnx")
     ]
+    ref_lower = {r.lower() for r in (referenced_names or set())}
 
     companions: List[str] = []
     for f in all_files:
-        if os.path.dirname(f) != chosen_dir:
+        if f == chosen_onnx:
             continue
         bn = os.path.basename(f)
         low = bn.lower()
+        if ref_lower and low in ref_lower:
+            companions.append(f)
+            continue
+        if os.path.dirname(f) != chosen_dir:
+            continue
         is_ext_data = (
             low.endswith(".onnx.data")
             or low.endswith(".onnx_data")
@@ -136,7 +171,8 @@ def download_onnx_with_companions(
         return None
 
     downloaded: List[str] = [dest_onnx_path]
-    companions = find_external_data_files(chosen_onnx, all_files)
+    referenced = _inspect_onnx_referenced_external_files(dest_onnx_path)
+    companions = find_external_data_files(chosen_onnx, all_files, referenced_names=referenced)
     for extra in companions:
         extra_dest = os.path.join(models_dir, os.path.basename(extra))
         if not download_file_safe(repo_id, extra, extra_dest):
@@ -157,7 +193,6 @@ def _make_speech_like_signal_16k(duration_sec: float = 2.0) -> np.ndarray:
     if rem:
         n += ENCODER_HOP_SIZE - rem
     t = np.arange(n, dtype=np.float32) / float(ENCODER_SAMPLE_RATE)
-    # Varying F0 contour (140..210 Hz) + harmonics + 4 Hz syllable modulation
     f0 = 165.0 + 30.0 * np.sin(2.0 * np.pi * 1.3 * t)
     phase = 2.0 * np.pi * np.cumsum(f0) / float(ENCODER_SAMPLE_RATE)
     sig = (
@@ -281,22 +316,34 @@ def verify_neucodec_encoder_onnx(
 
         outputs = sess.run(None, feed)
         chosen_codes: Optional[List[int]] = None
+
+        # Pass 1: Look for explicit integer / named codes output
         for idx, raw_out in enumerate(outputs):
             arr = np.asarray(raw_out)
             o_type = outputs_meta[idx].type.lower()
             o_name = outputs_meta[idx].name.lower()
             if "int" in o_type or "code" in o_name or "token" in o_name or "idx" in o_name:
                 flat = arr.reshape(-1)
-                if flat.size >= 15:
+                if flat.size >= 15 and np.all(np.isfinite(flat)):
                     ints = [int(round(float(v))) for v in flat.tolist()]
                     if all(0 <= c <= 65535 for c in ints):
                         chosen_codes = ints
                         break
 
+        # Pass 2: Fallback to first output if it contains valid integer-like FSQ codes in 0..65535
+        if chosen_codes is None and outputs:
+            flat = np.asarray(outputs[0]).reshape(-1)
+            if flat.size >= 15 and np.all(np.isfinite(flat)):
+                rounded = np.rint(flat)
+                if np.max(np.abs(flat - rounded)) < 1e-3:
+                    ints = [int(v) for v in rounded.tolist()]
+                    if all(0 <= c <= 65535 for c in ints):
+                        chosen_codes = ints
+
         if chosen_codes is None:
             print(
                 f"    [reject encoder] No valid 0..65535 FSQ codes output tensor found "
-                f"(outputs={[ (o.name, o.type, np.asarray(v).shape) for o, v in zip(outputs_meta, outputs) ]})",
+                f"(outputs={[(o.name, o.type, np.asarray(v).shape) for o, v in zip(outputs_meta, outputs)]})",
                 flush=True,
             )
             return None
@@ -309,7 +356,6 @@ def verify_neucodec_encoder_onnx(
             )
             return None
 
-        # Roundtrip check with our verified 24kHz NeuCodec decoder
         if decoder_onnx_path and os.path.isfile(decoder_onnx_path):
             dec_sess = ort.InferenceSession(decoder_onnx_path, providers=["CPUExecutionProvider"])
             rt_wav = decode_codes_with_session(dec_sess, chosen_codes[:60])
@@ -357,13 +403,10 @@ def discover_public_repos(
     return found
 
 
-def pick_best_decoder_onnx(files: List[str]) -> Optional[str]:
+def rank_decoder_onnx_candidates(files: List[str]) -> List[str]:
+    """Return all non-encoder `.onnx` files in a repo sorted by preference (INT8 decoder first)."""
     onnx_files = [f for f in files if f.lower().endswith(".onnx")]
-    if not onnx_files:
-        return None
     candidates = [f for f in onnx_files if "enc" not in os.path.basename(f).lower()]
-    if not candidates:
-        return None
 
     def score(path: str) -> Tuple[int, int, int, str]:
         bn = os.path.basename(path).lower()
@@ -372,34 +415,30 @@ def pick_best_decoder_onnx(files: List[str]) -> Optional[str]:
         return (has_dec, has_int8, len(path), path)
 
     candidates.sort(key=score)
-    return candidates[0]
+    return candidates
 
 
-def pick_best_encoder_onnx(repo_id: str, files: List[str]) -> Optional[str]:
+def rank_encoder_onnx_candidates(repo_id: str, files: List[str]) -> List[str]:
+    """Return all candidate encoder `.onnx` files in a repo sorted by preference."""
     onnx_files = [f for f in files if f.lower().endswith(".onnx")]
-    if not onnx_files:
-        return None
-
     repo_low = repo_id.lower()
     candidates = []
     for f in onnx_files:
         bn = os.path.basename(f).lower()
         if "dec" in bn and "enc" not in bn:
             continue
-        if "enc" in bn or "codec" in bn or "enc" in repo_low or "distill" in repo_low:
+        if "enc" in bn or "codec" in bn or "enc" in repo_low or "distill" in repo_low or bn == "model.onnx":
             candidates.append(f)
-    if not candidates:
-        return None
 
     def score(path: str) -> Tuple[int, int, int, int, str]:
         bn = os.path.basename(path).lower()
         has_enc = 0 if "enc" in bn else 1
-        has_distill = 0 if "distill" in bn or "distill" in repo_low else 1
+        has_distill = 0 if ("distill" in bn or "distill" in repo_low) else 1
         has_quant = 0 if ("int8" in bn or "q8" in bn or "quant" in bn) else 1
         return (has_enc, has_distill, has_quant, len(path), path)
 
     candidates.sort(key=score)
-    return candidates[0]
+    return candidates
 
 
 def _total_encoder_size_bytes(encoder_onnx_path: str, companion_paths: List[str]) -> int:
@@ -464,7 +503,6 @@ def try_quantize_encoder_for_mobile(
             print("    [quantize] QUInt8 candidate failed verification; keeping verified FP32 encoder.", flush=True)
             return companion_paths
 
-        # Replace FP32 encoder + delete superseded external .data companions!
         shutil.copy2(q8_path, encoder_onnx_path)
         for p in companion_paths:
             if os.path.abspath(p) != os.path.abspath(encoder_onnx_path) and os.path.exists(p):
@@ -483,14 +521,28 @@ def try_quantize_encoder_for_mobile(
 def _build_pure_torch_neucodec_encoder_wrapper(codec):
     """
     Build a pure-PyTorch nn.Module wrapping NeuCodec / DistillNeuCodec's 16kHz -> FSQ codes
-    encoder pipeline so `torch.onnx.export(..., opset_version=17)` succeeds without invoking
-    numpy HuggingFace `Wav2Vec2FeatureExtractor` inside the trace.
+    encoder pipeline so `torch.onnx.export(..., opset_version=17)` avoids numpy feature extractors
+    and PyTorch 2.x SDPA opset-17 export issues.
     """
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
 
-    # Inspect encode_code source for diagnostic clarity in CI logs
+    # Force eager attention on HF semantic_model if supported (avoids opset 17 SDPA export failure)
+    sem_model = getattr(codec, "semantic_model", None)
+    if sem_model is not None:
+        cfg = getattr(sem_model, "config", None)
+        if cfg is not None:
+            try:
+                setattr(cfg, "_attn_implementation", "eager")
+            except Exception:
+                pass
+            if hasattr(sem_model, "set_attn_implementation"):
+                try:
+                    sem_model.set_attn_implementation("eager")
+                except Exception:
+                    pass
+
     try:
         src = inspect.getsource(codec.encode_code)
         first_lines = " | ".join(line.strip() for line in src.splitlines()[:12] if line.strip())
@@ -502,7 +554,6 @@ def _build_pure_torch_neucodec_encoder_wrapper(codec):
         def __init__(self, inner_codec):
             super().__init__()
             self.codec = inner_codec
-            # Check attribute layout of DistillNeuCodec / NeuCodec
             self.has_semantic_model = hasattr(inner_codec, "semantic_model")
             self.has_semantic_encoder = hasattr(inner_codec, "SemanticEncoder_module")
             self.has_fc_prior = hasattr(inner_codec, "fc_prior")
@@ -510,20 +561,14 @@ def _build_pure_torch_neucodec_encoder_wrapper(codec):
             self.has_codec_enc = hasattr(inner_codec, "codec_enc")
 
         def _extract_semantic_features(self, audio_b_t: torch.Tensor) -> torch.Tensor:
-            # Replicate Wav2Vec2FeatureExtractor(do_normalize=True): zero-mean unit-variance per utterance
             mean = audio_b_t.mean(dim=-1, keepdim=True)
             var = audio_b_t.var(dim=-1, unbiased=False, keepdim=True)
             normed = (audio_b_t - mean) / torch.sqrt(var + 1e-7)
 
-            # Pad 160 samples on both sides like neucodec if needed, then call semantic_model
             out = self.codec.semantic_model(normed, output_hidden_states=True)
-            # NeuCodec uses layer 16 (or last hidden state if DistillHuBERT has fewer layers)
             hidden_states = getattr(out, "hidden_states", None)
             if hidden_states is not None:
-                if len(hidden_states) > 16:
-                    feat = hidden_states[16]
-                else:
-                    feat = hidden_states[-1]
+                feat = hidden_states[16] if len(hidden_states) > 16 else hidden_states[-1]
             elif hasattr(out, "last_hidden_state"):
                 feat = out.last_hidden_state
             else:
@@ -531,7 +576,6 @@ def _build_pure_torch_neucodec_encoder_wrapper(codec):
             return feat
 
         def forward(self, audio_16k: torch.Tensor) -> torch.Tensor:
-            # Accept (B, 1, T) float32 16kHz audio
             if audio_16k.dim() == 3:
                 wav_bt = audio_16k.squeeze(1)
                 wav_b1t = audio_16k
@@ -542,46 +586,31 @@ def _build_pure_torch_neucodec_encoder_wrapper(codec):
                 wav_bt = audio_16k.unsqueeze(0)
                 wav_b1t = audio_16k.unsqueeze(0).unsqueeze(0)
 
-            # Pad to multiple of 320 samples (50Hz frame hop)
-            t_len = wav_bt.shape[-1]
-            rem = t_len % ENCODER_HOP_SIZE
-            if rem != 0:
-                pad_amt = ENCODER_HOP_SIZE - rem
-                wav_bt = F.pad(wav_bt, (0, pad_amt))
-                wav_b1t = F.pad(wav_b1t, (0, pad_amt))
-
-            # Path 1: DistillNeuCodec / NeuCodec standard internal pipeline
             if self.has_semantic_model and self.has_semantic_encoder and self.has_fc_prior and self.has_generator:
-                # Pad 160 samples on each side (matches NeuCodec.encode_code alignment)
                 wav_sem = F.pad(wav_bt, (160, 160))
-                sem_feat = self._extract_semantic_features(wav_sem)  # (B, T_frames, D)
-                sem_feat_t = sem_feat.transpose(1, 2)  # (B, D, T_frames)
+                sem_feat = self._extract_semantic_features(wav_sem)
+                sem_feat_t = sem_feat.transpose(1, 2)
                 x_sem = self.codec.SemanticEncoder_module(sem_feat_t)
                 if self.has_codec_enc:
                     x_ac = self.codec.codec_enc(wav_b1t)
                     if x_ac.dim() == 3 and x_ac.shape[1] != x_sem.shape[1] and x_ac.shape[2] == x_sem.shape[1]:
                         x_ac = x_ac.transpose(1, 2)
-                    min_t = torch.minimum(
-                        torch.tensor(x_sem.shape[-1], device=x_sem.device),
-                        torch.tensor(x_ac.shape[-1], device=x_ac.device),
-                    )
+                    min_t = x_sem.shape[-1] if x_sem.shape[-1] <= x_ac.shape[-1] else x_ac.shape[-1]
                     x = torch.cat([x_sem[..., :min_t], x_ac[..., :min_t]], dim=1)
                 else:
                     x = x_sem
 
-                # fc_prior expects (B, T, C) or (B, C, T) depending on Linear vs Conv1d
                 if isinstance(self.codec.fc_prior, nn.Linear):
                     z = self.codec.fc_prior(x.transpose(1, 2)).transpose(1, 2)
                 else:
                     z = self.codec.fc_prior(x)
 
-                # Quantizer -> FSQ indices
                 quantizer = getattr(self.codec.generator, "quantizer", None)
                 if quantizer is None:
                     raise RuntimeError("codec.generator has no quantizer attribute")
-                q_out = quantizer(z, vq=True) if "vq" in inspect.signature(quantizer.forward).parameters else quantizer(z)
+                q_params = inspect.signature(quantizer.forward).parameters
+                q_out = quantizer(z, vq=True) if "vq" in q_params else quantizer(z)
                 if isinstance(q_out, (tuple, list)):
-                    # Find integer/index tensor in quantizer output tuple
                     codes = None
                     for item in q_out:
                         if isinstance(item, torch.Tensor) and item.dtype in (torch.int64, torch.int32):
@@ -593,7 +622,6 @@ def _build_pure_torch_neucodec_encoder_wrapper(codec):
                     codes = q_out
                 return codes.to(torch.int64)
 
-            # Fallback: call encode_code directly if codec exposes pure-torch encode_code
             codes = self.codec.encode_code(wav_b1t)
             return codes.to(torch.int64)
 
@@ -607,33 +635,36 @@ def export_neucodec_encoder_from_python(
     decoder_onnx_path: str,
 ) -> Optional[List[str]]:
     """
-    Fallback when no public pre-exported NeuCodec ONNX encoder exists on HF:
-    Load `DistillNeuCodec` (preferred, smaller & faster) or `NeuCodec` from the `neucodec`
-    Python package and export its 16kHz -> FSQ codes encoder graph to ONNX opset 17.
+    Best-effort fallback when no public pre-exported NeuCodec ONNX encoder exists on HF:
+    Load `DistillNeuCodec` (preferred) or `NeuCodec` from `neucodec` and export its
+    16kHz -> FSQ codes encoder graph to ONNX opset 17.
     """
-    print("\n=== [3/3 Fallback] Exporting NeuCodec Encoder directly via PyTorch (opset 17) ===", flush=True)
+    print("\n=== [3/3 Fallback] Attempting PyTorch ONNX opset-17 export of NeuCodec Encoder ===", flush=True)
     try:
         import torch
+        import onnx  # noqa: F401
     except Exception as exc:
-        print(f"  [export] PyTorch unavailable: {exc}", flush=True)
+        print(f"  [warn export] Missing torch/onnx dependency: {exc}", flush=True)
         return None
 
     codec = None
     codec_name = ""
     try:
         from neucodec import DistillNeuCodec
-        print("  [export] Loading neucodec.DistillNeuCodec.from_pretrained('neuphonic/distill-neucodec')...", flush=True)
+
+        print("  [export] Loading DistillNeuCodec.from_pretrained('neuphonic/distill-neucodec')...", flush=True)
         codec = DistillNeuCodec.from_pretrained("neuphonic/distill-neucodec")
         codec_name = "DistillNeuCodec"
     except Exception as exc:
-        print(f"  [export] DistillNeuCodec load failed ({exc}); trying NeuCodec...", flush=True)
+        print(f"  [warn export] DistillNeuCodec load failed ({exc}); trying NeuCodec...", flush=True)
         try:
             from neucodec import NeuCodec
-            print("  [export] Loading neucodec.NeuCodec.from_pretrained('neuphonic/neucodec')...", flush=True)
+
+            print("  [export] Loading NeuCodec.from_pretrained('neuphonic/neucodec')...", flush=True)
             codec = NeuCodec.from_pretrained("neuphonic/neucodec")
             codec_name = "NeuCodec"
         except Exception as exc2:
-            print(f"  [export] NeuCodec load failed ({exc2})", flush=True)
+            print(f"  [warn export] NeuCodec load failed ({exc2})", flush=True)
             return None
 
     codec.eval()
@@ -643,7 +674,6 @@ def export_neucodec_encoder_from_python(
     dummy_np = _make_speech_like_signal_16k(duration_sec=2.0)
     dummy_input = torch.from_numpy(dummy_np).reshape(1, 1, -1)
 
-    # First try direct encode_code wrapper; if that fails tracing (numpy feature_extractor), use pure-torch wrapper
     class DirectEncodeWrapper(torch.nn.Module):
         def __init__(self, inner):
             super().__init__()
@@ -739,6 +769,106 @@ def purge_assets_junk(models_dir: str) -> None:
                 print(f"  [clean] Removed legacy/unused asset: {entry}", flush=True)
 
 
+def obtain_optional_neucodec_encoder(
+    api: HfApi,
+    pnnbao_public_repos: List[str],
+    models_dir: str,
+    dec_dest: str,
+) -> Optional[str]:
+    """
+    Safe, non-fatal encoder acquisition:
+      1) Try pre-exported public ONNX encoders from Hugging Face (using `list_repo_files`, never hardcoded names)
+      2) Fall back to PyTorch opset-17 export of DistillNeuCodec / NeuCodec
+      3) Optimize large FP32 encoder via verified QUInt8 quantization
+    Wrapped cleanly so any error logs a detailed warning and returns None WITHOUT breaking the APK build.
+    """
+    enc_dest = os.path.join(models_dir, "neucodec_encoder.onnx")
+    before_step_files = set(os.listdir(models_dir))
+
+    try:
+        encoder_candidates: List[str] = [
+            "KevinAHM/distill-neucodec-onnx",
+            "pnnbao-ump/neucodec-onnx-encoder",
+            "pnnbao-ump/distill-neucodec-onnx",
+            "pnnbao-ump/neucodec-onnx",
+            "pnnbao-ump/VieNeu-TTS-v3-Nano",
+            "pnnbao-ump/VieNeu-TTS-v3-Turbo",
+        ]
+        for r in pnnbao_public_repos:
+            low = r.lower()
+            if any(k in low for k in ("enc", "distill-neucodec", "neucodec", "v3-nano", "v3-turbo")):
+                if "decoder" not in low and r not in encoder_candidates:
+                    encoder_candidates.append(r)
+
+        for query in ("distill-neucodec-onnx", "neucodec-onnx-encoder", "neucodec-encoder"):
+            for r in discover_public_repos(api, search=query, limit=20):
+                low = r.lower()
+                if "decoder" in low and "enc" not in low:
+                    continue
+                if r not in encoder_candidates:
+                    encoder_candidates.append(r)
+
+        encoder_files: Optional[List[str]] = None
+        encoder_source: Optional[str] = None
+
+        print("\n=== [3/3] Obtaining & Verifying NeuCodec ONNX Encoder (non-fatal if CI export unsupported) ===", flush=True)
+        for repo in encoder_candidates:
+            files = list_public_repo_files(api, repo)
+            if not files:
+                continue
+            onnx_candidates = rank_encoder_onnx_candidates(repo, files)
+            if not onnx_candidates:
+                continue
+            print(f"    [candidates encoder] {repo}: {onnx_candidates}", flush=True)
+            for chosen_enc in onnx_candidates:
+                downloaded = download_onnx_with_companions(repo, chosen_enc, files, enc_dest, models_dir)
+                if not downloaded:
+                    continue
+                schema = verify_neucodec_encoder_onnx(enc_dest, decoder_onnx_path=dec_dest)
+                if schema is None:
+                    cleanup_paths(downloaded)
+                    continue
+                encoder_files = downloaded
+                encoder_source = f"{repo}/{chosen_enc}"
+                break
+            if encoder_files is not None:
+                break
+
+        if encoder_files is None:
+            encoder_files = export_neucodec_encoder_from_python(enc_dest, decoder_onnx_path=dec_dest)
+            if encoder_files is not None:
+                encoder_source = "PyTorch export (DistillNeuCodec/NeuCodec opset 17)"
+
+        if encoder_files is not None and os.path.isfile(enc_dest):
+            encoder_files = try_quantize_encoder_for_mobile(enc_dest, encoder_files, decoder_onnx_path=dec_dest)
+            print(f"  [OK ENCODER] Ready: {encoder_source}", flush=True)
+            return encoder_source
+
+        # Clean any leftover partial files from Step 3
+        after_step_files = set(os.listdir(models_dir))
+        cleanup_paths([os.path.join(models_dir, fn) for fn in (after_step_files - before_step_files)])
+        print(
+            "  [WARN ENCODER] Could not download or export a verified neucodec_encoder.onnx on this CI runner. "
+            "Continuing APK build with verified VieNeu-TTS GGUF + NeuCodec Decoder + voices.json!",
+            flush=True,
+        )
+        return None
+    except Exception as exc:
+        print(
+            f"  [WARN ENCODER] Non-fatal error while obtaining/exporting neucodec_encoder.onnx: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        traceback.print_exc()
+        after_step_files = set(os.listdir(models_dir))
+        cleanup_paths([os.path.join(models_dir, fn) for fn in (after_step_files - before_step_files)])
+        print(
+            "  [WARN ENCODER] Continuing APK build with verified VieNeu-TTS GGUF + NeuCodec Decoder + voices.json!",
+            flush=True,
+        )
+        return None
+
+
 def main() -> int:
     models_dir = sys.argv[1] if len(sys.argv) >= 2 else "app/src/main/assets/models"
     purge_assets_junk(models_dir)
@@ -748,7 +878,7 @@ def main() -> int:
     print(f"Public repos discovered under pnnbao-ump ({len(pnnbao_public_repos)}): {pnnbao_public_repos}", flush=True)
 
     # =========================================================================
-    # 1. Official VieNeu-TTS-0.3B Q4_0 GGUF Backbone + voices.json
+    # 1. Official VieNeu-TTS-0.3B Q4_0 GGUF Backbone + voices.json (Dynamic listing)
     # =========================================================================
     gguf_candidates: List[str] = [
         "pnnbao-ump/VieNeu-TTS-0.3B-q4-gguf",
@@ -764,18 +894,20 @@ def main() -> int:
 
     print("\n=== [1/3] Downloading Compact GGUF Backbone (Q4_0) + voices.json ===", flush=True)
     for repo in gguf_candidates:
-        files = inspect_public_repo_files(api, repo)
+        files = list_public_repo_files(api, repo)
         if not files:
             continue
         gguf_files = [f for f in files if f.lower().endswith(".gguf")]
         if not gguf_files:
             continue
         gguf_files.sort(key=lambda s: (0 if "q4_0" in s.lower() else (1 if "q4" in s.lower() else 2), len(s), s))
-        chosen_gguf = gguf_files[0]
-        dest = os.path.join(models_dir, os.path.basename(chosen_gguf))
-        if not download_file_safe(repo, chosen_gguf, dest):
+        for chosen_gguf in gguf_files:
+            dest = os.path.join(models_dir, os.path.basename(chosen_gguf))
+            if download_file_safe(repo, chosen_gguf, dest):
+                gguf_dest = dest
+                break
+        if not gguf_dest:
             continue
-        gguf_dest = dest
 
         voices_files = [f for f in files if os.path.basename(f).lower() == "voices.json"]
         if voices_files:
@@ -789,7 +921,7 @@ def main() -> int:
 
     if not voices_dest:
         for v_repo in ("pnnbao-ump/VieNeu-TTS-0.3B", "pnnbao-ump/VieNeu-TTS", "pnnbao-ump/VieNeu-TTS-0.3B-q4-gguf"):
-            files = inspect_public_repo_files(api, v_repo) or []
+            files = list_public_repo_files(api, v_repo) or []
             v_files = [f for f in files if os.path.basename(f).lower() == "voices.json"]
             if v_files:
                 v_dest = os.path.join(models_dir, "voices.json")
@@ -801,13 +933,14 @@ def main() -> int:
         raise RuntimeError("Failed to download voices.json from public pnnbao-ump repositories!")
 
     # =========================================================================
-    # 2. Compact INT8 NeuCodec ONNX 24kHz FSQ Decoder
+    # 2. Compact NeuCodec ONNX 24kHz FSQ Decoder (Dynamic listing, no hardcoded filename)
     # =========================================================================
     decoder_candidates: List[str] = [
         "pnnbao-ump/neucodec-onnx-decoder-int8",
         "TamPham92/neucodec-onnx-decoder-int8",
         "aoiandroid/neuphonic-neucodec-onnx-decoder-int8-mirror",
         "pnnbao-ump/neucodec-onnx-decoder",
+        "pnnbao-ump/VieNeu-TTS-v3-Nano",
     ]
     for r in pnnbao_public_repos:
         low = r.lower()
@@ -825,92 +958,44 @@ def main() -> int:
 
     dec_dest = os.path.join(models_dir, "neucodec_decoder.onnx")
     decoder_repo_used: Optional[str] = None
-    print("\n=== [2/3] Downloading & Verifying Compact NeuCodec ONNX Decoder INT8 (24kHz) ===", flush=True)
+    print("\n=== [2/3] Downloading & Verifying Compact NeuCodec ONNX Decoder (24kHz) ===", flush=True)
     for repo in decoder_candidates:
-        files = inspect_public_repo_files(api, repo)
+        files = list_public_repo_files(api, repo)
         if not files:
             continue
-        chosen_dec = pick_best_decoder_onnx(files)
-        if not chosen_dec:
+        onnx_candidates = rank_decoder_onnx_candidates(files)
+        if not onnx_candidates:
             continue
-        downloaded = download_onnx_with_companions(repo, chosen_dec, files, dec_dest, models_dir)
-        if not downloaded:
-            continue
-        schema = verify_neucodec_decoder_onnx(dec_dest)
-        if schema is None:
-            cleanup_paths(downloaded)
-            continue
-        decoder_repo_used = repo
-        break
+        print(f"    [candidates decoder] {repo}: {onnx_candidates}", flush=True)
+        for chosen_dec in onnx_candidates:
+            downloaded = download_onnx_with_companions(repo, chosen_dec, files, dec_dest, models_dir)
+            if not downloaded:
+                continue
+            schema = verify_neucodec_decoder_onnx(dec_dest)
+            if schema is None:
+                cleanup_paths(downloaded)
+                continue
+            decoder_repo_used = f"{repo}/{chosen_dec}"
+            break
+        if decoder_repo_used:
+            break
 
     if not decoder_repo_used:
         raise RuntimeError(
             "Failed to download a verified NeuCodec FSQ 24kHz neucodec_decoder.onnx! Checked: "
             + ", ".join(decoder_candidates)
         )
+    print(f"  [OK DECODER] Ready: {decoder_repo_used}", flush=True)
 
     # =========================================================================
-    # 3. Real Zero-Shot Voice Cloning Encoder (`neucodec_encoder.onnx`, opset 17)
+    # 3. NeuCodec ONNX Encoder (Non-fatal try-except: never fails APK build!)
     # =========================================================================
-    encoder_candidates: List[str] = [
-        "pnnbao-ump/neucodec-onnx-encoder",
-        "pnnbao-ump/distill-neucodec-onnx",
-        "pnnbao-ump/neucodec-onnx",
-        "pnnbao-ump/VieNeu-TTS-v3-Nano",
-        "pnnbao-ump/VieNeu-TTS-v3-Turbo",
-        "KevinAHM/distill-neucodec-onnx",
-    ]
-    for r in pnnbao_public_repos:
-        low = r.lower()
-        if any(k in low for k in ("enc", "distill-neucodec", "neucodec", "v3-nano", "v3-turbo")):
-            if "decoder" not in low and r not in encoder_candidates:
-                encoder_candidates.append(r)
-
-    for query in ("distill-neucodec-onnx", "neucodec-onnx-encoder", "neucodec-encoder", "neucodec onnx"):
-        for r in discover_public_repos(api, search=query, limit=20):
-            low = r.lower()
-            if "decoder" in low and "enc" not in low:
-                continue
-            if r not in encoder_candidates:
-                encoder_candidates.append(r)
-
-    enc_dest = os.path.join(models_dir, "neucodec_encoder.onnx")
-    encoder_files: Optional[List[str]] = None
-    encoder_source: Optional[str] = None
-
-    print("\n=== [3/3] Obtaining & Verifying Real NeuCodec ONNX Encoder (16kHz -> FSQ ref_codes) ===", flush=True)
-    for repo in encoder_candidates:
-        files = inspect_public_repo_files(api, repo)
-        if not files:
-            continue
-        chosen_enc = pick_best_encoder_onnx(repo, files)
-        if not chosen_enc:
-            continue
-        downloaded = download_onnx_with_companions(repo, chosen_enc, files, enc_dest, models_dir)
-        if not downloaded:
-            continue
-        schema = verify_neucodec_encoder_onnx(enc_dest, decoder_onnx_path=dec_dest)
-        if schema is None:
-            cleanup_paths(downloaded)
-            continue
-        encoder_files = downloaded
-        encoder_source = f"{repo}/{chosen_enc}"
-        break
-
-    if encoder_files is None:
-        encoder_files = export_neucodec_encoder_from_python(enc_dest, decoder_onnx_path=dec_dest)
-        if encoder_files is not None:
-            encoder_source = "PyTorch export (DistillNeuCodec/NeuCodec opset 17)"
-
-    if encoder_files is None or not os.path.isfile(enc_dest):
-        raise RuntimeError(
-            "Failed to obtain or export a verified neucodec_encoder.onnx for real zero-shot voice cloning! "
-            "Checked HF repos: " + ", ".join(encoder_candidates)
-        )
-
-    # Optimize FP32 encoder size for lean APK (dynamic QUInt8 MatMul/Gemm + roundtrip verification)
-    encoder_files = try_quantize_encoder_for_mobile(enc_dest, encoder_files, decoder_onnx_path=dec_dest)
-    print(f"  [encoder ready] Source: {encoder_source}", flush=True)
+    obtain_optional_neucodec_encoder(
+        api=api,
+        pnnbao_public_repos=pnnbao_public_repos,
+        models_dir=models_dir,
+        dec_dest=dec_dest,
+    )
 
     # =========================================================================
     # 4. Print exact file list & sizes for APK size audit
