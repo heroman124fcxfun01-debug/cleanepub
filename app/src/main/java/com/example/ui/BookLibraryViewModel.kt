@@ -812,7 +812,17 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
                 decoded.onSuccess { sample ->
                     _draftClonedVoice.value = null
                     onDecoded(sample)
-                    _statusMessage.value = "Đã nhập & chuẩn hóa 16kHz Mono: \"${sample.displayName}\""
+                    _statusMessage.value = if (sample.wasTrimmed) {
+                        String.format(
+                            java.util.Locale.US,
+                            "Đã nhập \"${sample.displayName}\": cắt lấy %.1fs đầu (file gốc %.1fs). Hãy bấm Nghe mẫu và nhập đúng lời nói của %.1fs này vào ô Lời thoại mẫu!",
+                            sample.durationSeconds,
+                            sample.originalDurationSeconds,
+                            sample.durationSeconds
+                        )
+                    } else {
+                        "Đã nhập & chuẩn hóa 16kHz Mono: \"${sample.displayName}\" (${String.format(java.util.Locale.US, "%.1fs", sample.durationSeconds)})"
+                    }
                 }.onFailure { err ->
                     val fullErr = OnnxModelAssetHelper.formatFullThrowable(err)
                     _lastAiVerbatimError.value = "Lỗi MediaCodec / giải mã tệp âm thanh:\n$fullErr"
@@ -846,6 +856,8 @@ class BookLibraryViewModel(application: Application) : AndroidViewModel(applicat
             _statusMessage.value = err
             return
         }
+        presetPreviewPreRenderJob?.cancel()
+        presetPreviewPreRenderJob = null
         _isExtractingVoiceClone.value = true
         _lastAiVerbatimError.value = null
         viewModelScope.launch {

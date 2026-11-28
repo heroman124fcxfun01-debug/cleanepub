@@ -75,6 +75,10 @@ class VieNeuGgufRunner(context: Context? = null) {
     var cachedPrefixLen: Int = 0
         private set
 
+    // Lock-free flag so clearKvCacheAndPrefix() NEVER blocks the Android Main UI thread
+    // waiting for an in-flight generateSpeechCodes() call to finish.
+    private val needsNativeKvClear = AtomicBoolean(false)
+
     @Volatile
     var statusSummary: String = "Chưa nạp model GGUF"
         private set
@@ -264,28 +268,35 @@ class VieNeuGgufRunner(context: Context? = null) {
     }
 
     /**
-     * Clears ALL stale KV-cache & voice prefix state (`prefix_len = 0`, `currentCachedVoiceId = null`)
-     * whenever switching to a different voice or starting a voice preview.
+     * Lock-free, non-blocking reset of stale KV-cache & voice prefix state (`prefix_len = 0`,
+     * `currentCachedVoiceId = null`).
+     *
+     * CRITICAL: Intentionally NOT `@Synchronized`! Calling `cancelActiveGeneration()` lock-free FIRST
+     * and deferring native KV-cache reset to the start of the next `generateSpeechCodes()` call
+     * ensures UI clicks ("Nghe thử", selecting a voice, saving settings) NEVER freeze or ANR the
+     * Android Main Thread even if a previous GGUF generation is still winding down.
      */
-    @Synchronized
     fun clearKvCacheAndPrefix(reason: String = "") {
         val prevVoice = currentCachedVoiceId
         cancelActiveGeneration()
-        loadedModel?.let { model ->
-            // Reflection-safe hook in case llama-kotlin-android exposes native clearKvCache/resetContext
-            for (methodName in listOf("clearKvCache", "clearContext", "resetContext", "kvCacheClear")) {
-                val method = runCatching { model.javaClass.getMethod(methodName) }.getOrNull()
-                if (method != null) {
-                    runCatching { method.invoke(model) }
-                    break
-                }
-            }
-        }
         cachedVoicePrefix = null
         currentCachedVoiceId = null
         cachedPrefixLen = 0
+        needsNativeKvClear.set(true)
         if (prevVoice != null || reason.isNotBlank()) {
-            Log.i(TAG, "Cleared KV-cache & voice prefix (prevVoice=$prevVoice, prefix_len=0, reason=$reason)")
+            Log.i(TAG, "Scheduled lock-free KV-cache & voice prefix reset (prevVoice=$prevVoice, prefix_len=0, reason=$reason)")
+        }
+    }
+
+    /** Runs native KV-cache reset hooks safely inside the synchronized GGUF worker lock. */
+    private fun flushPendingNativeKvClearLocked(model: LlamaModel) {
+        if (!needsNativeKvClear.getAndSet(false)) return
+        for (methodName in listOf("clearKvCache", "clearContext", "resetContext", "kvCacheClear")) {
+            val method = runCatching { model.javaClass.getMethod(methodName) }.getOrNull()
+            if (method != null) {
+                runCatching { method.invoke(model) }
+                break
+            }
         }
     }
 
@@ -394,8 +405,12 @@ class VieNeuGgufRunner(context: Context? = null) {
 
         val resolvedVoiceId = voiceId.trim().ifEmpty { computeVoiceContentKey(refPhones, refCodes) }
         if (currentCachedVoiceId != null && currentCachedVoiceId != resolvedVoiceId) {
-            clearKvCacheAndPrefix("voice_switch: $currentCachedVoiceId -> $resolvedVoiceId")
+            cachedVoicePrefix = null
+            currentCachedVoiceId = null
+            cachedPrefixLen = 0
+            needsNativeKvClear.set(true)
         }
+        flushPendingNativeKvClearLocked(model)
         val prefix = getOrBuildVoicePrefix(resolvedVoiceId, refPhones, refCodes)
 
         // Single unified prompt builder shared 100% identically by BOTH voices.json presets AND cloned voices
@@ -583,10 +598,13 @@ class VieNeuGgufRunner(context: Context? = null) {
         private const val FALLBACK_BATCH_SIZE_128 = 128
         private const val HELIO_G99_THREADS = 3
         private const val HELIO_G99_THREADS_BATCH = 3
-        const val DEFAULT_TEMPERATURE = 0.6f
-        const val DEFAULT_TOP_K = 40
-        const val DEFAULT_TOP_P = 0.85f
-        const val DEFAULT_REPEAT_PENALTY = 1.15f
+        // Official pnnbao97/VieNeu-TTS (0.3B GGUF / NeuTTS-Air) sampling parameters:
+        // CRITICAL: repeat_penalty MUST be 1.0f because llama.cpp penalizes tokens in the prompt
+        // context too — repeat_penalty > 1.0 actively suppresses the cloned speaker's ref_codes!
+        const val DEFAULT_TEMPERATURE = 1.0f
+        const val DEFAULT_TOP_K = 50
+        const val DEFAULT_TOP_P = 1.0f
+        const val DEFAULT_REPEAT_PENALTY = 1.0f
         const val SPEECH_START_TOKEN = "<|SPEECH_GENERATION_START|>"
         const val SPEECH_END_TOKEN = "<|SPEECH_GENERATION_END|>"
         private val WHITESPACE_REGEX = Regex("\\s+")

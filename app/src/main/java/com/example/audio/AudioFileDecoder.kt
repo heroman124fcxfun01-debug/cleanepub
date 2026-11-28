@@ -15,9 +15,12 @@ import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.min
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 data class ImportedVoiceSample(
@@ -25,7 +28,9 @@ data class ImportedVoiceSample(
     val samples: FloatArray,
     val sampleRate: Int,
     val durationSeconds: Float,
-    val previewWavPath: String
+    val previewWavPath: String,
+    val originalDurationSeconds: Float = durationSeconds,
+    val wasTrimmed: Boolean = false
 )
 
 /**
@@ -166,7 +171,9 @@ object AudioFileDecoder {
                 samples = cleanest16k,
                 sampleRate = safeTargetRate,
                 durationSeconds = finalDuration,
-                previewWavPath = previewWavFile.absolutePath
+                previewWavPath = previewWavFile.absolutePath,
+                originalDurationSeconds = rawDurationSec,
+                wasTrimmed = rawDurationSec > (CLONE_MAX_WINDOW_SECONDS + 0.35f)
             )
         }
     }
@@ -589,18 +596,52 @@ object AudioFileDecoder {
             return centered
         }
 
-        // Exact linear interpolation resampling: out[i] = sample at i * (sourceRate / targetRate)
+        // High-quality Blackman-windowed Sinc low-pass anti-aliasing resampler when downsampling
+        // (e.g. 44.1kHz / 48kHz MP3 -> 16kHz). Eliminates 8-24kHz spectral fold-back aliasing that
+        // otherwise corrupts DistilHuBERT + SQCodec FSQ reference tokens!
         val ratio = sourceRate.toDouble() / targetRate.toDouble()
         val outLen = (centered.size.toDouble() / ratio).toInt().coerceAtLeast(1)
         val out = FloatArray(outLen)
         val lastIdx = centered.lastIndex
 
-        for (i in 0 until outLen) {
-            val srcPos = i * ratio
-            val idx0 = floor(srcPos).toInt().coerceIn(0, lastIdx)
-            val idx1 = min(idx0 + 1, lastIdx)
-            val frac = (srcPos - idx0).toFloat()
-            out[i] = (centered[idx0] * (1f - frac) + centered[idx1] * frac).coerceIn(-1f, 1f)
+        if (sourceRate > targetRate) {
+            // Band-limited sinc cutoff at 92% of target Nyquist (7.36 kHz for 16 kHz target)
+            val cutoff = (0.92 / ratio).coerceIn(0.05, 0.98)
+            val halfWidth = (12.0 * ratio).toInt().coerceIn(12, 48)
+            val twoPi = 2.0 * PI
+            val fourPi = 4.0 * PI
+            val invTwoHalfWidth = 1.0 / (2.0 * halfWidth)
+
+            for (i in 0 until outLen) {
+                val center = i * ratio
+                val startIdx = (floor(center).toInt() - halfWidth).coerceAtLeast(0)
+                val endIdx = (floor(center).toInt() + halfWidth).coerceAtMost(lastIdx)
+                var acc = 0.0
+                var weightSum = 0.0
+                for (j in startIdx..endIdx) {
+                    val d = j - center
+                    val norm = (d + halfWidth) * invTwoHalfWidth
+                    if (norm < 0.0 || norm > 1.0) continue
+                    // Blackman window
+                    val w = 0.42 - 0.5 * cos(twoPi * norm) + 0.08 * cos(fourPi * norm)
+                    val x = PI * cutoff * d
+                    val sinc = if (abs(x) < 1e-9) 1.0 else sin(x) / x
+                    val coeff = w * sinc * cutoff
+                    acc += centered[j].toDouble() * coeff
+                    weightSum += coeff
+                }
+                val sample = if (abs(weightSum) > 1e-9) (acc / weightSum).toFloat() else centered[floor(center).toInt().coerceIn(0, lastIdx)]
+                out[i] = sample.coerceIn(-1f, 1f)
+            }
+        } else {
+            // Upsampling (e.g. 8kHz/12kHz -> 16kHz): clean linear interpolation
+            for (i in 0 until outLen) {
+                val srcPos = i * ratio
+                val idx0 = floor(srcPos).toInt().coerceIn(0, lastIdx)
+                val idx1 = min(idx0 + 1, lastIdx)
+                val frac = (srcPos - idx0).toFloat()
+                out[i] = (centered[idx0] * (1f - frac) + centered[idx1] * frac).coerceIn(-1f, 1f)
+            }
         }
         return out
     }

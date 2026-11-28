@@ -723,7 +723,7 @@ class OfflineOnnxVoiceEngine(context: Context) {
                 onSuccess = { waveform24k ->
                     val durSec = waveform24k.size.toFloat() / NeuCodecOnnxEngine.DECODER_SAMPLE_RATE.toFloat()
                     val trace = buildString {
-                        appendLine("Pipeline: Official pnnbao97/VieNeu-TTS GGUF (temp=0.6, top_k=40, top_p=0.85, repeat=1.15, threads=3) + NeuCodec ONNX (24kHz)")
+                        appendLine("Pipeline: Official pnnbao97/VieNeu-TTS GGUF (temp=1.0, top_k=50, top_p=1.0, repeat=1.0, threads=3) + NeuCodec ONNX (24kHz)")
                         appendLine("Voice: $voiceSourceLabel")
                         appendLine("RefText: ${resolvedRefText.take(120)}")
                         appendLine("refPhones: $refPhones")

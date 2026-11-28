@@ -687,6 +687,22 @@ fun StudioVoiceCloneSection(
                         }
                     }
                 }
+
+                if (importedSample?.wasTrimmed == true) {
+                    Text(
+                        text = String.format(
+                            Locale.US,
+                            "⚠ File gốc dài %.1fs đã được cắt lấy đúng %.1fs đầu. Hãy bấm \"Nghe thử\" ở trên và chỉ nhập đúng lời thoại của %.1fs này vào ô Lời thoại mẫu để giọng nhân bản giống thật nhất!",
+                            importedSample!!.originalDurationSeconds,
+                            importedSample!!.durationSeconds,
+                            importedSample!!.durationSeconds
+                        ),
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = IosOrange
+                    )
+                }
             }
 
             // 2.5. Lời thoại mẫu (ref_text) khớp với đoạn ghi âm 3–8 giây để đồng bộ cùng ref_codes từ neucodec_encoder.onnx

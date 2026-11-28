@@ -40,9 +40,11 @@ import com.example.data.ReaderVoiceProfile
 import com.example.data.TtsEngineType
 import android.os.Process
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -1529,40 +1531,95 @@ class BookAudioPlaybackService : Service() {
                 // Bắt buộc xóa sạch toàn bộ KV-Cache cũ mỗi khi nghe thử giọng khác hoặc bắt đầu nghe thử mới!
                 onnxEngine.clearVoiceKvCache("preview_voice_$resolvedCacheId")
 
-                val synthResult = onnxEngine.synthesizeMultiSentencePreviewDetailed(
-                    passage = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
-                    speakerEmbedding = embedding,
-                    speed = 1.0f,
-                    referenceCodes = refCodes,
-                    referenceText = refText,
-                    matchedPresetId = matchedPresetId,
-                    voiceId = resolvedCacheId
-                )
+                val previewSentences = VietnameseTtsTextNormalizer.splitIntoSmartSentences(
+                    rawText = VoicePreviewCache.INSTANT_PREVIEW_SENTENCE,
+                    maxSentenceLength = 140
+                ).ifEmpty { listOf(VoicePreviewCache.INSTANT_PREVIEW_SENTENCE) }
 
-                val synthesized = synthResult.audio
-                if (synthesized != null && synthesized.pcmFloat.isNotEmpty() && activePreviewSessionId == sessionId) {
-                    // Lưu cache `preview_<voice_id>.wav` để mọi lần bấm "Nghe thử" sau phát ngay trong <50ms!
-                    val savedWav = VoicePreviewCache.savePreviewPcm(
-                        context = applicationContext,
-                        voiceId = resolvedCacheId,
-                        samples = synthesized.pcmFloat,
-                        sampleRate = synthesized.sampleRate
-                    )
-                    val playedFromWav = if (savedWav != null) {
-                        onnxPlayer.playWavFileBlocking(savedWav)
+                // Stream từng câu: tổng hợp Câu 1 (~2-3s) rồi PHÁT NGAY trong lúc tổng hợp song song Câu 2!
+                val synthesizedSegments = ArrayList<FloatArray>(previewSentences.size)
+                var outSampleRate = com.example.audio.NeuCodecOnnxEngine.DECODER_SAMPLE_RATE
+                var firstError: String? = null
+                var nextSynthDeferred: Deferred<OnnxSynthesisResult>? = null
+
+                for (idx in previewSentences.indices) {
+                    if (activePreviewSessionId != sessionId) break
+
+                    val currentRes = if (nextSynthDeferred != null) {
+                        val awaited = nextSynthDeferred.await()
+                        nextSynthDeferred = null
+                        awaited
                     } else {
-                        false
-                    }
-                    if (!playedFromWav && activePreviewSessionId == sessionId) {
-                        onnxPlayer.playBlocking(
-                            samples = synthesized.pcmFloat,
-                            sampleRate = synthesized.sampleRate,
+                        onnxEngine.synthesizeSentenceDetailed(
+                            sentence = previewSentences[idx],
+                            speakerEmbedding = embedding,
                             speed = 1.0f,
-                            pitch = 1.0f
+                            referenceCodes = refCodes,
+                            referenceText = refText,
+                            matchedPresetId = matchedPresetId,
+                            voiceId = resolvedCacheId
                         )
                     }
-                } else if (activePreviewSessionId == sessionId) {
-                    val errDetail = synthResult.errorMessage ?: "Không thể sinh sóng âm 24kHz từ GGUF + NeuCodec (PCM rỗng)."
+
+                    if (activePreviewSessionId != sessionId) break
+                    val audio = currentRes.audio
+                    if (audio == null || audio.pcmFloat.isEmpty()) {
+                        firstError = currentRes.errorMessage
+                            ?: "Không thể sinh sóng âm 24kHz cho câu ${idx + 1}/${previewSentences.size}."
+                        break
+                    }
+                    outSampleRate = audio.sampleRate
+                    synthesizedSegments.add(audio.pcmFloat)
+
+                    // Khởi chạy tổng hợp song song câu kế tiếp NGAY TRƯỚC KHI phát câu hiện tại!
+                    val nextIdx = idx + 1
+                    if (nextIdx < previewSentences.size && activePreviewSessionId == sessionId) {
+                        nextSynthDeferred = async(Dispatchers.IO) {
+                            onnxEngine.synthesizeSentenceDetailed(
+                                sentence = previewSentences[nextIdx],
+                                speakerEmbedding = embedding,
+                                speed = 1.0f,
+                                referenceCodes = refCodes,
+                                referenceText = refText,
+                                matchedPresetId = matchedPresetId,
+                                voiceId = resolvedCacheId
+                            )
+                        }
+                    }
+
+                    onnxPlayer.playBlocking(
+                        samples = audio.pcmFloat,
+                        sampleRate = audio.sampleRate,
+                        speed = 1.0f,
+                        pitch = 1.0f
+                    )
+                }
+                nextSynthDeferred?.cancel()
+
+                if (synthesizedSegments.size == previewSentences.size && activePreviewSessionId == sessionId) {
+                    // Ghép trọn đoạn 35 chữ và lưu cache `preview_<voice_id>.wav` để lần sau phát ngay <50ms!
+                    val pauseSamples = (outSampleRate * 220) / 1000
+                    var totalLen = 0
+                    for (i in synthesizedSegments.indices) {
+                        totalLen += synthesizedSegments[i].size
+                        if (i < synthesizedSegments.lastIndex) totalLen += pauseSamples
+                    }
+                    val combined = FloatArray(totalLen)
+                    var cursor = 0
+                    for (i in synthesizedSegments.indices) {
+                        val seg = synthesizedSegments[i]
+                        System.arraycopy(seg, 0, combined, cursor, seg.size)
+                        cursor += seg.size
+                        if (i < synthesizedSegments.lastIndex) cursor += pauseSamples
+                    }
+                    VoicePreviewCache.savePreviewPcm(
+                        context = applicationContext,
+                        voiceId = resolvedCacheId,
+                        samples = combined,
+                        sampleRate = outSampleRate
+                    )
+                } else if (synthesizedSegments.isEmpty() && activePreviewSessionId == sessionId) {
+                    val errDetail = firstError ?: "Không thể sinh sóng âm 24kHz từ GGUF + NeuCodec (PCM rỗng)."
                     mainHandler.post {
                         lastPlaybackNotice = "Lỗi tổng hợp VieNeu nghe thử: $errDetail"
                         publishState()

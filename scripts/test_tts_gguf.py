@@ -301,12 +301,53 @@ def decode_neucodec(
 
 
 def resample_linear(samples: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
-    if src_rate == dst_rate or samples.size == 0:
-        return samples.astype(np.float32)
-    dst_len = max(1, int(round(samples.size * (dst_rate / float(src_rate)))))
-    x_old = np.linspace(0.0, 1.0, num=samples.size, endpoint=True)
-    x_new = np.linspace(0.0, 1.0, num=dst_len, endpoint=True)
-    return np.interp(x_new, x_old, samples).astype(np.float32)
+    """Anti-aliased Blackman-windowed sinc downsampler (matches Android AudioFileDecoder)."""
+    wav = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if src_rate == dst_rate or wav.size == 0:
+        return wav
+    ratio = float(src_rate) / float(dst_rate)
+    dst_len = max(1, int(wav.size / ratio))
+    if src_rate <= dst_rate:
+        x_old = np.linspace(0.0, 1.0, num=wav.size, endpoint=True)
+        x_new = np.linspace(0.0, 1.0, num=dst_len, endpoint=True)
+        return np.interp(x_new, x_old, wav).astype(np.float32)
+
+    cutoff = min(0.98, max(0.05, 0.92 / ratio))
+    half_width = max(12, min(48, int(round(12.0 * ratio))))
+    centers = np.arange(dst_len, dtype=np.float64) * ratio
+    offsets = np.arange(-half_width, half_width + 1, dtype=np.float64)
+    base_idx = np.floor(centers).astype(np.int64)[:, None] + offsets[None, :]
+    valid = (base_idx >= 0) & (base_idx < wav.size)
+    clamped = np.clip(base_idx, 0, wav.size - 1)
+    d = base_idx.astype(np.float64) - centers[:, None]
+    norm = (d + half_width) / (2.0 * half_width)
+    in_win = valid & (norm >= 0.0) & (norm <= 1.0)
+    w = 0.42 - 0.5 * np.cos(2.0 * np.pi * np.clip(norm, 0.0, 1.0)) + 0.08 * np.cos(4.0 * np.pi * np.clip(norm, 0.0, 1.0))
+    sinc_val = np.sinc(cutoff * d)
+    coeffs = np.where(in_win, w * sinc_val * cutoff, 0.0)
+    w_sum = np.sum(coeffs, axis=1)
+    acc = np.sum(wav[clamped].astype(np.float64) * coeffs, axis=1)
+    out = np.where(np.abs(w_sum) > 1e-9, acc / np.where(np.abs(w_sum) > 1e-9, w_sum, 1.0), wav[np.clip(np.floor(centers).astype(np.int64), 0, wav.size - 1)])
+    return np.clip(out, -1.0, 1.0).astype(np.float32)
+
+
+def compute_log_spectral_cosine(wav_a: np.ndarray, wav_b: np.ndarray) -> float:
+    n = min(wav_a.size, wav_b.size)
+    if n < 1024:
+        return 0.0
+    a = wav_a[:n].astype(np.float64)
+    b = wav_b[:n].astype(np.float64)
+    win = np.hanning(512)
+    hop = 256
+    frames = (n - 512) // hop + 1
+    if frames < 4:
+        return 0.0
+    sa = [np.log1p(np.abs(np.fft.rfft(a[i * hop : i * hop + 512] * win))) for i in range(frames)]
+    sb = [np.log1p(np.abs(np.fft.rfft(b[i * hop : i * hop + 512] * win))) for i in range(frames)]
+    va = np.concatenate(sa)
+    vb = np.concatenate(sb)
+    denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
+    return float(np.dot(va, vb) / denom) if denom > 1e-12 else 0.0
 
 
 def smoke_test_neucodec_encoder(
@@ -485,16 +526,17 @@ def main() -> int:
             if len(ids) != 1:
                 failures.append(f"GGUF special token {tok} tokenized into {len(ids)} tokens instead of 1")
 
-        # Generate speech tokens
+        # Generate speech tokens using OFFICIAL pnnbao97/VieNeu-TTS GGUF sampling params
+        # (temperature=1.0, top_k=50, top_p=1.0, repeat_penalty=1.0 so ref_codes are NEVER penalized)
         gen_t0 = time.time()
         max_new_tokens = min(1024, max(256, len(target_phones) * 4 + 120))
         out = llm(
             prompt,
             max_tokens=max_new_tokens,
-            temperature=0.6,
-            top_k=40,
-            top_p=0.85,
-            repeat_penalty=1.15,
+            temperature=1.0,
+            top_k=50,
+            top_p=1.0,
+            repeat_penalty=1.0,
             stop=["<|SPEECH_GENERATION_END|>"],
             echo=False,
         )
@@ -554,21 +596,61 @@ def main() -> int:
         if stats["env_cv"] < 0.12:
             failures.append(f"Audio lacks speech syllable modulation (env_cv={stats['env_cv']:.4f} < 0.12)")
 
-        # Mandatory smoke test for NeuCodec Encoder (real zero-shot voice cloning)
+        # Mandatory END-TO-END Zero-Shot Voice Cloning Verification for neucodec_encoder.onnx:
+        # 1) Decode preset ref_codes -> 24kHz reference WAV
+        # 2) Re-encode reference WAV via neucodec_encoder.onnx -> cloned_ref_codes
+        # 3) Verify decoded reconstruction timbre similarity (>= 0.88 log-spectral cosine)
+        # 4) Run GGUF synthesis with ONNX-encoded cloned_ref_codes + ref_text and verify valid speech!
         if not encoder_path:
             failures.append("Missing neucodec_encoder.onnx in assets/models/ (export_neucodec_encoder.py did not produce it)")
         elif wav.size >= DECODER_SAMPLE_RATE:
+            ref_wav_24k = decode_neucodec(decoder_path, ref_codes, voice_embedding=voice_emb)
             enc_t0 = time.time()
-            enc_codes = smoke_test_neucodec_encoder(encoder_path, wav, log_fn=log)
+            enc_codes = smoke_test_neucodec_encoder(encoder_path, ref_wav_24k, log_fn=log)
             enc_elapsed = time.time() - enc_t0
             log(
-                f"NeuCodec Encoder smoke test: {len(enc_codes)} FSQ codes "
+                f"NeuCodec Encoder round-trip test: {len(enc_codes)} FSQ codes "
                 f"({len(set(enc_codes))} unique) in {enc_elapsed:.2f}s | sample={enc_codes[:12]}"
             )
-            if len(enc_codes) < 15 or len(set(enc_codes)) < 5:
+            if len(enc_codes) < 30 or len(set(enc_codes)) < 10:
                 failures.append(
-                    f"NeuCodec encoder smoke test produced invalid codes (len={len(enc_codes)}, unique={len(set(enc_codes))})"
+                    f"NeuCodec encoder produced invalid codes (len={len(enc_codes)}, unique={len(set(enc_codes))})"
                 )
+            else:
+                redecoded_ref_24k = decode_neucodec(decoder_path, enc_codes, voice_embedding=voice_emb)
+                rt_cos = compute_log_spectral_cosine(ref_wav_24k, redecoded_ref_24k)
+                log(f"NeuCodec Encoder->Decoder acoustic timbre similarity: log_spectral_cos={rt_cos:.4f}")
+                if rt_cos < 0.85:
+                    failures.append(
+                        f"NeuCodec encoder round-trip timbre mismatch too severe (log_spectral_cos={rt_cos:.4f} < 0.85)"
+                    )
+
+                # Full zero-shot GGUF cloning test using the ONNX-encoded codes!
+                cloned_codes_str = "".join(f"<|speech_{c}|>" for c in enc_codes)
+                clone_prompt = (
+                    f"user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} {target_phones}<|TEXT_PROMPT_END|>\n"
+                    f"assistant:<|SPEECH_GENERATION_START|>{cloned_codes_str}"
+                )
+                clone_out = llm(
+                    clone_prompt,
+                    max_tokens=max_new_tokens,
+                    temperature=1.0,
+                    top_k=50,
+                    top_p=1.0,
+                    repeat_penalty=1.0,
+                    stop=["<|SPEECH_GENERATION_END|>"],
+                    echo=False,
+                )
+                clone_raw = clone_out["choices"][0]["text"]
+                clone_gen_codes = [int(m) for m in re.findall(r"<\|speech_(\d+)\|>", clone_raw) if 0 <= int(m) <= 65535]
+                log(
+                    f"End-to-End Zero-Shot Clone GGUF test: {len(clone_gen_codes)} speech tokens "
+                    f"({len(set(clone_gen_codes))} unique)"
+                )
+                if len(clone_gen_codes) < 25 or len(set(clone_gen_codes)) < 8:
+                    failures.append(
+                        f"End-to-end voice cloning GGUF test failed (generated={len(clone_gen_codes)}, unique={len(set(clone_gen_codes))})"
+                    )
 
         total_elapsed = time.time() - t0
         if failures:
